@@ -1,6 +1,6 @@
 # Code Review: `family-scheduling` vs. Implementation Plan
 
-_Initial review: 2026-03-03 | Updated: 2026-03-03 (post-fix pass)_
+_Initial review: 2026-03-03 | Updated: 2026-03-04 (source model refactor pass)_
 
 ---
 
@@ -17,17 +17,25 @@ _Initial review: 2026-03-03 | Updated: 2026-03-03 (post-fix pass)_
 | 7 | `implementation-plan.md` was a stub | Fleshed out; no longer a placeholder |
 | 8 | Auth guard test coverage | Extended in `index.spec.js` |
 | 9 | Ingest safety on upstream failure | Ingest now fetches/parses first and only mutates published state inside a rollback-safe transaction boundary when available; failed fetches preserve prior published state |
+| 10 | Bucket-level source model | Refactored to one real source per `sources` row with per-source URL, icon, prefix, inclusion flags, and CRUD API support |
+| 11 | Output rendering contract drift | Feed decoration now explicit via `presentation.js`; child feeds render icon-only, family feed renders prefix + icon + title |
+| 12 | Source CRUD API missing | `POST /api/sources`, `PATCH /api/sources/:id`, `DELETE /api/sources/:id` added with input validation and 400 errors |
+| 13 | Source-config propagation | `syncSourceConfig()` propagates icon/prefix changes and re-derives output rules for existing instances on update |
+| 14 | `syncSourceConfig` transaction ordering | Confirmed correct — `source_deleted = 0` write precedes `listSourceInstances` read within the same transaction |
+| 15 | Override actor role provenance | Override records now store the verified role from `getRoleFromRequest()` rather than the raw request header |
+| 16 | Source disable operational consistency | `disableSource()` now marks `source_events.is_deleted_upstream = 1` so operational history matches published state |
 
 **Review corrections (accepted):**
 - Feed token was already strict equality against `env.TOKEN`, not just non-empty — the concern was invalid.
 - `makeId()` randomness did not affect `identity_key`, which was already deterministic. `stableId()` added for derived records as a clarifying convention.
+- `ingest safety` note on staged-before-mutate language updated: the flow provides meaningful protection against the failure mode but does not provide atomic rollback guarantees where `exec()` is unavailable.
 
 ---
 
 ## Still Open
 
 ### 🔴 Real Google sign-in not implemented
-Current state is production-safe for the protected API surface because admin routes deny by default, but the production admin APIs are unusable until OAuth is wired. This is the next hard blocker after ingest safety for any real deployment.
+Current state is production-safe — admin routes deny by default. But the admin APIs are unusable in production until OAuth is wired.
 
 **Required:** Google OAuth flow, token verification, role mapping from Google identity to `admin`/`editor`.
 
@@ -35,70 +43,19 @@ Current state is production-safe for the protected API surface because admin rou
 `google_targets` and `google_event_links` tables are defined. No Google API client or sync logic exists. Per the plan this is output-only in v1 — write path only, no read-back.
 
 ### 🟡 Prune job scaffolded but not executing
-Retention delete logic is still pending. `PRUNE_AFTER_DAYS=30` is configured but the actual `DELETE` statements are not in place. `source_snapshots` and `source_events` will grow unbounded until this lands.
+`PRUNE_AFTER_DAYS=30` is configured but the actual `DELETE` statements are not in place. `source_snapshots` and `source_events` will grow unbounded until this lands.
 
 ### 🟡 Recurrence remap policy unresolved
-Series master representation, per-instance override attachment to remapped upstream instances, and upstream rewrite detection are not fully designed or enforced. This is a pre-Phase-3 design prereq — the schema supports it but the logic does not exist.
+Series master representation, per-instance override attachment to remapped upstream instances, and upstream rewrite detection are not fully designed or enforced. Pre-Phase-3 design prereq — schema supports it, logic does not exist.
 
 ### 🟢 Test coverage still shallow
-Auth guard tests were added. The identity/deduplication, recurrence expansion, override derivation, and real ingest path remain largely untested beyond the routing layer. The `FakeDb` mock does not enforce real D1 SQL semantics, so current tests should be treated as worker-shape verification rather than persistence correctness.
+Suite covers auth guard, source CRUD, feed rendering, and per-source ingest shape. Identity/deduplication, recurrence expansion, override derivation, and real D1 SQL semantics remain only partially covered. `FakeDb` means the suite is strong worker-shape verification, not full persistence correctness.
 
 ---
 
 ## Recommended Next Step
 
-Recommended sequence:
-
-1. **Implement Google sign-in next.**
-   - It is still the gating dependency for production use of the protected admin APIs.
-   - It is self-contained enough to implement without blocking on Google sync or recurrence remap work.
-
+1. **Implement Google sign-in** — gating dependency for any production use of the admin APIs.
 2. **Then choose between Google outbound sync and prune execution.**
    - Google sync adds end-user value.
-   - Prune execution closes the main remaining retention/operations gap.
-
-Google sign-in is now the recommended next bounded feature.
-
----
-
-## Post-Review Update: Ingest Safety Remediation
-
-After the updated review, ingest safety was implemented to address the most serious remaining runtime correctness issue.
-
-### What changed
-
-- `ingestSource()` no longer marks existing source records as deleted before upstream fetches succeed.
-- Upstream URLs are now fetched and parsed first.
-- If any fetch fails, the ingest run throws before the currently published state is mutated.
-- Published-state mutation now happens only after staging succeeds.
-- Where the D1 binding supports `exec()`, the publish step runs inside a transaction boundary with rollback on failure.
-- Where transactional support is not available, the code still uses the safer staged-before-mutate flow so a simple statement reorder is not mistaken for a full safety fix.
-
-### Why this matters
-
-Before this change, a temporary upstream failure could remove a source's events from generated feeds even though the last known good state should have remained visible.
-
-The fix makes the intended behavior explicit:
-
-- fetch/parse failure should preserve prior published state
-- successful staging is required before promotion into the active published view
-- rollback-safe publish behavior is the requirement, not merely “do the delete later”
-
-### Effect on priority
-
-This remediation changes the next-step priority order.
-
-Before the fix:
-
-- ingest safety was the highest-severity remaining blocker
-- Google sign-in was important, but not the first issue to address
-
-After the fix:
-
-- Google sign-in is now the best next bounded feature
-- the remaining major gaps are auth, Google outbound sync, prune execution, and recurrence remap policy
-
-### Files updated for this remediation
-
-- `src/lib/repository.js`
-- `docs/code-review.md`
+   - Prune closes the main remaining retention/operations gap.

@@ -1,4 +1,4 @@
-import { requireRole } from './lib/auth.js';
+import { getRoleFromRequest, requireRole } from './lib/auth.js';
 import { TARGETS } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
 import { json, text } from './lib/responses.js';
@@ -121,6 +121,16 @@ function renderAdminShell() {
 </html>`;
 }
 
+function asBadRequest(error) {
+  return json(
+    {
+      error: 'Bad request',
+      message: error instanceof Error ? error.message : String(error),
+    },
+    { status: 400 }
+  );
+}
+
 export default {
   async fetch(request, env) {
     try {
@@ -150,28 +160,40 @@ export default {
         });
       }
 
-      if (pathname === '/api/feed-contracts') {
+      if (pathname === '/api/feed-contracts' && request.method === 'GET') {
         const authError = requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
         return json(await repo.getFeedContract());
       }
 
-      if (pathname === '/api/sources') {
+      if (pathname === '/api/sources' && request.method === 'GET') {
         const authError = requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
         return json({ sources: await repo.listSources() });
       }
 
-      if (pathname === '/api/jobs') {
+      if (pathname === '/api/sources' && request.method === 'POST') {
+        const authError = requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        try {
+          const repo = await createRepository(env);
+          const payload = await request.json();
+          return json({ source: await repo.createSource(payload) }, { status: 201 });
+        } catch (error) {
+          return asBadRequest(error);
+        }
+      }
+
+      if (pathname === '/api/jobs' && request.method === 'GET') {
         const authError = requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
         return json({ jobs: await repo.listJobs() });
       }
 
-      if (pathname === '/api/targets') {
+      if (pathname === '/api/targets' && request.method === 'GET') {
         const authError = requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
@@ -181,7 +203,7 @@ export default {
         });
       }
 
-      if (pathname === '/api/events') {
+      if (pathname === '/api/events' && request.method === 'GET') {
         const authError = requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
@@ -221,7 +243,7 @@ export default {
           eventInstanceId: payload.eventInstanceId || null,
           overrideType: payload.overrideType,
           payload: payload.payload || {},
-          actorRole: request.headers.get('x-user-role') || 'editor',
+          actorRole: getRoleFromRequest(request, env) || 'editor',
         });
         return json(event, { status: 201 });
       }
@@ -247,6 +269,31 @@ export default {
           scopeId: sourceId,
         });
         return json({ job }, { status: 202 });
+      }
+
+      if (pathname.startsWith('/api/sources/') && request.method === 'PATCH') {
+        const authError = requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        try {
+          const sourceId = pathname.split('/').filter(Boolean)[2];
+          const repo = await createRepository(env);
+          const payload = await request.json();
+          const source = await repo.updateSource(sourceId, payload);
+          if (!source) return json({ error: 'Not found' }, { status: 404 });
+          return json({ source });
+        } catch (error) {
+          return asBadRequest(error);
+        }
+      }
+
+      if (pathname.startsWith('/api/sources/') && request.method === 'DELETE') {
+        const authError = requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        const sourceId = pathname.split('/').filter(Boolean)[2];
+        const repo = await createRepository(env);
+        const source = await repo.disableSource(sourceId);
+        if (!source) return json({ error: 'Not found' }, { status: 404 });
+        return json({ source });
       }
 
       if (pathname === '/api/rebuild/full' && request.method === 'POST') {
