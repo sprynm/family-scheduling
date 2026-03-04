@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "family-scheduling",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-06",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "triggers": {
+    "crons": ["*/30 * * * *", "17 3 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "APP_DB",
+      "database_name": "family-scheduling",
+      "database_id": "local-family-scheduling",
+      "preview_database_id": "local-family-scheduling"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "SNAPSHOTS",
+      "bucket_name": "family-scheduling-snapshots",
+      "preview_bucket_name": "family-scheduling-snapshots-preview"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS_QUEUE",
+        "queue": "family-scheduling-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "family-scheduling-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5
+      }
+    ]
+  },
+  "vars": {
+    "CALENDAR_NAME_FAMILY": "Family Combined",
+    "CALENDAR_NAME_GRAYSON": "Grayson Combined",
+    "CALENDAR_NAME_NAOMI": "Naomi Combined",
+    "DEFAULT_LOOKBACK_DAYS": "7",
+    "RECURRENCE_HORIZON_DAYS": "180",
+    "PRUNE_AFTER_DAYS": "30",
+    "ALLOW_DEV_ROLE_HEADER": "false",
+    "SEED_SAMPLE_DATA": "false"
+  },
+  "dev": {
+    "ip": "127.0.0.1",
+    "port": 8788
+  }
+}
