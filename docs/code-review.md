@@ -1,61 +1,120 @@
-# Code Review: `family-scheduling` vs. Implementation Plan
+# Code Review Status
 
-_Initial review: 2026-03-03 | Updated: 2026-03-04 (source model refactor pass)_
-
----
+_Updated: 2026-03-04_
 
 ## Resolved
 
-| # | Item | Notes |
-|---|---|---|
-| 1 | Auth header guard | `x-user-role` now requires `ALLOW_DEV_ROLE_HEADER=true`; production denies without real auth |
-| 2 | Queue consumer missing | Consumer and scheduled handlers added; `wrangler.jsonc` updated |
-| 3 | Source ingestion unimplemented | Basic ingest path added: fetch → snapshot → parse → materialize → derive output rules |
-| 4 | Cron trigger not configured | Added to `wrangler.jsonc` |
-| 5 | `seedSampleData()` on every request | Now gated behind `SEED_SAMPLE_DATA=true` |
-| 6 | `lookback` not passed through | Passed from route handler through to `generateFeed()` |
-| 7 | `implementation-plan.md` was a stub | Fleshed out; no longer a placeholder |
-| 8 | Auth guard test coverage | Extended in `index.spec.js` |
-| 9 | Ingest safety on upstream failure | Ingest now fetches/parses first and only mutates published state inside a rollback-safe transaction boundary when available; failed fetches preserve prior published state |
-| 10 | Bucket-level source model | Refactored to one real source per `sources` row with per-source URL, icon, prefix, inclusion flags, and CRUD API support |
-| 11 | Output rendering contract drift | Feed decoration now explicit via `presentation.js`; child feeds render icon-only, family feed renders prefix + icon + title |
-| 12 | Source CRUD API missing | `POST /api/sources`, `PATCH /api/sources/:id`, `DELETE /api/sources/:id` added with input validation and 400 errors |
-| 13 | Source-config propagation | `syncSourceConfig()` propagates icon/prefix changes and re-derives output rules for existing instances on update |
-| 14 | `syncSourceConfig` transaction ordering | Confirmed correct — `source_deleted = 0` write precedes `listSourceInstances` read within the same transaction |
-| 15 | Override actor role provenance | Override records now store the verified role from `getRoleFromRequest()` rather than the raw request header |
-| 16 | Source disable operational consistency | `disableSource()` now marks `source_events.is_deleted_upstream = 1` so operational history matches published state |
-
-**Review corrections (accepted):**
-- Feed token was already strict equality against `env.TOKEN`, not just non-empty — the concern was invalid.
-- `makeId()` randomness did not affect `identity_key`, which was already deterministic. `stableId()` added for derived records as a clarifying convention.
-- `ingest safety` note on staged-before-mutate language updated: the flow provides meaningful protection against the failure mode but does not provide atomic rollback guarantees where `exec()` is unavailable.
-
----
+- Auth header guard: `x-user-role` only works when `ALLOW_DEV_ROLE_HEADER=true`.
+- Queue consumer and cron wiring exist.
+- Ingest exists and is rollback-safer than the original destructive refresh path.
+- `lookback` is passed through to feed generation.
+- Sample seeding is gated behind `SEED_SAMPLE_DATA=true`.
+- Feed rendering matches the legacy contract:
+  - child feeds render icon + title
+  - `family.ics` renders prefix + icon + title
+- Source model is refactored to one real upstream calendar per `sources` row.
+- Source CRUD exists:
+  - `POST /api/sources`
+  - `PATCH /api/sources/:id`
+  - `DELETE /api/sources/:id`
+- Source config changes propagate into derived output state.
+- Override records now store the verified actor role rather than the raw header value.
+- Disabling a source now also marks `source_events.is_deleted_upstream = 1`.
 
 ## Still Open
 
-### 🔴 Real Google sign-in not implemented
-Current state is production-safe — admin routes deny by default. But the admin APIs are unusable in production until OAuth is wired.
+### Production admin auth
 
-**Required:** Google OAuth flow, token verification, role mapping from Google identity to `admin`/`editor`.
+Admin routes deny by default, which is safe, but production admin use is still blocked.
 
-### 🟡 Google Calendar outbound sync not implemented
-`google_targets` and `google_event_links` tables are defined. No Google API client or sync logic exists. Per the plan this is output-only in v1 — write path only, no read-back.
+Settled direction:
 
-### 🟡 Prune job scaffolded but not executing
-`PRUNE_AFTER_DAYS=30` is configured but the actual `DELETE` statements are not in place. `source_snapshots` and `source_events` will grow unbounded until this lands.
+- use Cloudflare Access
+- use Google as the identity provider
+- validate Access identity in the Worker
+- map verified email to `admin` / `editor`
 
-### 🟡 Recurrence remap policy unresolved
-Series master representation, per-instance override attachment to remapped upstream instances, and upstream rewrite detection are not fully designed or enforced. Pre-Phase-3 design prereq — schema supports it, logic does not exist.
+### Google Calendar outbound sync
 
-### 🟢 Test coverage still shallow
-Suite covers auth guard, source CRUD, feed rendering, and per-source ingest shape. Identity/deduplication, recurrence expansion, override derivation, and real D1 SQL semantics remain only partially covered. `FakeDb` means the suite is strong worker-shape verification, not full persistence correctness.
+Schema exists, but no Google Calendar write path is implemented yet.
 
----
+### Prune execution
+
+Cron and queue scaffolding exist, but retention deletes are not implemented yet.
+
+### Recurrence exceptions and remap policy
+
+Recurring-event exception handling and ambiguous series rewrite behavior are still the weakest part of the design/runtime.
+
+### Test depth
+
+Tests now cover:
+
+- auth guard behavior
+- source CRUD
+- feed rendering contract
+- per-source ingest shape
+
+They still do not prove full D1 correctness or robust recurrence behavior.
 
 ## Recommended Next Step
 
-1. **Implement Google sign-in** — gating dependency for any production use of the admin APIs.
-2. **Then choose between Google outbound sync and prune execution.**
-   - Google sync adds end-user value.
-   - Prune closes the main remaining retention/operations gap.
+1. Implement Cloudflare Access-backed Google auth.
+2. Then choose between Google outbound sync and prune execution.
+3. After that, harden recurrence exceptions/remap behavior.
+
+## Claude Review Brief
+
+Use this as review context for the current refactor.
+
+### Architectural shift
+
+The app no longer treats one `sources` row as a bucket of URLs.
+
+It now treats one `sources` row as one actual calendar source with:
+
+- URL
+- owner/audience
+- category
+- icon
+- prefix
+- output inclusion flags
+- display metadata
+
+### Main code changes
+
+#### `src/lib/repository.js`
+
+- source CRUD added
+- per-source URL ingest added
+- legacy env buckets only remain as bootstrap/migration input
+- source config changes re-derive output rules
+- ingest safety preserved
+
+#### `src/index.js`
+
+- real source-management API routes added
+- bad input returns `400`
+
+#### `src/lib/presentation.js`
+
+- output-specific decoration logic extracted
+
+#### `migrations/0001_init.sql`
+
+- source metadata expanded
+- canonical event decoration fields added
+
+### Preserved behavior
+
+- public feed contracts remain `family`, `grayson`, `naomi`
+- child feeds stay icon-only
+- `family.ics` adds child prefix decoration
+- failed ingest should not wipe previously published state
+
+### Remaining review focus
+
+- Access JWT validation and role mapping implementation
+- recurrence exception handling
+- whether some source config changes should trigger re-ingest instead of only output re-derivation
+- real D1/integration coverage beyond the fake DB

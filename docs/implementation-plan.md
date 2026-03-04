@@ -11,12 +11,35 @@ The implemented baseline currently covers:
 - per-source ICS ingestion using stored source URLs and metadata
 - source create, update, disable, and rebuild API flows
 
-The remaining major implementation steps are:
+The remaining major implementation steps, in order, are:
 
-- production Google sign-in and role enforcement
-- full Google Calendar outbound sync
-- recurrence remap policy finalization for ambiguous series rewrites
-- prune execution beyond queue/schedule scaffolding
+1. production admin authentication via Cloudflare Access with Google as the identity provider
+   this is the gate for production admin use
+2. prune execution beyond queue/schedule scaffolding
+   this closes the main operational retention gap
+3. recurrence remap policy finalization for ambiguous series rewrites
+   this is the main remaining correctness/design gap in event handling
+4. full Google Calendar outbound sync
+   this is the largest remaining implementation surface
+
+## Auth Decision
+
+The admin surface will use Cloudflare Access with Google as the identity provider.
+
+This project will not build a custom Google OAuth session system inside the Worker for v1.
+
+Auth separation rules:
+
+- public ICS feeds remain token-protected and publicly reachable
+- admin shell and admin APIs are protected by Cloudflare Access
+- the Worker validates Access identity and maps verified users to `admin` or `editor`
+
+Recommended deployment split:
+
+- public feeds on `ics.sprynewmedia.com`
+- admin app on a dedicated admin hostname protected by Access
+
+See [Google auth decision](C:/Dev/family-scheduling/docs/google-auth-decision.md).
 
 ## Interaction Model
 
