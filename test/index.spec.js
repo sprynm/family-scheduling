@@ -877,6 +877,75 @@ describe('family-scheduling worker', () => {
     expect(naomiFeed).toContain('SUMMARY:🏐 Volleyball Game');
   });
 
+  it('applies fallback sport icon detection when source icon is not configured', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_custom_naomi_no_icon',
+      name: 'naomi-school-events',
+      display_name: 'Naomi School Events',
+      provider_type: 'ics',
+      owner_type: 'naomi',
+      source_category: 'general',
+      url: 'https://example.com/naomi-school-events.ics',
+      icon: '',
+      prefix: 'N:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:naomi-bball-1',
+            'SUMMARY:Basketball Practice',
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T023000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          {
+            status: 200,
+            headers: {
+              etag: 'abc123',
+              'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT',
+            },
+          }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_custom_naomi_no_icon');
+
+    const familyFeed = await repo.generateFeed({
+      target: 'family',
+      calendarName: 'Family Combined',
+      lookbackDays: 30,
+    });
+    const naomiFeed = await repo.generateFeed({
+      target: 'naomi',
+      calendarName: 'Naomi Combined',
+      lookbackDays: 30,
+    });
+
+    expect(familyFeed).toContain('SUMMARY:N: 🏀 Basketball Practice');
+    expect(naomiFeed).toContain('SUMMARY:🏀 Basketball Practice');
+  });
+
   it('queues full rebuild jobs for admins', async () => {
     const request = new Request('http://example.com/api/rebuild/full', {
       method: 'POST',
