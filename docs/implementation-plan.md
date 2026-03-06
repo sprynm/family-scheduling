@@ -11,6 +11,37 @@ The implemented baseline currently covers:
 - per-source ICS ingestion using stored source URLs and metadata
 - source create, update, disable, and rebuild API flows
 
+## Target Admin Flow And Data Model
+
+Admin flow must be modeled in this order:
+
+1. create output calendars (for example `naomi`, `grayson`, `family`)
+2. add source calendars (ICS and Google sources)
+3. connect sources to outputs with per-relationship rules (prefix, icon, inclusion and rendering behavior)
+
+This requires an explicit many-to-many model:
+
+- `output_calendars`
+  - one row per output surface
+  - examples: `naomi.ics`, `grayson.ics`, `family.ics`, managed Google outputs
+- `sources`
+  - one row per upstream calendar source
+  - examples: TeamSnap feed, school ICS feed, Google personal calendar feed
+- `source_output_rules` (join table)
+  - links `source_id` to `output_calendar_id`
+  - carries rule metadata for that specific relationship
+  - rule fields include at least:
+    - `is_enabled`
+    - `prefix`
+    - `icon`
+    - optional rendering controls such as `title_mode`, `sort_order`, `lookback_override`
+
+Important behavior rule:
+
+- a source can link to multiple outputs
+- an output can include multiple sources
+- prefix and icon are applied per source-output relationship, not globally per source
+
 The remaining major implementation steps, in order, are:
 
 1. production admin authentication via Cloudflare Access with Google as the identity provider
@@ -21,6 +52,8 @@ The remaining major implementation steps, in order, are:
    this is the main remaining correctness/design gap in event handling
 4. full Google Calendar outbound sync
    this is the largest remaining implementation surface
+5. migrate source-to-output routing from owner/include flags to explicit many-to-many source-output rules
+   this is required for parent-friendly source assignment and future output expansion
 
 ## Auth Decision
 
@@ -34,10 +67,13 @@ Auth separation rules:
 - admin shell and admin APIs are protected by Cloudflare Access
 - the Worker validates Access identity and maps verified users to `admin` or `editor`
 
-Recommended deployment split:
+Recommended deployment model:
 
-- public feeds on `ics.sprynewmedia.com`
-- admin app on a dedicated admin hostname protected by Access
+- keep public feeds on `ics.sprynewmedia.com`
+- place admin shell on `/admin`
+- place admin APIs on `/api/*`
+- protect `/admin/*` and `/api/*` with Cloudflare Access policies
+- keep public feed routes outside Access and token-protected
 
 See [Google auth decision](C:/Dev/family-scheduling/docs/google-auth-decision.md).
 
@@ -103,6 +139,7 @@ Required output-specific decoration rules:
 - `naomi.ics` and `grayson.ics` apply icon decoration but do not prepend child initials
 - `family.ics` applies child prefix decoration in addition to icon decoration
 - managed child Google output calendars such as `naomi-sports` and `grayson-sports` must use their own output rules and should not automatically inherit the same rendering as ICS
+- when no explicit icon is configured for a source-output rule, apply fallback sport-icon detection from event summary/title regex (migration parity with legacy worker behavior)
 
 This decoration logic must be data-driven and output-specific. It must not depend on hard-coded string rules embedded in route handlers.
 
@@ -141,9 +178,9 @@ That includes:
 
 - adding a new ICS calendar feed
 - removing or disabling an existing ICS calendar feed
-- assigning the feed to `Naomi`, `Grayson`, `Family`, or another supported audience
-- choosing a display prefix such as `N:` or `G:`
-- choosing an icon for a sport or activity
+- assigning the feed to one or more outputs
+- setting relationship-specific prefix such as `N:` or `G:`
+- setting relationship-specific icon for a sport or activity
 - editing the display name shown in the admin UI
 
 This should be treated as a first-class product requirement, not an operator-only convenience.
@@ -153,13 +190,15 @@ Admin support for adding new ICS feeds is now covered at the API and data-model 
 Covered now:
 
 - the schema already models `sources`
-- sources carry child ownership, category, URL, icon, prefix, and output-inclusion metadata
+- sources carry ownership/category metadata, URL, and base source settings
 - the runtime ingests from one stored URL per source row
 - the admin API can create, update, disable, list, and rebuild sources
 - source presentation and feed-routing rules are stored as data rather than hard-coded in route handlers
 
 Not covered yet:
 
+- explicit `output_calendars` and `source_output_rules` administration in the parent-facing workflow
+- complete migration from `owner_type` + `include_in_*` source flags to join-table-driven routing
 - polished parent-facing UI for creating/editing sources directly
 - Google-authenticated production access to those source-management routes
 - curated icon/prefix pickers and source templates for non-technical users
@@ -167,10 +206,11 @@ Not covered yet:
 
 Conclusion:
 
-- assigning a feed to a child is now part of the actual admin workflow model
-- assigning a prefix such as `N:` or `G:` is explicitly modeled and persisted as source data
-- assigning a source icon is explicitly modeled and persisted as source data
-- the remaining work is making that workflow comfortable for a non-technical parent, not inventing the data model
+- the current baseline supports source ingest and basic output inclusion
+- the target admin model is explicit source-to-output many-to-many with per-link rules
+- the remaining work is both:
+  - completing that schema/API migration, and
+  - making the workflow comfortable for a non-technical parent
 
 Recommended follow-up:
 
@@ -186,24 +226,34 @@ Add parent-friendly source-management UX for:
 
 To avoid hard-coding, source presentation and routing rules should be data-driven.
 
-Recommended source metadata additions:
+Recommended schema direction:
+
+- keep `sources` for upstream feed identity and ingest behavior
+- add `output_calendars` for all output surfaces
+- add `source_output_rules` as the authoritative routing/rendering join table
+
+Recommended source metadata:
 
 - `display_name`
-- `icon`
-- `prefix`
-- `audience_key` or equivalent replacement for the current narrow `owner_type`
 - `source_category`
 - `is_enabled`
 - `sort_order`
-- `include_in_child_ics`
-- `include_in_family_ics`
-- `include_in_child_google_output`
+- ingest-specific defaults only (no output routing decisions)
+
+Recommended source-output rule metadata:
+
+- `is_enabled`
+- `prefix`
+- `icon`
+- `title_mode` (if needed)
+- `sort_order` (output-specific ordering)
+- `include_state` / policy fields as needed for overrides
 
 Recommended behavior:
 
-- feed-to-child assignment comes from source metadata, not route-specific code branches
-- prefix assignment comes from source metadata, not hard-coded constants
-- sport or activity icon comes from source metadata, not summary regex rules
+- feed-to-output assignment comes from `source_output_rules`, not route-specific code branches
+- prefix assignment comes from source-output rule data, not hard-coded constants
+- sport or activity icon comes from source-output rule data, not summary regex rules
 - the admin UI should offer simple controlled choices for common icons and prefixes, but persist them as data
 - the same event may render differently by output surface based on those stored rules
 

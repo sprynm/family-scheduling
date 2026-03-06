@@ -46,21 +46,19 @@ Only the admin surface should be protected by Access.
 
 ## Recommended deployment model
 
-Use two hostnames:
+Use one hostname with route-based separation:
 
 - `ics.sprynewmedia.com`
-  - public compatibility feeds
-  - existing token-based access remains
+  - public compatibility feeds stay token-protected
+  - admin shell lives under `/admin`
+  - admin APIs live under `/api/*`
+  - Cloudflare Access protects only `/admin/*` and `/api/*`
 
-- `admin.<chosen-domain>`
-  - admin shell and `/api/*`
-  - protected by Cloudflare Access
-
-This avoids path-based auth ambiguity and cleanly separates public feed consumers from human admin access.
+This keeps feed URLs stable while still enforcing strong auth on the management surface.
 
 ## Authentication flow
 
-1. User visits the admin hostname.
+1. User visits an Access-protected admin route (`/admin/*` or `/api/*`).
 2. Cloudflare Access challenges unauthenticated users.
 3. Access redirects to Google login.
 4. Google authenticates the user.
@@ -139,7 +137,7 @@ That means:
 ### Cloudflare side
 
 - configure Google as an Access identity provider
-- create an Access application for the admin hostname
+- create an Access application policy for `/admin/*` and `/api/*`
 - define allow policies for the intended users
 - capture the Access app audience for Worker-side JWT validation
 
