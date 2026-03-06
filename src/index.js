@@ -307,9 +307,7 @@ function renderAdminShell() {
     <form id="target-form" class="inline-form">
       <input id="target-key" type="text" placeholder="output_key (e.g. grayson_clubs)" required />
       <input id="target-calendar" type="text" placeholder="calendar_id" required />
-      <select id="target-mode">
-        <option value="managed_output">Managed output</option>
-      </select>
+      <input type="hidden" id="target-mode" value="managed_output" />
       <button id="target-save" type="submit">Add / Update Google Output</button>
     </form>
 
@@ -366,7 +364,6 @@ function renderAdminShell() {
               <tr>
                 <th>Output Key</th>
                 <th>Calendar ID</th>
-                <th>Mode</th>
                 <th>Active</th>
                 <th>Actions</th>
               </tr>
@@ -692,7 +689,7 @@ function renderAdminShell() {
           targetsBody,
           registeredTargets
             .map((target) =>
-              '<tr><td>' + (target.target_key || '') + '</td><td>' + (target.calendar_id || '') + '</td><td>' + (target.ownership_mode || '') + '</td><td>' + (Number(target.is_active) ? 'yes' : 'no') + '</td><td><button class="danger delete-target" data-target-key="' + (target.target_key || '') + '">Delete</button></td></tr>'
+              '<tr><td>' + (target.target_key || '') + '</td><td>' + (target.calendar_id || '') + '</td><td>' + (Number(target.is_active) ? 'yes' : 'no') + '</td><td><button class="danger delete-target" data-target-key="' + (target.target_key || '') + '">Delete</button></td></tr>'
             )
             .join(''),
           5
