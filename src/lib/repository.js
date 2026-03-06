@@ -75,6 +75,70 @@ function normalizeOwnerType(value) {
   return ownerType;
 }
 
+function parsePositiveInt(value, fallback) {
+  const num = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+function normalizeTargetKeys(values) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function cleanRuleValue(value) {
+  return String(value ?? '').trim();
+}
+
+function buildDefaultTargetRule(targetKey, ownerType, { icon = '', prefix = '' } = {}) {
+  return {
+    target_key: String(targetKey || '').trim().toLowerCase(),
+    target_type: TARGETS.includes(targetKey) ? 'ics' : 'google',
+    icon: cleanRuleValue(icon),
+    prefix: cleanRuleValue(prefix),
+  };
+}
+
+function normalizeTargetLinks(input, ownerType, defaults = {}) {
+  const items = Array.isArray(input) ? input : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (const [index, item] of items.entries()) {
+    const rawTargetKey =
+      typeof item === 'string' ? item : typeof item?.target_key === 'string' ? item.target_key : '';
+    const targetKey = String(rawTargetKey || '').trim().toLowerCase();
+    if (!targetKey || seen.has(targetKey)) continue;
+    seen.add(targetKey);
+
+    const fallback = buildDefaultTargetRule(targetKey, ownerType, defaults);
+    const icon = typeof item === 'object' && item !== null && 'icon' in item ? cleanRuleValue(item.icon) : fallback.icon;
+    const prefix =
+      typeof item === 'object' && item !== null && 'prefix' in item
+        ? cleanRuleValue(item.prefix)
+        : fallback.prefix;
+
+    normalized.push({
+      target_key: targetKey,
+      target_type: TARGETS.includes(targetKey) ? 'ics' : 'google',
+      icon,
+      prefix,
+      sort_order: index,
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeTargetKey(value) {
+  const key = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!key) throw new Error('target_key is required');
+  return key;
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -101,6 +165,41 @@ export class D1Repository {
     }
   }
 
+  async ensureSupportTables() {
+    await this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS source_target_links (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        target_key TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        icon TEXT NOT NULL DEFAULT '',
+        prefix TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (source_id) REFERENCES sources(id)
+      )`
+    ).run();
+    await this.db.prepare(
+      `CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_idx
+       ON source_target_links(source_id, target_key)`
+    ).run();
+
+    const ensureColumn = async (column, definition) => {
+      try {
+        await this.db.prepare(`ALTER TABLE source_target_links ADD COLUMN ${column} ${definition}`).run();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/duplicate column name|already exists/i.test(message)) throw error;
+      }
+    };
+
+    await ensureColumn('icon', "TEXT NOT NULL DEFAULT ''");
+    await ensureColumn('prefix', "TEXT NOT NULL DEFAULT ''");
+    await ensureColumn('sort_order', 'INTEGER NOT NULL DEFAULT 0');
+  }
+
   async listSources() {
     const result = await this.db.prepare(
       `SELECT id, name, display_name, owner_type, provider_type, source_category, url, icon, prefix,
@@ -108,7 +207,31 @@ export class D1Repository {
               is_active, sort_order, poll_interval_minutes, quality_profile, updated_at
        FROM sources ORDER BY owner_type, sort_order, COALESCE(display_name, name), name`
     ).all();
-    return result.results || [];
+    const sources = result.results || [];
+    const linksResult = await this.db.prepare(
+      `SELECT source_id, target_key, target_type, icon, prefix, sort_order
+       FROM source_target_links
+       WHERE is_enabled = 1`
+    ).all();
+    const links = linksResult.results || [];
+    const bySource = new Map();
+    for (const link of links) {
+      if (!bySource.has(link.source_id)) bySource.set(link.source_id, []);
+      bySource.get(link.source_id).push({
+        target_key: link.target_key,
+        target_type: link.target_type,
+        icon: cleanRuleValue(link.icon),
+        prefix: cleanRuleValue(link.prefix),
+        sort_order: Number(link.sort_order || 0),
+      });
+    }
+    return sources.map((source) => ({
+      ...source,
+      target_links: (bySource.get(source.id) || []).sort(
+        (a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.target_key).localeCompare(String(b.target_key))
+      ),
+      target_keys: (bySource.get(source.id) || []).map((link) => link.target_key),
+    }));
   }
 
   async createSource(input) {
@@ -143,6 +266,14 @@ export class D1Repository {
       timestamp,
       timestamp
     ).run();
+    const targetLinksInput = Array.isArray(input.target_links) ? input.target_links : input.target_keys;
+    if (Array.isArray(targetLinksInput)) {
+      await this.setSourceTargets(sourceId, targetLinksInput, {
+        ownerType,
+        icon: input.icon || '',
+        prefix: input.prefix ?? this.derivePrefix(ownerType),
+      });
+    }
     return this.getSourceById(sourceId);
   }
 
@@ -192,9 +323,42 @@ export class D1Repository {
       nowIso(),
       sourceId
     ).run();
+    const targetLinksInput = Array.isArray(input.target_links) ? input.target_links : input.target_keys;
+    if (Array.isArray(targetLinksInput)) {
+      await this.setSourceTargets(sourceId, targetLinksInput, {
+        ownerType: updated.owner_type,
+        icon: input.icon ?? existing.icon ?? '',
+        prefix: input.prefix ?? existing.prefix ?? this.derivePrefix(updated.owner_type),
+      });
+    }
     const source = await this.getSourceById(sourceId);
     await this.syncSourceConfig(source);
     return source;
+  }
+
+  async setSourceTargets(sourceId, targetLinksInput, defaults = {}) {
+    const targetLinks = normalizeTargetLinks(targetLinksInput, defaults.ownerType || 'family', defaults);
+    const timestamp = nowIso();
+    await this.runInTransaction(async () => {
+      await this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId).run();
+      for (const targetLink of targetLinks) {
+        await this.db.prepare(
+          `INSERT INTO source_target_links (
+            id, source_id, target_key, target_type, icon, prefix, sort_order, is_enabled, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+        ).bind(
+          stableId('stl', `${sourceId}:${targetLink.target_key}`),
+          sourceId,
+          targetLink.target_key,
+          targetLink.target_type,
+          targetLink.icon || '',
+          targetLink.prefix || '',
+          Number(targetLink.sort_order || 0),
+          timestamp,
+          timestamp
+        ).run();
+      }
+    });
   }
 
   async disableSource(sourceId) {
@@ -228,6 +392,47 @@ export class D1Repository {
       `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets ORDER BY target_key`
     ).all();
     return result.results || [];
+  }
+
+  async upsertTarget(input) {
+    const targetKey = normalizeTargetKey(input.target_key);
+    const calendarId = String(input.calendar_id || '').trim();
+    if (!calendarId) {
+      throw new Error('calendar_id is required');
+    }
+    const ownershipMode = String(input.ownership_mode || 'managed_output').trim().toLowerCase();
+    if (!['managed_output', 'external'].includes(ownershipMode)) {
+      throw new Error(`Unsupported ownership_mode: ${ownershipMode}`);
+    }
+    const isActive = toBoolInt(input.is_active, 1);
+    const id = stableId('gt', targetKey);
+    await this.db.prepare(
+      `INSERT INTO google_targets (id, target_key, calendar_id, ownership_mode, is_active)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(target_key) DO UPDATE SET
+         calendar_id = excluded.calendar_id,
+         ownership_mode = excluded.ownership_mode,
+         is_active = excluded.is_active`
+    ).bind(id, targetKey, calendarId, ownershipMode, isActive).run();
+    const row = await this.db.prepare(
+      `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets WHERE target_key = ?`
+    ).bind(targetKey).first();
+    return mapRow(row);
+  }
+
+  async deleteTarget(targetKeyInput) {
+    const targetKey = normalizeTargetKey(targetKeyInput);
+    const existing = await this.db.prepare(
+      `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets WHERE target_key = ?`
+    ).bind(targetKey).first();
+    if (!existing) return null;
+    await this.runInTransaction(async () => {
+      await this.db.prepare(`DELETE FROM source_target_links WHERE target_key = ? AND target_type = 'google'`).bind(targetKey).run();
+      await this.db.prepare(`DELETE FROM output_rules WHERE target_key = ?`).bind(targetKey).run();
+      await this.db.prepare(`DELETE FROM google_event_links WHERE target_key = ?`).bind(targetKey).run();
+      await this.db.prepare(`DELETE FROM google_targets WHERE target_key = ?`).bind(targetKey).run();
+    });
+    return mapRow(existing);
   }
 
   async listEvents({ target, limit = 200 }) {
@@ -383,8 +588,8 @@ export class D1Repository {
       `SELECT
         canonical_events.id AS canonical_event_id,
         canonical_events.title,
-        COALESCE(sources.icon, canonical_events.source_icon, '') AS source_icon,
-        COALESCE(sources.prefix, canonical_events.source_prefix, '') AS source_prefix,
+        COALESCE(NULLIF(source_target_links.icon, ''), canonical_events.source_icon, sources.icon, '') AS source_icon,
+        COALESCE(NULLIF(source_target_links.prefix, ''), canonical_events.source_prefix, sources.prefix, '') AS source_prefix,
         canonical_events.description,
         canonical_events.location,
         canonical_events.status,
@@ -395,6 +600,10 @@ export class D1Repository {
       JOIN canonical_events ON canonical_events.id = output_rules.canonical_event_id
       JOIN sources ON sources.id = canonical_events.source_id
       JOIN event_instances ON event_instances.id = output_rules.event_instance_id
+      LEFT JOIN source_target_links
+        ON source_target_links.source_id = canonical_events.source_id
+       AND source_target_links.target_key = output_rules.target_key
+       AND source_target_links.is_enabled = 1
       WHERE output_rules.target_key = ?
         AND output_rules.include_state = 'included'
         AND canonical_events.source_deleted = 0
@@ -661,7 +870,7 @@ export class D1Repository {
          WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
       ).bind(timestamp, source.id).run();
 
-      const targets = this.deriveTargetsForSource(source);
+      const targets = await this.resolveTargetsForSource(source);
       const instances = await this.listSourceInstances(source.id);
       for (const instance of instances) {
         for (const target of targets) {
@@ -674,10 +883,10 @@ export class D1Repository {
               derived_reason = excluded.derived_reason,
               updated_at = excluded.updated_at`
           ).bind(
-            stableId('out', `${instance.id}:${target}`),
+            stableId('out', `${instance.id}:${target.target_key}`),
             instance.canonical_event_id,
             instance.id,
-            target,
+            target.target_key,
             'derived from source configuration',
             timestamp,
             timestamp
@@ -709,6 +918,41 @@ export class D1Repository {
     return result.results || [];
   }
 
+  async pruneStaleData() {
+    const retainDays = parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30);
+    const cutoff = new Date(Date.now() - retainDays * 24 * 60 * 60 * 1000).toISOString();
+    const batchSize = 500;
+    let blobKeysDeleted = 0;
+
+    // Delete old snapshot blobs in batches first.
+    while (this.env.SNAPSHOTS?.delete) {
+      const batch = await this.db.prepare(
+        `SELECT payload_blob_ref
+         FROM source_snapshots
+         WHERE payload_blob_ref IS NOT NULL AND fetched_at < ?
+         LIMIT ?`
+      ).bind(cutoff, batchSize).all();
+      const keys = (batch.results || []).map((row) => row.payload_blob_ref).filter(Boolean);
+      if (!keys.length) break;
+      await this.env.SNAPSHOTS.delete(keys);
+      blobKeysDeleted += keys.length;
+      if (keys.length < batchSize) break;
+    }
+
+    const oldCountRow = await this.db.prepare(
+      `SELECT COUNT(*) AS count FROM source_snapshots WHERE fetched_at < ?`
+    ).bind(cutoff).first();
+    const rowsDeleted = Number(oldCountRow?.count || 0);
+    await this.db.prepare(`DELETE FROM source_snapshots WHERE fetched_at < ?`).bind(cutoff).run();
+
+    return {
+      retainDays,
+      cutoff,
+      snapshotRowsDeleted: rowsDeleted,
+      snapshotBlobKeysDeleted: blobKeysDeleted,
+    };
+  }
+
   parseSourceSecret(secretValue) {
     return String(secretValue || '')
       .split(/\r?\n|,/)
@@ -721,12 +965,41 @@ export class D1Repository {
       });
   }
 
-  deriveTargetsForSource(source) {
+  deriveLegacyTargetsForSource(source) {
     const targets = [];
-    if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) targets.push('grayson');
-    if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) targets.push('naomi');
-    if (Number(source.include_in_family_ics)) targets.push('family');
+    if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) {
+      targets.push(buildDefaultTargetRule('grayson', source.owner_type, { icon: source.icon || '', prefix: '' }));
+    }
+    if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) {
+      targets.push(buildDefaultTargetRule('naomi', source.owner_type, { icon: source.icon || '', prefix: '' }));
+    }
+    if (Number(source.include_in_family_ics)) {
+      targets.push(
+        buildDefaultTargetRule('family', source.owner_type, {
+          icon: source.icon || '',
+          prefix: source.prefix || this.derivePrefix(source.owner_type),
+        })
+      );
+    }
     return targets;
+  }
+
+  async resolveTargetsForSource(source) {
+    const links = await this.db.prepare(
+      `SELECT target_key, target_type, icon, prefix, sort_order
+       FROM source_target_links
+       WHERE source_id = ? AND is_enabled = 1
+       ORDER BY sort_order ASC, target_key ASC`
+    ).bind(source.id).all();
+    const targetLinks = (links.results || []).map((row) => ({
+      target_key: row.target_key,
+      target_type: row.target_type || (TARGETS.includes(row.target_key) ? 'ics' : 'google'),
+      icon: cleanRuleValue(row.icon),
+      prefix: cleanRuleValue(row.prefix),
+      sort_order: Number(row.sort_order || 0),
+    }));
+    if (targetLinks.length) return targetLinks;
+    return this.deriveLegacyTargetsForSource(source);
   }
 
   derivePrefix(ownerType) {
@@ -776,11 +1049,24 @@ export class D1Repository {
 
     const snapshotId = stableId('snap', `${sourceId}:${sourceUrl}:${fetchedAt}`);
     const blobRef = `snapshots/${sourceId}/${snapshotId}.ics`;
+    const snapshotsEnabled = String(this.env.SNAPSHOTS_ENABLED ?? 'true').toLowerCase() !== 'false';
+    const maxSnapshotBytes = parsePositiveInt(this.env.SNAPSHOTS_MAX_BYTES, 1024 * 1024);
+    const maxSnapshotRecords = parsePositiveInt(this.env.SNAPSHOTS_MAX_RECORDS, 5000);
+    const payloadBytes = new TextEncoder().encode(body).length;
+    const snapshotCountRow = await this.db.prepare(
+      `SELECT COUNT(*) AS count FROM source_snapshots WHERE payload_blob_ref IS NOT NULL`
+    ).first();
+    const snapshotCount = Number(snapshotCountRow?.count || 0);
+    const skipForSize = payloadBytes > maxSnapshotBytes;
+    const skipForCount = snapshotCount >= maxSnapshotRecords;
+    const canStoreSnapshot = snapshotsEnabled && !!this.env.SNAPSHOTS?.put && !skipForSize && !skipForCount;
+    let storedBlobRef = null;
 
-    if (this.env.SNAPSHOTS?.put) {
+    if (canStoreSnapshot) {
       await this.env.SNAPSHOTS.put(blobRef, body, {
         httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
       });
+      storedBlobRef = blobRef;
     }
 
     await this.db.prepare(
@@ -794,9 +1080,19 @@ export class D1Repository {
       response.status,
       response.headers.get('etag'),
       response.headers.get('last-modified'),
-      blobRef,
-      response.ok ? 'parsed' : 'fetch_error',
-      response.ok ? null : `HTTP ${response.status}`
+      storedBlobRef,
+      response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
+      response.ok
+        ? storedBlobRef
+          ? null
+          : skipForSize
+          ? `Snapshot skipped: payload ${payloadBytes} bytes exceeds ${maxSnapshotBytes}`
+          : skipForCount
+          ? `Snapshot skipped: snapshot cap ${maxSnapshotRecords} reached`
+          : snapshotsEnabled
+          ? 'Snapshot skipped: storage unavailable'
+          : 'Snapshot skipped: disabled by SNAPSHOTS_ENABLED'
+        : `HTTP ${response.status}`
     ).run();
 
     if (!response.ok) {
@@ -833,6 +1129,8 @@ export class D1Repository {
         instances,
       });
     }
+
+    const targets = await this.resolveTargetsForSource(source);
 
     await this.runInTransaction(async () => {
       await this.db.prepare(
@@ -878,7 +1176,7 @@ export class D1Repository {
             id, source_id, identity_key, event_kind, title, source_icon, source_prefix, description, location, start_at, end_at, timezone,
             status, rrule, series_until, source_deleted, needs_review, source_changed_since_overlay,
             last_source_change_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             source_icon = excluded.source_icon,
@@ -907,7 +1205,7 @@ export class D1Repository {
           event.endAt,
           event.timezone,
           event.status,
-          event.rrule,
+          event.rrule || null,
           fetchedAt,
           fetchedAt,
           fetchedAt
@@ -937,7 +1235,7 @@ export class D1Repository {
             fetchedAt
           ).run();
 
-          for (const target of this.deriveTargetsForSource(source)) {
+          for (const target of targets) {
             await this.db.prepare(
               `INSERT INTO output_rules (
                 id, canonical_event_id, event_instance_id, target_key, include_state, derived_reason, created_at, updated_at
@@ -947,10 +1245,10 @@ export class D1Repository {
                 derived_reason = excluded.derived_reason,
                 updated_at = excluded.updated_at`
             ).bind(
-              stableId('out', `${instance.id}:${target}`),
+              stableId('out', `${instance.id}:${target.target_key}`),
               canonicalEventId,
               instance.id,
-              target,
+              target.target_key,
               `derived from ${source.owner_type} source`,
               fetchedAt,
               fetchedAt
@@ -976,6 +1274,7 @@ export async function createRepository(env) {
     throw new Error('APP_DB binding is required for repository access');
   }
   const repo = new D1Repository(env.APP_DB, env);
+  await repo.ensureSupportTables();
   await repo.bootstrapLegacySources();
   if (String(env.SEED_SAMPLE_DATA || '').toLowerCase() === 'true') {
     await repo.seedSampleData();

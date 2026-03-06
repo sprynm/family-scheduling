@@ -1,120 +1,185 @@
-# Code Review Status
+# Code Review
 
-_Updated: 2026-03-04_
+_Updated: 2026-03-06_
 
-## Resolved
+## Change Log
 
-- Auth header guard: `x-user-role` only works when `ALLOW_DEV_ROLE_HEADER=true`.
-- Queue consumer and cron wiring exist.
-- Ingest exists and is rollback-safer than the original destructive refresh path.
-- `lookback` is passed through to feed generation.
-- Sample seeding is gated behind `SEED_SAMPLE_DATA=true`.
-- Feed rendering matches the legacy contract:
-  - child feeds render icon + title
-  - `family.ics` renders prefix + icon + title
-- Source model is refactored to one real upstream calendar per `sources` row.
-- Source CRUD exists:
-  - `POST /api/sources`
-  - `PATCH /api/sources/:id`
-  - `DELETE /api/sources/:id`
-- Source config changes propagate into derived output state.
-- Override records now store the verified actor role rather than the raw header value.
-- Disabling a source now also marks `source_events.is_deleted_upstream = 1`.
+### 2026-03-06 — Fix issues #1 and #2
 
-## Still Open
+**Issue #1 — N+1 query in `ingestSource`** ([repository.js:1133](../src/lib/repository.js#L1133))
 
-### Production admin auth
+Moved `resolveTargetsForSource(source)` to execute once before `runInTransaction`, storing the result in `targets`. The inner instance loop now iterates over that resolved array instead of re-querying the DB on every instance.
 
-Admin routes deny by default, which is safe, but production admin use is still blocked.
+**Issue #2 — `rrule` not persisted** ([repository.js:1179](../src/lib/repository.js#L1179))
 
-Settled direction:
+The `INSERT INTO canonical_events` VALUES clause previously had `NULL` hardcoded at the `rrule` column position, causing the bound `event.rrule` value to be silently ignored. Changed `NULL` to `?` so the bound value is used. Also changed the bind from `event.rrule` to `event.rrule || null` to ensure a proper SQL null (not an empty string) when no rrule is present.
 
-- use Cloudflare Access
-- use Google as the identity provider
-- validate Access identity in the Worker
-- map verified email to `admin` / `editor`
+Verification: `npm test -- --run` — 18 tests passed.
 
-### Google Calendar outbound sync
+---
 
-Schema exists, but no Google Calendar write path is implemented yet.
+## Review Result
 
-### Prune execution
+No blocking issues. Several low-risk correctness gaps and one real performance problem worth addressing before production traffic increases.
 
-Cron and queue scaffolding exist, but retention deletes are not implemented yet.
+---
 
-### Recurrence exceptions and remap policy
+## What Is Working Well
 
-Recurring-event exception handling and ambiguous series rewrite behavior are still the weakest part of the design/runtime.
+- Auth is solid. JWT verification, JWKS caching, audience/issuer validation, key rotation retry, and dev-header bypass are all correct and well-tested.
+- `source_target_links` per-target decoration is correctly wired end-to-end: stored in migration 0002, joined in `generateFeed` with a proper COALESCE fallback chain, and consumed by `decorateEventSummary`.
+- Google target deletion cascades correctly to `source_target_links`, `output_rules`, and `google_event_links`.
+- `resolveTargetsForSource` falls back to legacy boolean columns when no links exist — clean bridge for bootstrapped legacy sources.
+- ICS parser handles folded lines, DATE-only values, floating-time, and UTC-Z forms.
+- Test coverage is meaningful: root redirect, per-target rule persistence, target delete cleanup, per-target feed decoration, JWT auth, and ingest path all have assertions.
 
-### Test depth
+---
 
-Tests now cover:
+## Issues Found
 
-- auth guard behavior
-- source CRUD
-- feed rendering contract
-- per-source ingest shape
+### 1. N+1 Query in `ingestSource` — Medium Priority
 
-They still do not prove full D1 correctness or robust recurrence behavior.
+**File:** [repository.js:1236](src/lib/repository.js#L1236)
 
-## Recommended Next Step
+`resolveTargetsForSource(source)` is called inside the per-instance loop inside a transaction. For a source with 50 events × 10 instances each, this fires 500 DB queries.
 
-1. Implement Cloudflare Access-backed Google auth.
-2. Then choose between Google outbound sync and prune execution.
-3. After that, harden recurrence exceptions/remap behavior.
+```js
+// Current (inside instance loop):
+for (const target of await this.resolveTargetsForSource(source)) { ... }
+```
 
-## Claude Review Brief
+Fix: resolve targets once before the staged-events loop begins. The targets don't change during a single ingest.
 
-Use this as review context for the current refactor.
+```js
+const targets = await this.resolveTargetsForSource(source);
+for (const instance of instances) {
+  for (const target of targets) { ... }
+}
+```
 
-### Architectural shift
+---
 
-The app no longer treats one `sources` row as a bucket of URLs.
+### 2. `rrule` Not Persisted on `canonical_events` — Low Priority (Now), Potential Future Bug
 
-It now treats one `sources` row as one actual calendar source with:
+**File:** [repository.js:1176](src/lib/repository.js#L1176)
 
-- URL
-- owner/audience
-- category
-- icon
-- prefix
-- output inclusion flags
-- display metadata
+The `INSERT INTO canonical_events` VALUES clause hardcodes `NULL` at the `rrule` position. The bind list passes `event.rrule` as the 14th argument, but because the SQL literal `NULL` occupies that column slot, the value is never stored.
 
-### Main code changes
+```sql
+-- rrule column gets NULL regardless of event.rrule:
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
+```
 
-#### `src/lib/repository.js`
+This is not currently a functional bug because feed generation reads from pre-expanded `event_instances`, not from `canonical_events.rrule`. But the column is useless as-is, `event_kind = 'series'` gets set correctly while `rrule` stays NULL, and any future feature that reads it back will be broken. Fix by replacing the `NULL` literal with a `?` and binding `event.rrule` in the correct position.
 
-- source CRUD added
-- per-source URL ingest added
-- legacy env buckets only remain as bootstrap/migration input
-- source config changes re-derive output rules
-- ingest safety preserved
+---
 
-#### `src/index.js`
+### 3. `ensureSupportTables` Called on Every Request — Low Priority
 
-- real source-management API routes added
-- bad input returns `400`
+**File:** [repository.js:1270-1281](src/lib/repository.js#L1270)
 
-#### `src/lib/presentation.js`
+`createRepository` is called on every HTTP request and calls `ensureSupportTables`, which fires `CREATE TABLE IF NOT EXISTS`, `CREATE UNIQUE INDEX IF NOT EXISTS`, and three `ALTER TABLE` statements on each request. These are no-ops after first run but still cost real D1 round trips.
 
-- output-specific decoration logic extracted
+Options:
+- Use a module-level flag to skip after first success within a Worker isolate lifetime.
+- Accept the cost as a deploy-time migration step and remove `ensureSupportTables` from the hot path once 0002 migration is applied to production.
 
-#### `migrations/0001_init.sql`
+---
 
-- source metadata expanded
-- canonical event decoration fields added
+### 4. `getSourceById` Omits `target_links` — Low Priority
 
-### Preserved behavior
+**File:** [repository.js:828](src/lib/repository.js#L828)
 
-- public feed contracts remain `family`, `grayson`, `naomi`
-- child feeds stay icon-only
-- `family.ics` adds child prefix decoration
-- failed ingest should not wipe previously published state
+`listSources` returns sources enriched with `target_links` and `target_keys`. `getSourceById` returns a raw row with neither. `createSource` and `updateSource` both return via `getSourceById`, so the API response for POST and PATCH omits target link data even when links were just written.
 
-### Remaining review focus
+This is a minor API inconsistency — the caller can see the source was created but can't see what links were created without a separate list call.
 
-- Access JWT validation and role mapping implementation
-- recurrence exception handling
-- whether some source config changes should trigger re-ingest instead of only output re-derivation
-- real D1/integration coverage beyond the fake DB
+---
+
+### 5. Hardcoded Host in `getFeedContract` — Low Priority
+
+**File:** [repository.js:574](src/lib/repository.js#L574)
+
+```js
+host: 'https://ics.sprynewmedia.com',
+```
+
+This should come from an env var (e.g. `env.PUBLIC_HOST`) so staging and dev environments don't report the production hostname.
+
+---
+
+### 6. Admin Shell Served Without Worker-Level Auth Check — Low Risk, Worth Noting
+
+**File:** [index.js:908-912](src/index.js#L908)
+
+`GET /admin` returns the full admin shell HTML without any auth check in the Worker. This is the intended design — Cloudflare Access gates the path at the network layer before the Worker sees the request. This is correct for production but means that:
+
+- If Access is ever misconfigured or bypassed, the shell is exposed.
+- Local dev with `ALLOW_DEV_ROLE_HEADER=true` serves the shell to anyone who can reach the Worker.
+
+No code change required, but this is worth keeping in mind when onboarding to a new Access policy.
+
+---
+
+### 7. XSS Risk in Admin Shell `innerHTML` Construction — Very Low Risk
+
+**File:** [index.js:535-547](src/index.js#L535)
+
+The target rule card HTML is built via string concatenation:
+
+```js
+'<strong>' + option.label + '</strong>'
+```
+
+`option.label` comes from `target_key` which is normalized through `normalizeTargetKey` (alphanumeric, underscore, hyphen only), so injection is not possible in practice. However, Google target labels use the raw `option.textContent`, which is populated from server data. If a label were ever set through a path that skips normalization it could XSS the admin. Low risk, but a textContent assignment or DOM API instead of innerHTML would remove the class of risk entirely.
+
+---
+
+### 8. FakeDb Feed Query Does Not Filter `source_deleted` — Test Fidelity Gap
+
+**File:** [test/index.spec.js:706-728](test/index.spec.js#L706)
+
+The `FakeDb.runAll` handler for the feed generation query (`FROM output_rules JOIN canonical_events`) does not filter on `canonical_events.source_deleted = 0` or `event_instances.source_deleted = 0`, unlike the real SQL at [repository.js:609-610](src/lib/repository.js#L609). Deleted events would appear in test feeds that shouldn't have them. The test for `disableSource` currently doesn't verify feed output after disable, so this gap isn't caught.
+
+---
+
+## Remaining Product Work
+
+These are implementation gaps, not review findings:
+
+1. Google Calendar outbound sync is not implemented.
+2. Recurrence exception/remap (`RECURRENCE-ID` events) are parsed but not remapped to existing instances — they create new canonical events instead.
+3. Prune execution is scaffolded and tested against FakeDb but not validated against real D1 + R2.
+4. Admin UI has no edit workflow for existing sources or existing target rules — only create and disable.
+
+---
+
+## Current Risk Level
+
+### Low
+
+1. Auth correctness and JWT validation path.
+2. Per-target rule storage and feed rendering.
+3. Google target delete cascade.
+4. Root redirect and admin routing.
+
+### Medium
+
+1. N+1 query in `ingestSource` — tolerable at current scale, becomes a problem with many recurring sources.
+2. `rrule` not persisted — silent data loss that will matter if recurrence hardening reads the stored value.
+3. Real-environment D1 migration/upgrade path — `ensureSupportTables` works but is not a production migration strategy.
+
+### Deferred Until Google Sync
+
+1. Google outbound publish behavior and conflict handling.
+2. `google_event_links` sync state lifecycle.
+
+---
+
+## Verification
+
+Verified in this pass:
+
+1. `npm test -- --run`
+2. 18 tests passed
+3. Full read of `src/index.js`, `src/lib/repository.js`, `src/lib/auth.js`, `src/lib/ics.js`, `src/lib/presentation.js`, `src/lib/constants.js`, `migrations/0001_init.sql`, `migrations/0002_source_target_links.sql`, `test/index.spec.js`

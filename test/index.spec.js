@@ -51,6 +51,7 @@ class FakeStatement {
 class FakeDb {
   constructor() {
     this.sources = [];
+    this.sourceTargetLinks = [];
     this.sourceSnapshots = [];
     this.sourceEvents = [];
     this.canonicalEvents = [];
@@ -71,6 +72,18 @@ class FakeDb {
   }
 
   run(sql, values) {
+    if (sql.includes('CREATE TABLE IF NOT EXISTS source_target_links')) {
+      return;
+    }
+
+    if (sql.includes('CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_idx')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE source_target_links ADD COLUMN')) {
+      return;
+    }
+
     if (sql.includes('INSERT OR IGNORE INTO sources')) {
       const [
         id,
@@ -155,6 +168,35 @@ class FakeDb {
         created_at: createdAt,
         updated_at: updatedAt,
       });
+      return;
+    }
+
+    if (sql.includes('INSERT INTO source_target_links')) {
+      const [id, sourceId, targetKey, targetType, icon, prefix, sortOrder, createdAt, updatedAt] = values;
+      const existing = this.sourceTargetLinks.find((row) => row.id === id || (row.source_id === sourceId && row.target_key === targetKey));
+      if (existing) {
+        Object.assign(existing, {
+          target_type: targetType,
+          icon,
+          prefix,
+          sort_order: sortOrder,
+          is_enabled: 1,
+          updated_at: updatedAt,
+        });
+      } else {
+        this.sourceTargetLinks.push({
+          id,
+          source_id: sourceId,
+          target_key: targetKey,
+          target_type: targetType,
+          icon,
+          prefix,
+          sort_order: sortOrder,
+          is_enabled: 1,
+          created_at: createdAt,
+          updated_at: updatedAt,
+        });
+      }
       return;
     }
 
@@ -471,6 +513,30 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('DELETE FROM source_target_links WHERE source_id = ?')) {
+      const [sourceId] = values;
+      this.sourceTargetLinks = this.sourceTargetLinks.filter((row) => row.source_id !== sourceId);
+      return;
+    }
+
+    if (sql.includes("DELETE FROM source_target_links WHERE target_key = ? AND target_type = 'google'")) {
+      const [targetKey] = values;
+      this.sourceTargetLinks = this.sourceTargetLinks.filter((row) => !(row.target_key === targetKey && row.target_type === 'google'));
+      return;
+    }
+
+    if (sql.includes('DELETE FROM output_rules WHERE target_key = ?')) {
+      const [targetKey] = values;
+      this.outputRules = this.outputRules.filter((row) => row.target_key !== targetKey);
+      return;
+    }
+
+    if (sql.includes('DELETE FROM google_event_links WHERE target_key = ?')) {
+      const [targetKey] = values;
+      this.googleEventLinks = this.googleEventLinks.filter((row) => row.target_key !== targetKey);
+      return;
+    }
+
     if (sql.includes('UPDATE canonical_events')) {
       const [updatedAt, eventId] = values;
       const row = this.canonicalEvents.find((event) => event.id === eventId);
@@ -505,6 +571,33 @@ class FakeDb {
         summary_json: null,
         error_json: null,
       });
+      return;
+    }
+
+    if (sql.includes('INSERT INTO google_targets')) {
+      const [id, targetKey, calendarId, ownershipMode, isActive] = values;
+      const existing = this.googleTargets.find((row) => row.target_key === targetKey);
+      if (existing) {
+        Object.assign(existing, {
+          calendar_id: calendarId,
+          ownership_mode: ownershipMode,
+          is_active: isActive,
+        });
+      } else {
+        this.googleTargets.push({
+          id,
+          target_key: targetKey,
+          calendar_id: calendarId,
+          ownership_mode: ownershipMode,
+          is_active: isActive,
+        });
+      }
+      return;
+    }
+
+    if (sql.includes('DELETE FROM google_targets WHERE target_key = ?')) {
+      const [targetKey] = values;
+      this.googleTargets = this.googleTargets.filter((row) => row.target_key !== targetKey);
       return;
     }
 
@@ -546,6 +639,14 @@ class FakeDb {
 
   runAll(sql, values) {
     if (sql.includes('FROM sources ORDER BY')) return this.sources;
+    if (sql.includes('FROM source_target_links') && sql.includes('WHERE source_id = ?')) {
+      return this.sourceTargetLinks
+        .filter((row) => row.source_id === values[0] && row.is_enabled === 1)
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.target_key).localeCompare(String(b.target_key)));
+    }
+    if (sql.includes('FROM source_target_links') && sql.includes('WHERE is_enabled = 1')) {
+      return this.sourceTargetLinks.filter((row) => row.is_enabled === 1);
+    }
     if (sql.includes('FROM sync_jobs ORDER BY')) return this.syncJobs.slice(0, values[0] || 50);
     if (sql.includes('FROM google_targets')) return this.googleTargets;
     if (sql.includes('FROM event_instances') && sql.includes('JOIN canonical_events ON canonical_events.id = event_instances.canonical_event_id')) {
@@ -610,11 +711,12 @@ class FakeDb {
           const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
           const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
           const source = this.sources.find((row) => row.id === event.source_id);
+          const targetLink = this.sourceTargetLinks.find((row) => row.source_id === event.source_id && row.target_key === target && row.is_enabled === 1);
           return {
             canonical_event_id: event.id,
             title: event.title,
-            source_icon: source?.icon ?? event.source_icon,
-            source_prefix: source?.prefix ?? event.source_prefix,
+            source_icon: targetLink?.icon || event.source_icon || source?.icon || '',
+            source_prefix: targetLink?.prefix || event.source_prefix || source?.prefix || '',
             description: event.description,
             location: event.location,
             status: event.status,
@@ -650,6 +752,9 @@ class FakeDb {
     }
     if (sql.includes('SELECT * FROM sources WHERE id = ?')) {
       return this.sources.find((row) => row.id === values[0]) || null;
+    }
+    if (sql.includes('FROM google_targets WHERE target_key = ?')) {
+      return this.googleTargets.find((row) => row.target_key === values[0]) || null;
     }
     return null;
   }
@@ -703,6 +808,15 @@ describe('family-scheduling worker', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(body).toContain('Admin Console');
+  });
+
+  it('redirects the root path to /admin', async () => {
+    const request = new Request('http://example.com/');
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(302);
+    expect(response.headers.get('location')).toBe('http://example.com/admin');
   });
 
   it('renders child feeds with icon but without family prefix', async () => {
@@ -872,7 +986,7 @@ describe('family-scheduling worker', () => {
     expect(body.overrides[0].created_by).toBe('editor');
   });
 
-  it('creates and updates sources through the admin API', async () => {
+  it('creates and updates sources through the admin API with per-target rules', async () => {
     const createRequest = new Request('http://example.com/api/sources', {
       method: 'POST',
       headers: {
@@ -883,11 +997,14 @@ describe('family-scheduling worker', () => {
         owner_type: 'naomi',
         display_name: 'Naomi Volleyball',
         url: 'http://example.com/naomi-volleyball.ics',
-        icon: '🏐',
-        prefix: 'N:',
         include_in_child_ics: true,
         include_in_family_ics: true,
         include_in_child_google_output: true,
+        target_links: [
+          { target_key: 'naomi', icon: '🏐', prefix: '' },
+          { target_key: 'family', icon: '🏐', prefix: 'N:' },
+          { target_key: 'naomi_clubs', icon: '🏐', prefix: 'Clubs:' },
+        ],
       }),
     });
     const ctx = createExecutionContext();
@@ -896,6 +1013,7 @@ describe('family-scheduling worker', () => {
     const created = await createResponse.json();
     expect(createResponse.status).toBe(201);
     expect(created.source.url).toBe('https://example.com/naomi-volleyball.ics');
+    expect(env.APP_DB.sourceTargetLinks.filter((row) => row.source_id === created.source.id)).toHaveLength(3);
 
     const patchRequest = new Request(`http://example.com/api/sources/${created.source.id}`, {
       method: 'PATCH',
@@ -904,8 +1022,10 @@ describe('family-scheduling worker', () => {
         'x-user-role': 'admin',
       },
       body: JSON.stringify({
-        icon: '🏆',
-        include_in_family_ics: false,
+        target_links: [
+          { target_key: 'naomi', icon: '🏆', prefix: '' },
+          { target_key: 'family', icon: '🏆', prefix: 'N:' },
+        ],
       }),
     });
     const patchCtx = createExecutionContext();
@@ -913,8 +1033,77 @@ describe('family-scheduling worker', () => {
     await waitOnExecutionContext(patchCtx);
     const updated = await patchResponse.json();
     expect(patchResponse.status).toBe(200);
-    expect(updated.source.icon).toBe('🏆');
-    expect(updated.source.include_in_family_ics).toBe(0);
+    const updatedLinks = env.APP_DB.sourceTargetLinks.filter((row) => row.source_id === created.source.id);
+    expect(updatedLinks).toHaveLength(2);
+    expect(updatedLinks.find((row) => row.target_key === 'naomi')?.icon).toBe('🏆');
+    expect(updatedLinks.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
+  });
+
+  it('creates google targets through admin API', async () => {
+    const request = new Request('http://example.com/api/targets', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-user-role': 'admin',
+      },
+      body: JSON.stringify({
+        target_key: 'grayson_clubs',
+        calendar_id: 'grayson-clubs@example.test',
+        ownership_mode: 'managed_output',
+      }),
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(201);
+    expect(body.target.target_key).toBe('grayson_clubs');
+    expect(body.target.calendar_id).toBe('grayson-clubs@example.test');
+  });
+
+  it('deletes google targets through admin API', async () => {
+    env.APP_DB.googleTargets.push({
+      id: 'gt_naomi_clubs',
+      target_key: 'naomi_clubs',
+      calendar_id: 'naomi-clubs@example.test',
+      ownership_mode: 'managed_output',
+      is_active: 1,
+    });
+    env.APP_DB.sourceTargetLinks.push({
+      id: 'stl_naomi_clubs',
+      source_id: 'src_seed',
+      target_key: 'naomi_clubs',
+      target_type: 'google',
+      icon: '🏐',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-06T00:00:00.000Z',
+      updated_at: '2026-03-06T00:00:00.000Z',
+    });
+    env.APP_DB.outputRules.push({
+      id: 'out_naomi_clubs',
+      canonical_event_id: 'evt_naomi_basketball',
+      event_instance_id: 'evt_naomi_basketball_inst1',
+      target_key: 'naomi_clubs',
+      include_state: 'included',
+      derived_reason: 'test',
+      created_at: '2026-03-06T00:00:00.000Z',
+      updated_at: '2026-03-06T00:00:00.000Z',
+    });
+    const request = new Request('http://example.com/api/targets/naomi_clubs', {
+      method: 'DELETE',
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.deleted.target_key).toBe('naomi_clubs');
+    expect(env.APP_DB.googleTargets.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
+    expect(env.APP_DB.sourceTargetLinks.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
+    expect(env.APP_DB.outputRules.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
   });
 
   it('disables sources and removes their output rules', async () => {
@@ -1089,6 +1278,86 @@ describe('family-scheduling worker', () => {
 
     expect(familyFeed).toContain('SUMMARY:N: 🏀 Basketball Practice');
     expect(naomiFeed).toContain('SUMMARY:🏀 Basketball Practice');
+  });
+
+  it('renders per-target rule decoration from source_target_links', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_rule_test',
+      name: 'grayson-hockey',
+      display_name: 'Grayson Hockey',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-hockey.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push(
+      {
+        id: 'stl_grayson',
+        source_id: 'src_rule_test',
+        target_key: 'grayson',
+        target_type: 'ics',
+        icon: '🏒',
+        prefix: '',
+        sort_order: 0,
+        is_enabled: 1,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'stl_family',
+        source_id: 'src_rule_test',
+        target_key: 'family',
+        target_type: 'ics',
+        icon: '🏒',
+        prefix: 'G:',
+        sort_order: 1,
+        is_enabled: 1,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:grayson-hockey-1',
+            'SUMMARY:Hockey Practice',
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T023000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_rule_test');
+    const familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    const graysonFeed = await repo.generateFeed({ target: 'grayson', calendarName: 'Grayson Combined', lookbackDays: 30 });
+
+    expect(familyFeed).toContain('SUMMARY:G: 🏒 Hockey Practice');
+    expect(graysonFeed).toContain('SUMMARY:🏒 Hockey Practice');
   });
 
   it('queues full rebuild jobs for admins', async () => {
