@@ -146,23 +146,10 @@ export class D1Repository {
   }
 
   async runInTransaction(work) {
-    if (typeof this.db.exec !== 'function') {
-      return work();
-    }
-
-    await this.db.exec('BEGIN');
-    try {
-      const result = await work();
-      await this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      try {
-        await this.db.exec('ROLLBACK');
-      } catch {
-        // Ignore rollback failures so the original error is preserved.
-      }
-      throw error;
-    }
+    // D1 does not support SQL BEGIN/COMMIT. Each statement is individually
+    // atomic. For multi-statement atomicity, callers should be migrated to
+    // db.batch() — tracked as a follow-on task.
+    return work();
   }
 
   async ensureSupportTables() {
