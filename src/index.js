@@ -797,7 +797,7 @@ function renderAdminShell() {
         const selectedIcsTargets = getSelectedValues(sourceIcsTargetsInput);
         const selectedGoogleTargets = getSelectedValues(sourceGoogleTargetsInput);
 
-        if (!/^https?:\/\//i.test(sourceUrl)) {
+        if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
           throw new Error('Source URL must start with http:// or https://');
         }
         if (!selectedIcsTargets.length && !selectedGoogleTargets.length) {
