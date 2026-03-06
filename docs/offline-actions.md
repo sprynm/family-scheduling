@@ -1,155 +1,184 @@
 # Offline Actions
 
-## Google Auth Setup
+## Production Deployment Runbook
 
-This project will use **Cloudflare Access** for the admin surface, with **Google** as the identity provider.
+Run this document top-to-bottom. Do not reorder steps.
 
-The public feed host remains outside Access.
+## 0. Prerequisites
 
-Recommended route split on one host:
+You must have:
 
-- `ics.sprynewmedia.com`
-  - public `.ics` / `.isc` feeds
-  - existing token contract remains
-  - admin shell under `/admin`
-  - admin APIs under `/api/*`
-  - `/admin/*` and `/api/*` protected by Cloudflare Access
+1. Cloudflare account access for `ics.sprynewmedia.com` and Zero Trust.
+2. Google Cloud Console access to create OAuth credentials.
+3. Local terminal access to `C:\Dev\family-scheduling`.
+4. Wrangler authenticated to the correct Cloudflare account.
 
-## Decision About Your Google Accounts
-Answer: a personal Gmail account will be fine. 
+Command:
 
-Recommended approach:
+```powershell
+npx wrangler whoami
+```
 
-- use the standard **Google** identity provider path in Cloudflare Access
-- use **email-based role mapping** in the Worker
-- configure the Google OAuth consent/app setup so both account types can authenticate if you want both to be usable
+Expected result: correct account shown.
 
-Why:
+## 1. Lock route model
 
-- this keeps the auth model simple
-- it avoids needing Workspace-group integration for v1
-- it allows exact-email role control in the app
+Use this exact route model:
 
-Recommended v1 role model:
+1. Public feeds:
+`https://ics.sprynewmedia.com/{family|grayson|naomi}.{ics|isc}`
+2. Protected admin app:
+`https://ics.sprynewmedia.com/admin/*`
+3. Protected admin API:
+`https://ics.sprynewmedia.com/api/*`
 
-- `ADMIN_EMAILS`
-- `EDITOR_EMAILS`
+Constraint:
+Cloudflare Access protection applies only to `/admin/*` and `/api/*`.
 
-as verified email allowlists in the Worker configuration.
-
-## What You Need To Configure
-
-### 1. Confirm admin route scope
-
-Choose the protected route scopes on the existing host.
-
-Example:
-
-- `https://ics.sprynewmedia.com/admin/*`
-- `https://ics.sprynewmedia.com/api/*`
-
-Only these route scopes should go behind Cloudflare Access.
-
-### 2. Create the Google OAuth app
+## 2. Create Google OAuth credentials
 
 In Google Cloud Console:
 
-- create or select a project
-- open `APIs & Services` -> `Credentials`
-- configure the OAuth consent screen
-- use **External** if you want both personal Gmail and Workspace accounts to log in
-- create the OAuth client that Cloudflare Access will use
+1. Open `APIs & Services` -> `OAuth consent screen`.
+2. Set user type to `External`.
+3. Complete required consent fields and save.
+4. Open `APIs & Services` -> `Credentials`.
+5. Click `Create credentials` -> `OAuth client ID`.
+6. Select application type `Web application`.
+7. Name it `cloudflare-access-family-scheduling`.
+8. Add authorized redirect URI provided by Cloudflare Access Google IdP setup screen.
+9. Save.
 
-Output from this step:
+Record:
 
-- Google client ID
-- Google client secret
+1. Google Client ID
+2. Google Client Secret
 
-### 3. Add Google as an identity provider in Cloudflare Access
+Expected result: OAuth client appears under `OAuth 2.0 Client IDs` with no warning icon.
+
+## 3. Configure Google IdP in Cloudflare Zero Trust
+
+In Cloudflare Zero Trust dashboard:
+
+1. Open `Settings` -> `Authentication`.
+2. Open the `Login methods` or `Identity providers` section.
+3. Add provider `Google`.
+4. Paste Google Client ID and Client Secret from Step 2.
+5. Save.
+6. Run built-in test login flow.
+
+Expected result: successful Google login for an approved account.
+
+## 4. Create Access app for admin routes
 
 In Cloudflare Zero Trust:
 
-- add a new identity provider
-- choose Google
-- paste the client ID and client secret from Google Cloud
-- save and test the provider
+1. Open `Access` -> `Applications`.
+2. Create `Self-hosted` application.
+3. App domain: `ics.sprynewmedia.com`.
+4. Add path include rule: `/admin/*`.
+5. Add path include rule: `/api/*`.
+6. Add allow policy with only approved admin/editor emails.
+7. Save.
+8. Open app details and copy `AUD` value.
 
-### 4. Create the Access application for the admin routes
+Record:
 
-In Cloudflare Access:
+1. `CLOUDFLARE_ACCESS_AUD`
+2. `CLOUDFLARE_ACCESS_TEAM_DOMAIN` in form `https://<team>.cloudflareaccess.com`
 
-- create a self-hosted application
-- set policy/application scope to the admin routes
-  - `/admin/*`
-  - `/api/*`
-- create allow policies for the people who should be able to reach the admin app
+Expected result: Access app active and route scope limited to `/admin/*` and `/api/*`.
 
-At minimum, allow the verified Google accounts you want to use.
+## 5. Set production Worker secrets
 
-### 5. Copy the Access application audience
+From `C:\Dev\family-scheduling` run:
 
-Each Access application has an audience value used for JWT validation.
+```powershell
+npx wrangler secret put TOKEN
+npx wrangler secret put CLOUDFLARE_ACCESS_AUD
+npx wrangler secret put CLOUDFLARE_ACCESS_TEAM_DOMAIN
+npx wrangler secret put ADMIN_EMAILS
+npx wrangler secret put EDITOR_EMAILS
+```
 
-You will need to copy the **AUD** tag from the Access application details.
+Input format requirements:
 
-Output from this step:
+1. `ADMIN_EMAILS`: comma-separated emails.
+2. `EDITOR_EMAILS`: comma-separated emails.
 
-- `CLOUDFLARE_ACCESS_AUD`
+Expected result: each command returns success.
 
-### 6. Identify your Cloudflare Access team domain
+## 6. Confirm runtime vars
 
-You will need the Access team domain used for JWT verification.
+Confirm `wrangler.jsonc` contains exactly:
 
-Format:
+1. `CALENDAR_NAME_FAMILY=Family Combined`
+2. `CALENDAR_NAME_GRAYSON=Grayson Combined`
+3. `CALENDAR_NAME_NAOMI=Naomi Combined`
+4. `DEFAULT_LOOKBACK_DAYS=7`
+5. `RECURRENCE_HORIZON_DAYS=180`
+6. `PRUNE_AFTER_DAYS=30`
+7. `ALLOW_DEV_ROLE_HEADER=false`
+8. `SEED_SAMPLE_DATA=false`
 
-- `https://<team>.cloudflareaccess.com`
+Expected result: file matches values above before deploy.
 
-Output from this step:
+## 7. Deploy
 
-- `CLOUDFLARE_ACCESS_TEAM_DOMAIN`
+From `C:\Dev\family-scheduling` run:
 
-### 7. Decide the admin/editor email lists
+```powershell
+npm test -- --run
+npx wrangler deploy
+```
 
-Decide which verified Google identities should map to which app roles.
+Stop condition:
+If tests fail or deploy fails, stop and fix before proceeding.
 
-Output from this step:
+Expected result: tests pass and Wrangler reports successful deployment.
 
-- `ADMIN_EMAILS`
-- `EDITOR_EMAILS`
+## 8. Verify public feed contract
 
-Suggested format:
+Replace `<TOKEN>` and run:
 
-- comma-separated email list
+```powershell
+curl -i "https://ics.sprynewmedia.com/family.isc?token=<TOKEN>"
+curl -i "https://ics.sprynewmedia.com/grayson.ics?token=<TOKEN>&lookback=7&name=Grayson%20Combined"
+curl -i "https://ics.sprynewmedia.com/naomi.ics?token=<TOKEN>&lookback=7&name=Naomi%20Combined"
+```
 
-### 8. Keep local dev auth separate
+Required checks for all 3 requests:
 
-Local development should continue using:
+1. HTTP status `200`.
+2. `content-type` contains `text/calendar`.
+3. body contains `BEGIN:VCALENDAR`.
+4. request is not Access-challenged.
 
-- `ALLOW_DEV_ROLE_HEADER=true`
+## 9. Verify admin protection
 
-Deployed environments should use:
+Browser test sequence:
 
-- `ALLOW_DEV_ROLE_HEADER=false`
+1. Open private/incognito window.
+2. Go to `https://ics.sprynewmedia.com/admin/`.
+3. Confirm Access login challenge appears.
+4. Sign in with approved account and confirm app loads.
+5. Sign out.
+6. Repeat with non-approved account and confirm access denied.
 
-Production admin access should come only from verified Cloudflare Access identity.
+API test:
 
-## Worker Configuration Needed Later
+```powershell
+curl -i "https://ics.sprynewmedia.com/api/events"
+```
 
-Once the code is ready, configure these values for the Worker:
+Expected result: unauthenticated request is blocked by Access.
 
-- `CLOUDFLARE_ACCESS_TEAM_DOMAIN`
-- `CLOUDFLARE_ACCESS_AUD`
-- `ADMIN_EMAILS`
-- `EDITOR_EMAILS`
+## 10. Release gate (all must pass)
 
-Keep or continue using:
+1. Public feed routes work with token and are not Access-challenged.
+2. `/admin/*` and `/api/*` are Access-protected.
+3. Worker uses verified Access JWT (`Cf-Access-Jwt-Assertion`) for role mapping.
+4. `ALLOW_DEV_ROLE_HEADER=false` in deployed environment.
+5. `ADMIN_EMAILS` and `EDITOR_EMAILS` contain only approved identities.
 
-- `TOKEN`
-- calendar-name variables
-- source/feed configuration variables as needed
-
-## Notes
-
-- Personal Gmail plus Workspace is acceptable with this model.
-- The app should map exact verified emails to roles rather than depending on Workspace-specific group integration in v1.
-- If you later want Workspace-group-based authorization, that can be added as a later enhancement.
+Deployment is complete only when all 5 checks pass.

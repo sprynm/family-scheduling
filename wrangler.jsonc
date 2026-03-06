@@ -1,8 +1,10 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "family-scheduling",
+  "account_id": "e355dc4894a2d16665c7529ba5309970",
   "main": "src/index.js",
   "compatibility_date": "2025-09-06",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": true,
   "observability": {
@@ -16,8 +18,8 @@
     {
       "binding": "APP_DB",
       "database_name": "family-scheduling",
-      "database_id": "local-family-scheduling",
-      "preview_database_id": "local-family-scheduling"
+      "database_id": "5cadc788-f969-4293-8ab7-769eb84e406f",
+      "preview_database_id": "60ab9760-1f1f-44a9-9cf8-8fae4620e842"
     }
   ],
   "r2_buckets": [
@@ -49,6 +51,9 @@
     "DEFAULT_LOOKBACK_DAYS": "7",
     "RECURRENCE_HORIZON_DAYS": "180",
     "PRUNE_AFTER_DAYS": "30",
+    "SNAPSHOTS_ENABLED": "true",
+    "SNAPSHOTS_MAX_BYTES": "1048576",
+    "SNAPSHOTS_MAX_RECORDS": "5000",
     "ALLOW_DEV_ROLE_HEADER": "false",
     "SEED_SAMPLE_DATA": "false"
   },

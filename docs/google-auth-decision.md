@@ -42,9 +42,9 @@ That means:
 
 must **not** be placed behind Cloudflare Access.
 
-Only the admin surface should be protected by Access.
+Only the admin surface is protected by Access.
 
-## Recommended deployment model
+## Deployment model
 
 Use one hostname with route-based separation:
 
@@ -85,15 +85,15 @@ Initial v1 role source:
 
 stored as secrets or environment variables.
 
-Later this can move into D1-backed user/role management if needed.
+Future enhancement: move role mapping into D1-backed user/role management.
 
 ## Verification model
 
-The Worker should validate the Access JWT presented in `Cf-Access-Jwt-Assertion`.
+The Worker must validate the Access JWT presented in `Cf-Access-Jwt-Assertion`.
 
 Do not trust only raw forwarded headers.
 
-The Worker should verify:
+The Worker must verify:
 
 - JWT signature
 - expected issuer
@@ -101,30 +101,29 @@ The Worker should verify:
 - expiry / not-before
 - presence of authenticated email
 
-Then it should derive the role from the verified identity.
+Then it must derive the role from the verified identity.
 
 ### JWT key source
 
-The Access JWT signature should be verified against the Cloudflare Access JWKS published at:
+The Access JWT signature must be verified against the Cloudflare Access JWKS published at:
 
 - `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`
 
-Implementation expectation:
+Implementation requirements:
 
 - fetch the JWKS from the Access certs endpoint
-- cache the parsed keys so every request does not trigger a network fetch
-- prefer in-memory per Worker instance and/or Cache API depending on runtime behavior
+- cache parsed keys so every request does not trigger a network fetch
 - refresh cached keys when a matching `kid` is missing or verification fails due to key rotation
 
 ## Local development model
 
-Local development keeps the current `ALLOW_DEV_ROLE_HEADER=true` path.
+Local development keeps `ALLOW_DEV_ROLE_HEADER=true`.
 
-That means:
+Rules:
 
-- local dev can still use `x-user-role`
-- deployed environments should disable that path
-- production auth should come only from verified Access identity
+- local dev may use `x-user-role`
+- deployed environments must disable that path
+- production auth must come only from verified Access identity
 
 ## Required configuration
 

@@ -1,7 +1,26 @@
 import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
+import { clearAuthCachesForTest } from '../src/lib/auth.js';
 import { D1Repository } from '../src/lib/repository.js';
+
+function base64UrlEncodeJson(value) {
+  const json = JSON.stringify(value);
+  return Buffer.from(json, 'utf8').toString('base64url');
+}
+
+async function createAccessJwt({ privateKey, kid, payload }) {
+  const header = { alg: 'RS256', typ: 'JWT', kid };
+  const encodedHeader = base64UrlEncodeJson(header);
+  const encodedPayload = base64UrlEncodeJson(payload);
+  const signedPart = `${encodedHeader}.${encodedPayload}`;
+  const signature = await crypto.subtle.sign(
+    { name: 'RSASSA-PKCS1-v1_5' },
+    privateKey,
+    new TextEncoder().encode(signedPart)
+  );
+  return `${signedPart}.${Buffer.from(signature).toString('base64url')}`;
+}
 
 class FakeStatement {
   constructor(db, sql) {
@@ -641,9 +660,12 @@ beforeEach(() => {
   env.CALENDAR_NAME_FAMILY = 'Family Combined';
   env.CALENDAR_NAME_GRAYSON = 'Grayson Combined';
   env.CALENDAR_NAME_NAOMI = 'Naomi Combined';
+  env.ADMIN_EMAILS = 'lance.long@gmail.com';
+  env.EDITOR_EMAILS = 'lance.long@gmail.com,nursesmiff@gmail.com';
   env.ALLOW_DEV_ROLE_HEADER = 'true';
   env.SEED_SAMPLE_DATA = 'true';
   env.APP_DB = new FakeDb();
+  clearAuthCachesForTest();
 });
 
 afterEach(() => {
@@ -670,6 +692,17 @@ describe('family-scheduling worker', () => {
     expect(body).toContain('BEGIN:VCALENDAR');
     expect(body).toContain('X-WR-CALNAME:Family Combined');
     expect(body).toContain('SUMMARY:N: 🏀 Basketball Game');
+  });
+
+  it('serves admin shell on /admin', async () => {
+    const request = new Request('http://example.com/admin');
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(body).toContain('Admin Console');
   });
 
   it('renders child feeds with icon but without family prefix', async () => {
@@ -704,6 +737,118 @@ describe('family-scheduling worker', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
     expect(response.status).toBe(403);
+  });
+
+  it('allows editor access via validated Cloudflare Access JWT', async () => {
+    env.ALLOW_DEV_ROLE_HEADER = 'false';
+    env.CLOUDFLARE_ACCESS_AUD = 'test-access-aud';
+    env.CLOUDFLARE_ACCESS_TEAM_DOMAIN = 'https://spry.cloudflareaccess.com';
+
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await createAccessJwt({
+      privateKey: keyPair.privateKey,
+      kid: 'test-key-1',
+      payload: {
+        aud: ['test-access-aud'],
+        iss: 'https://spry.cloudflareaccess.com',
+        email: 'nursesmiff@gmail.com',
+        exp: now + 60,
+        nbf: now - 60,
+      },
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url) => {
+        if (String(url) === 'https://spry.cloudflareaccess.com/cdn-cgi/access/certs') {
+          return new Response(
+            JSON.stringify({
+              keys: [{ ...publicJwk, kid: 'test-key-1', kty: 'RSA' }],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      })
+    );
+
+    const request = new Request('http://example.com/api/events', {
+      headers: { 'Cf-Access-Jwt-Assertion': token },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(200);
+
+    const adminOnlyRequest = new Request('http://example.com/api/rebuild/full', {
+      method: 'POST',
+      headers: { 'Cf-Access-Jwt-Assertion': token },
+    });
+    const adminCtx = createExecutionContext();
+    const adminResponse = await worker.fetch(adminOnlyRequest, env, adminCtx);
+    await waitOnExecutionContext(adminCtx);
+    expect(adminResponse.status).toBe(403);
+  });
+
+  it('rejects invalid Cloudflare Access JWT on protected routes', async () => {
+    env.ALLOW_DEV_ROLE_HEADER = 'false';
+    env.CLOUDFLARE_ACCESS_AUD = 'test-access-aud';
+    env.CLOUDFLARE_ACCESS_TEAM_DOMAIN = 'https://spry.cloudflareaccess.com';
+
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+    const now = Math.floor(Date.now() / 1000);
+    const token = await createAccessJwt({
+      privateKey: keyPair.privateKey,
+      kid: 'test-key-2',
+      payload: {
+        aud: ['wrong-audience'],
+        iss: 'https://spry.cloudflareaccess.com',
+        email: 'lance.long@gmail.com',
+        exp: now + 60,
+        nbf: now - 60,
+      },
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            keys: [{ ...publicJwk, kid: 'test-key-2', kty: 'RSA' }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      )
+    );
+
+    const request = new Request('http://example.com/api/events', {
+      headers: { 'Cf-Access-Jwt-Assertion': token },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBe(401);
   });
 
   it('creates override records', async () => {

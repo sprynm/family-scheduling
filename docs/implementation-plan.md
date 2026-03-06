@@ -67,7 +67,7 @@ Auth separation rules:
 - admin shell and admin APIs are protected by Cloudflare Access
 - the Worker validates Access identity and maps verified users to `admin` or `editor`
 
-Recommended deployment model:
+Deployment model:
 
 - keep public feeds on `ics.sprynewmedia.com`
 - place admin shell on `/admin`
