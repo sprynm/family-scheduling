@@ -292,7 +292,7 @@ function renderAdminShell() {
           <p class="metric" id="metric-jobs">-</p>
         </article>
         <article class="panel">
-          <p class="metric-label">Targets</p>
+          <p class="metric-label">Outputs</p>
           <p class="metric" id="metric-targets">-</p>
         </article>
       </div>
@@ -303,15 +303,14 @@ function renderAdminShell() {
       <button id="refresh" class="primary">Refresh Data</button>
       <button id="rebuild" class="warn">Queue Full Rebuild</button>
     </div>
-    <p class="step">Step 1: Create Targets</p>
+    <p class="step">Step 1: Create Google Outputs</p>
     <form id="target-form" class="inline-form">
-      <input id="target-key" type="text" placeholder="target_key (e.g. grayson_clubs)" required />
+      <input id="target-key" type="text" placeholder="output_key (e.g. grayson_clubs)" required />
       <input id="target-calendar" type="text" placeholder="calendar_id" required />
       <select id="target-mode">
-        <option value="managed_output">managed_output</option>
-        <option value="external">external</option>
+        <option value="managed_output">Managed output</option>
       </select>
-      <button id="target-save" type="submit">Add / Update Google Target</button>
+      <button id="target-save" type="submit">Add / Update Google Output</button>
     </form>
 
     <p class="step">Step 2: Add Sources</p>
@@ -332,7 +331,7 @@ function renderAdminShell() {
         </select>
         <select id="source-google-targets" multiple></select>
       </div>
-      <p class="hint">Configure icon and prefix per selected target. Prefix is typically only used on family-style outputs, but can be stored on any target rule.</p>
+      <p class="hint">Configure icon and prefix per selected output. Prefix is typically only used on the family feed, but can be stored on any output link.</p>
       <div id="source-target-rules" class="target-rules"></div>
       <div class="actions">
         <button id="source-save" type="submit">Add ICS Source</button>
@@ -348,7 +347,7 @@ function renderAdminShell() {
               <tr>
                 <th>Name</th>
                 <th>Owner</th>
-                <th>Assigned Targets</th>
+                <th>Assigned Outputs</th>
                 <th>Category</th>
                 <th>Active</th>
                 <th>Actions</th>
@@ -360,12 +359,12 @@ function renderAdminShell() {
       </article>
 
       <article class="table-panel panel">
-        <h2>Google Targets</h2>
+        <h2>Google Outputs</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Target Key</th>
+                <th>Output Key</th>
                 <th>Calendar ID</th>
                 <th>Mode</th>
                 <th>Active</th>
@@ -383,7 +382,7 @@ function renderAdminShell() {
           <table>
             <thead>
               <tr>
-                <th>Target</th>
+                <th>Feed</th>
                 <th>Primary</th>
                 <th>Alias</th>
               </tr>
@@ -417,9 +416,9 @@ function renderAdminShell() {
             <option value="grayson">grayson</option>
             <option value="naomi">naomi</option>
           </select>
-          <button id="debug-load" type="button" class="primary">Load Target Events</button>
+          <button id="debug-load" type="button" class="primary">Load Output Events</button>
         </div>
-        <pre id="debug-output">Select a target and click "Load Target Events".</pre>
+        <pre id="debug-output">Select an output and click "Load Output Events".</pre>
       </article>
 
       <article class="table-panel panel">
@@ -547,7 +546,7 @@ function renderAdminShell() {
                 '" /></label></div>';
             })
             .join('')
-        : '<p class="hint">Select at least one target to configure target rules.</p>';
+        : '<p class="hint">Select at least one output to configure output rules.</p>';
 
       sourceTargetRulesEl.querySelectorAll('input[data-rule-target]').forEach((input) => {
         input.addEventListener('input', () => {
@@ -622,7 +621,7 @@ function renderAdminShell() {
         const googleTargetOptions = registeredTargets
           .map((target) => '<option value="' + (target.target_key || '') + '">Google Calendar: ' + (target.target_key || '') + '</option>')
           .join('');
-        sourceGoogleTargetsInput.innerHTML = googleTargetOptions || '<option value="" disabled>No Google targets configured</option>';
+        sourceGoogleTargetsInput.innerHTML = googleTargetOptions || '<option value="" disabled>No Google outputs configured</option>';
         debugTargetInput.innerHTML = [
           logicalTargets.map((targetKey) => '<option value="' + targetKey + '">' + targetKey + '</option>').join(''),
           registeredTargets.map((target) => '<option value="' + (target.target_key || '') + '">' + (target.target_key || '') + '</option>').join('')
