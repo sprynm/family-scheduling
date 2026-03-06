@@ -53,443 +53,500 @@ function renderAdminShell() {
       color: var(--ink);
     }
     main {
-      max-width: 1120px;
+      max-width: 1100px;
       margin: 0 auto;
       padding: 24px 18px 48px;
+      display: grid;
+      gap: 20px;
     }
-    .hero, .panel, .table-panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 10px 30px rgba(21, 40, 70, 0.08);
-    }
-    .hero {
-      padding: 20px;
-      margin-bottom: 16px;
-    }
+    h1, h2, h3 { margin: 0; line-height: 1.2; }
+    h1 { font-size: clamp(1.4rem, 3vw, 2rem); }
+    h2 { font-size: 1.1rem; color: var(--ink); }
+    h3 { font-size: 0.95rem; color: var(--ink); }
+    p { margin: 0; color: var(--muted); line-height: 1.5; }
+    td, th { color: var(--muted); }
     .eyebrow {
-      font-size: 12px;
+      font-size: 11px;
       letter-spacing: 0.12em;
       text-transform: uppercase;
       color: var(--accent);
-      margin: 0 0 8px;
       font-weight: 700;
     }
-    h1 {
-      margin: 0 0 8px;
-      font-size: clamp(1.4rem, 3.2vw, 2.1rem);
-      line-height: 1.1;
+    /* panels */
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 6px 20px rgba(21,40,70,0.07);
+      padding: 20px;
     }
-    p, li, td, th {
+    .card-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 4px;
+    }
+    .section-desc {
+      font-size: 0.85rem;
       color: var(--muted);
-      line-height: 1.4;
+      margin-bottom: 16px !important;
     }
+    .subsection {
+      border-top: 1px solid var(--line);
+      margin-top: 18px;
+      padding-top: 16px;
+    }
+    .subsection-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 20px;
+      background: #e8f0fe;
+      color: var(--accent-2);
+    }
+    .badge.ics { background: #e6f7f0; color: var(--accent); }
+    .badge.planned { background: #f4f4f5; color: #888; }
+    /* summary strip */
     .summary-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
       margin-top: 12px;
     }
-    .panel {
-      padding: 14px;
+    .metric-card {
+      background: #f7faff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 14px;
     }
-    .metric {
-      margin: 0;
-      font-size: 1.4rem;
-      color: var(--ink);
-      font-weight: 700;
-    }
-    .metric-label {
-      margin: 0;
-      font-size: 0.83rem;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
+    .metric { font-size: 1.5rem; font-weight: 700; color: var(--ink); }
+    .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    /* toolbar */
     .toolbar {
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin: 16px 0;
+      gap: 8px;
+      margin-top: 14px;
     }
+    /* forms */
     .inline-form {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin: 0 0 16px;
-      align-items: center;
+      align-items: flex-start;
     }
-    .form-stack {
-      display: grid;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    .step {
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: var(--accent-2);
-      font-weight: 700;
-      margin: 0 0 8px;
-    }
-    input, select {
+    .form-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+    .field-group { display: grid; gap: 4px; }
+    .field-label { font-size: 0.78rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    input[type="text"], input[type="url"], input[type="search"], select:not(.checkbox-wrap select) {
       border: 1px solid var(--line);
       background: #fff;
       color: var(--ink);
       padding: 8px 10px;
-      border-radius: 10px;
+      border-radius: 8px;
       font-size: 0.88rem;
-      min-width: 170px;
     }
-    select[multiple] {
-      min-width: 230px;
-      min-height: 90px;
+    input[type="text"] { min-width: 160px; }
+    input[type="url"] { min-width: 280px; }
+    input[type="search"] { min-width: 200px; }
+    select { min-width: 140px; }
+    /* checkbox output picker */
+    .checkbox-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
     }
+    .checkbox-wrap label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.85rem;
+      color: var(--ink);
+      background: #f4f7fb;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 5px 10px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .checkbox-wrap input[type="checkbox"] { accent-color: var(--accent-2); }
+    /* output rules */
     .target-rules {
       display: grid;
       gap: 10px;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 10px;
     }
     .target-rule {
       border: 1px solid #dce5f4;
-      border-radius: 12px;
+      border-radius: 10px;
       background: #f8fbff;
       padding: 12px;
       display: grid;
       gap: 8px;
     }
-    .target-rule strong {
-      color: var(--ink);
-      font-size: 0.9rem;
-    }
-    .target-rule label {
-      display: grid;
-      gap: 4px;
-      color: var(--muted);
-      font-size: 0.8rem;
-    }
-    .target-rule input {
-      min-width: 0;
-      width: 100%;
-      box-sizing: border-box;
-    }
-    .hint {
-      margin: 0;
-      font-size: 0.82rem;
-      color: var(--muted);
-    }
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
+    .target-rule strong { color: var(--ink); font-size: 0.88rem; }
+    .target-rule label { display: grid; gap: 3px; color: var(--muted); font-size: 0.78rem; }
+    .target-rule input { min-width: 0; width: 100%; box-sizing: border-box; }
+    /* buttons */
     button {
       border: 1px solid var(--line);
       background: #f5f8ff;
       color: var(--ink);
-      padding: 8px 12px;
-      border-radius: 10px;
+      padding: 8px 14px;
+      border-radius: 8px;
       font-size: 0.88rem;
       cursor: pointer;
       font-weight: 600;
-    }
-    button.primary {
-      background: linear-gradient(135deg, var(--accent-2), #0d8bdb);
-      color: #fff;
-      border-color: transparent;
-    }
-    button.warn {
-      background: #fff6f3;
-      color: var(--warn);
-      border-color: #e8cfc6;
-    }
-    button.danger {
-      background: #fff1f0;
-      color: #a6251b;
-      border-color: #efc5c2;
-      padding: 6px 9px;
-      font-size: 0.8rem;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .table-wrap {
-      overflow-x: auto;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.9rem;
-    }
-    th, td {
-      padding: 8px 6px;
-      text-align: left;
-      border-bottom: 1px solid #ecf1f8;
       white-space: nowrap;
     }
-    th {
-      color: var(--ink);
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
+    button.primary { background: linear-gradient(135deg, var(--accent-2), #0d8bdb); color: #fff; border-color: transparent; }
+    button.warn { background: #fff6f3; color: var(--warn); border-color: #e8cfc6; }
+    button.danger { background: #fff1f0; color: #a6251b; border-color: #efc5c2; padding: 5px 9px; font-size: 0.8rem; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* tables */
+    .table-wrap { overflow-x: auto; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { padding: 8px 8px; text-align: left; border-bottom: 1px solid #ecf1f8; white-space: nowrap; }
+    th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink); }
+    td .actions { display: flex; gap: 6px; }
+    /* status */
     .status {
-      margin: 0 0 12px;
-      padding: 10px 12px;
-      border-radius: 10px;
+      padding: 10px 14px;
+      border-radius: 8px;
       background: #eff5ff;
       color: #22488c;
       border: 1px solid #d5e2fb;
-      font-size: 0.9rem;
+      font-size: 0.88rem;
     }
-    .status.error {
-      background: #fff5f1;
-      color: #8d2a14;
-      border-color: #f2d1c8;
+    .status.error { background: #fff5f1; color: #8d2a14; border-color: #f2d1c8; }
+    .hint { font-size: 0.82rem; color: var(--muted); }
+    /* event search results */
+    .event-list { display: grid; gap: 4px; margin-top: 10px; }
+    .event-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      background: #fff;
     }
-    .section-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-    #debug-output {
-      margin: 8px 0 0;
-      border: 1px solid #dde6f5;
-      border-radius: 10px;
-      background: #f8fbff;
-      color: #24406f;
-      padding: 10px;
+    .event-item:hover { background: #f0f5ff; border-color: #bcd0f5; }
+    .event-item.selected { background: #e8f0fe; border-color: var(--accent-2); }
+    .event-item-title { font-weight: 600; color: var(--ink); flex: 1; }
+    .event-item-meta { font-size: 0.78rem; color: var(--muted); }
+    /* event detail */
+    #event-detail { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 16px; }
+    .instance-list { display: grid; gap: 4px; margin: 10px 0; max-height: 200px; overflow-y: auto; }
+    .instance-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
       font-size: 0.83rem;
-      overflow: auto;
-      max-height: 260px;
-      white-space: pre-wrap;
+      cursor: pointer;
+      background: #fff;
     }
-    @media (min-width: 980px) {
-      .section-grid {
-        grid-template-columns: 1.2fr 1fr;
-      }
+    .instance-item:hover { background: #f0f5ff; }
+    .instance-item.selected { background: #e8f0fe; border-color: var(--accent-2); }
+    .override-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 12px; }
+    .override-list { margin-top: 12px; display: grid; gap: 6px; }
+    .override-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #fff8f0;
+      border: 1px solid #f0d8b8;
+      border-radius: 8px;
+      font-size: 0.85rem;
     }
+    .override-item-info { flex: 1; color: var(--ink); }
+    .override-item-meta { font-size: 0.78rem; color: var(--muted); }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
   <main>
-    <section class="hero">
+
+    <!-- Header -->
+    <div class="card">
       <p class="eyebrow">Family Scheduling</p>
       <h1>Admin Console</h1>
-      <p>Live operational view for sources, events, jobs, and feed contracts.</p>
       <div class="summary-grid">
-        <article class="panel">
-          <p class="metric-label">Sources</p>
-          <p class="metric" id="metric-sources">-</p>
-        </article>
-        <article class="panel">
-          <p class="metric-label">Events</p>
-          <p class="metric" id="metric-events">-</p>
-        </article>
-        <article class="panel">
-          <p class="metric-label">Jobs</p>
-          <p class="metric" id="metric-jobs">-</p>
-        </article>
-        <article class="panel">
-          <p class="metric-label">Outputs</p>
-          <p class="metric" id="metric-targets">-</p>
-        </article>
+        <div class="metric-card"><p class="metric-label">Sources</p><p class="metric" id="metric-sources">-</p></div>
+        <div class="metric-card"><p class="metric-label">Events</p><p class="metric" id="metric-events">-</p></div>
+        <div class="metric-card"><p class="metric-label">Google Outputs</p><p class="metric" id="metric-targets">-</p></div>
+        <div class="metric-card"><p class="metric-label">Jobs</p><p class="metric" id="metric-jobs">-</p></div>
       </div>
-    </section>
-
-    <p id="status" class="status">Loading dashboard data...</p>
-    <div class="toolbar">
-      <button id="refresh" class="primary">Refresh Data</button>
-      <button id="rebuild" class="warn">Queue Full Rebuild</button>
+      <div class="toolbar">
+        <button id="refresh" class="primary">Refresh</button>
+        <button id="rebuild" class="warn">Queue Full Rebuild</button>
+      </div>
     </div>
-    <p class="step">Step 1: Create Google Outputs</p>
-    <form id="target-form" class="inline-form">
-      <input id="target-key" type="text" placeholder="output_key (e.g. grayson_clubs)" required />
-      <input id="target-calendar" type="text" placeholder="calendar_id" required />
-      <input type="hidden" id="target-mode" value="managed_output" />
-      <button id="target-save" type="submit">Add / Update Google Output</button>
-    </form>
 
-    <p class="step">Step 2: Add Sources</p>
-    <form id="source-form" class="form-stack">
-      <div class="inline-form">
-        <input id="source-name" type="text" placeholder="display name" required />
-        <input id="source-url" type="url" placeholder="https://...ics" required />
-        <select id="source-google-output">
-          <option value="1">google output: yes</option>
-          <option value="0">google output: no</option>
-        </select>
-      </div>
-      <div class="inline-form">
-        <select id="source-ics-targets" multiple>
-          <option value="family" selected>ICS Feed: family</option>
-          <option value="grayson">ICS Feed: grayson</option>
-          <option value="naomi">ICS Feed: naomi</option>
-        </select>
-        <select id="source-google-targets" multiple></select>
-      </div>
-      <p class="hint">Configure icon and prefix per selected output. Prefix is typically only used on the family feed, but can be stored on any output link.</p>
-      <div id="source-target-rules" class="target-rules"></div>
-      <div class="actions">
-        <button id="source-save" type="submit">Add ICS Source</button>
-      </div>
-    </form>
+    <p id="status" class="status">Loading...</p>
 
-    <section class="section-grid">
-      <article class="table-panel panel">
-        <h2>Sources</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Owner</th>
-                <th>Assigned Outputs</th>
-                <th>Category</th>
-                <th>Active</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="sources-body"></tbody>
-          </table>
+    <!-- Section 1: Configure Outputs -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Configure Outputs</h2>
+      </div>
+      <p class="section-desc">Outputs are delivered calendar services. Sources are assigned to one or more outputs.</p>
+
+      <!-- Google Calendar outputs -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Google Calendar</h3>
+          <span class="badge">Google</span>
         </div>
-      </article>
-
-      <article class="table-panel panel">
-        <h2>Google Outputs</h2>
+        <p class="hint" style="margin-bottom:12px">Connect a Google Calendar that this system will write to on each sync.</p>
+        <form id="target-form" class="inline-form">
+          <div class="field-group">
+            <span class="field-label">Display name / key</span>
+            <input id="target-key" type="text" placeholder="e.g. grayson-clubs" required />
+          </div>
+          <div class="field-group">
+            <span class="field-label">Google Calendar ID</span>
+            <input id="target-calendar" type="text" placeholder="name@group.calendar.google.com" required />
+          </div>
+          <input type="hidden" id="target-mode" value="managed_output" />
+          <div class="field-group" style="justify-content:flex-end">
+            <span class="field-label">&nbsp;</span>
+            <button id="target-save" class="primary" type="submit">Add</button>
+          </div>
+        </form>
         <div class="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>Output Key</th>
-                <th>Calendar ID</th>
-                <th>Active</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Name / Key</th><th>Calendar ID</th><th>Active</th><th>Actions</th></tr></thead>
             <tbody id="targets-body"></tbody>
           </table>
         </div>
-      </article>
+      </div>
 
-      <article class="table-panel panel">
-        <h2>Feed Contracts</h2>
+      <!-- ICS feed outputs -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>ICS Feeds</h3>
+          <span class="badge ics">ICS</span>
+          <span class="badge planned">Configurable feeds planned</span>
+        </div>
+        <p class="hint" style="margin-bottom:12px">Shareable calendar URLs. Currently fixed to three feeds — adding named feeds without a code change is planned.</p>
         <div class="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>Feed</th>
-                <th>Primary</th>
-                <th>Alias</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Feed</th><th>Primary URL</th><th>Alias URL</th></tr></thead>
             <tbody id="contracts-body"></tbody>
           </table>
         </div>
-      </article>
+      </div>
+    </div>
 
-      <article class="table-panel panel">
-        <h2>Recent Jobs</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>Scope</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="jobs-body"></tbody>
-          </table>
+    <!-- Section 2: Configure Sources -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Configure Sources</h2>
+      </div>
+      <p class="section-desc">Add an ICS URL and choose which outputs its events feed into.</p>
+
+      <form id="source-form" style="display:grid;gap:14px">
+        <div class="form-row">
+          <div class="field-group">
+            <span class="field-label">Friendly name</span>
+            <input id="source-name" type="text" placeholder="e.g. Grayson Hockey" required />
+          </div>
+          <div class="field-group">
+            <span class="field-label">ICS URL</span>
+            <input id="source-url" type="url" placeholder="https://..." required />
+          </div>
         </div>
-      </article>
+        <div>
+          <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
+          <div class="checkbox-wrap" id="source-ics-outputs">
+            <label><input type="checkbox" name="ics-target" value="family"> family</label>
+            <label><input type="checkbox" name="ics-target" value="grayson"> grayson</label>
+            <label><input type="checkbox" name="ics-target" value="naomi"> naomi</label>
+          </div>
+        </div>
+        <div>
+          <p class="field-label" style="margin-bottom:6px">Google Calendar Outputs</p>
+          <div class="checkbox-wrap" id="source-google-outputs"></div>
+          <p class="hint" id="no-google-hint">No Google outputs configured yet.</p>
+        </div>
+        <div id="source-target-rules" class="target-rules"></div>
+        <div>
+          <button id="source-save" class="primary" type="submit">Add Source</button>
+        </div>
+      </form>
 
-      <article class="table-panel panel">
-        <h2>Review / Debug Output</h2>
-        <div class="inline-form">
-          <select id="debug-target">
-            <option value="family">family</option>
-            <option value="grayson">grayson</option>
-            <option value="naomi">naomi</option>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Owner</th>
+              <th>Outputs</th>
+              <th>Icon</th>
+              <th>Active</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="sources-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Section 3: Modify Events -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Modify Events</h2>
+      </div>
+      <p class="section-desc">Search for an event and apply an override — skip an instance, hide it from an output, flag as maybe, or attach a note.</p>
+
+      <div class="form-row" style="margin-top:12px">
+        <div class="field-group">
+          <span class="field-label">Search events</span>
+          <input type="search" id="event-search" placeholder="Title keyword..." />
+        </div>
+        <div class="field-group">
+          <span class="field-label">Filter by output</span>
+          <select id="event-output-filter">
+            <option value="">All outputs</option>
           </select>
-          <button id="debug-load" type="button" class="primary">Load Output Events</button>
         </div>
-        <pre id="debug-output">Select an output and click "Load Output Events".</pre>
-      </article>
+        <div class="field-group" style="justify-content:flex-end">
+          <span class="field-label">&nbsp;</span>
+          <button id="event-search-btn" class="primary">Search</button>
+        </div>
+      </div>
 
-      <article class="table-panel panel">
-        <h2>Recent Events</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Source</th>
-                <th>Owner</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="events-body"></tbody>
-          </table>
-        </div>
-      </article>
-    </section>
+      <div id="event-results" class="event-list"></div>
+
+      <div id="event-detail" class="hidden">
+        <h3 id="event-detail-title" style="margin-bottom:8px"></h3>
+        <p class="hint" id="event-detail-meta"></p>
+
+        <p class="field-label" style="margin:12px 0 6px">Instances — select one to override, or leave none selected to apply to all instances</p>
+        <div class="instance-list" id="instance-list"></div>
+
+        <form id="override-form" class="override-form">
+          <div class="field-group">
+            <span class="field-label">Override type</span>
+            <select id="override-type">
+              <option value="skip">Skip — remove from all outputs</option>
+              <option value="hidden">Hidden — suppress from a specific output</option>
+              <option value="maybe">Maybe — flag as uncertain</option>
+              <option value="note">Note — attach context only</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <span class="field-label">Note (optional)</span>
+            <input type="text" id="override-note" placeholder="e.g. Can't make it this week" />
+          </div>
+          <div class="field-group" style="justify-content:flex-end">
+            <span class="field-label">&nbsp;</span>
+            <button id="override-save" class="primary" type="submit">Apply Override</button>
+          </div>
+        </form>
+
+        <div id="override-list" class="override-list"></div>
+      </div>
+    </div>
+
+    <!-- System -->
+    <div class="card">
+      <h2>Recent Jobs</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Type</th><th>Scope</th><th>Status</th></tr></thead>
+          <tbody id="jobs-body"></tbody>
+        </table>
+      </div>
+    </div>
+
   </main>
   <script>
     const statusEl = document.getElementById('status');
     const refreshBtn = document.getElementById('refresh');
     const rebuildBtn = document.getElementById('rebuild');
-    const sourceForm = document.getElementById('source-form');
-    const sourceNameInput = document.getElementById('source-name');
-    const sourceUrlInput = document.getElementById('source-url');
-    const sourceIcsTargetsInput = document.getElementById('source-ics-targets');
-    const sourceGoogleTargetsInput = document.getElementById('source-google-targets');
-    const sourceTargetRulesEl = document.getElementById('source-target-rules');
-    const sourceGoogleOutputInput = document.getElementById('source-google-output');
-    const sourceSaveBtn = document.getElementById('source-save');
-    const debugTargetInput = document.getElementById('debug-target');
-    const debugLoadBtn = document.getElementById('debug-load');
-    const debugOutputEl = document.getElementById('debug-output');
+
+    // outputs
     const targetForm = document.getElementById('target-form');
     const targetKeyInput = document.getElementById('target-key');
     const targetCalendarInput = document.getElementById('target-calendar');
     const targetModeInput = document.getElementById('target-mode');
-    const targetSaveBtn = document.getElementById('target-save');
+    const targetsBody = document.getElementById('targets-body');
+    const contractsBody = document.getElementById('contracts-body');
 
+    // sources
+    const sourceForm = document.getElementById('source-form');
+    const sourceNameInput = document.getElementById('source-name');
+    const sourceUrlInput = document.getElementById('source-url');
+    const sourceIcsOutputsEl = document.getElementById('source-ics-outputs');
+    const sourceGoogleOutputsEl = document.getElementById('source-google-outputs');
+    const noGoogleHint = document.getElementById('no-google-hint');
+    const sourceTargetRulesEl = document.getElementById('source-target-rules');
+    const sourcesBody = document.getElementById('sources-body');
+
+    // events / overrides
+    const eventSearchInput = document.getElementById('event-search');
+    const eventOutputFilter = document.getElementById('event-output-filter');
+    const eventSearchBtn = document.getElementById('event-search-btn');
+    const eventResultsEl = document.getElementById('event-results');
+    const eventDetailEl = document.getElementById('event-detail');
+    const eventDetailTitle = document.getElementById('event-detail-title');
+    const eventDetailMeta = document.getElementById('event-detail-meta');
+    const instanceListEl = document.getElementById('instance-list');
+    const overrideForm = document.getElementById('override-form');
+    const overrideTypeInput = document.getElementById('override-type');
+    const overrideNoteInput = document.getElementById('override-note');
+    const overrideListEl = document.getElementById('override-list');
+
+    // metrics
     const metricSources = document.getElementById('metric-sources');
     const metricEvents = document.getElementById('metric-events');
     const metricJobs = document.getElementById('metric-jobs');
     const metricTargets = document.getElementById('metric-targets');
-
-    const sourcesBody = document.getElementById('sources-body');
-    const contractsBody = document.getElementById('contracts-body');
-    const targetsBody = document.getElementById('targets-body');
     const jobsBody = document.getElementById('jobs-body');
-    const eventsBody = document.getElementById('events-body');
+
     const sourceRuleState = new Map();
+    let selectedEventId = null;
+    let selectedInstanceId = null;
+    let currentEventOverrides = [];
 
     function setStatus(message, isError) {
       statusEl.textContent = message;
       statusEl.className = isError ? 'status error' : 'status';
     }
 
-    function renderRows(body, rowsHtml, colCount = 4) {
-      body.innerHTML = rowsHtml || '<tr><td colspan="' + colCount + '">No records</td></tr>';
+    function renderRows(body, rowsHtml, colCount) {
+      body.innerHTML = rowsHtml || '<tr><td colspan="' + (colCount || 4) + '" style="color:#aaa;font-style:italic">None</td></tr>';
     }
 
-    function getSelectedValues(selectEl) {
-      return Array.from(selectEl.selectedOptions || []).map((option) => option.value).filter(Boolean);
+    function getCheckedValues(containerEl) {
+      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
     }
 
-    function getSelectedTargetKeys() {
-      return [...new Set([...getSelectedValues(sourceIcsTargetsInput), ...getSelectedValues(sourceGoogleTargetsInput)])];
+    function getAllCheckboxValues(containerEl) {
+      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]')).map((cb) => ({ value: cb.value, label: cb.closest('label')?.textContent?.trim() || cb.value }));
     }
 
-    function deriveOwnerTypeFromSelection() {
-      const selectedIcsTargets = getSelectedValues(sourceIcsTargetsInput);
-      if (selectedIcsTargets.includes('grayson')) return 'grayson';
-      if (selectedIcsTargets.includes('naomi')) return 'naomi';
+    function deriveOwnerType(selectedIcs) {
+      if (selectedIcs.includes('grayson')) return 'grayson';
+      if (selectedIcs.includes('naomi')) return 'naomi';
       return 'family';
     }
 
@@ -501,78 +558,69 @@ function renderAdminShell() {
     }
 
     function syncTargetRuleInputs() {
-      const ownerType = deriveOwnerTypeFromSelection();
-      const optionsByKey = new Map();
-      Array.from(sourceIcsTargetsInput.options).forEach((option) => {
-        optionsByKey.set(option.value, { label: option.textContent || option.value, type: 'ics' });
-      });
-      Array.from(sourceGoogleTargetsInput.options).forEach((option) => {
-        if (!option.value) return;
-        optionsByKey.set(option.value, { label: option.textContent || option.value, type: 'google' });
-      });
+      const selectedIcs = getCheckedValues(sourceIcsOutputsEl);
+      const selectedGoogle = getCheckedValues(sourceGoogleOutputsEl);
+      const ownerType = deriveOwnerType(selectedIcs);
+      const allSelected = [...selectedIcs, ...selectedGoogle];
 
-      const selectedTargetKeys = getSelectedTargetKeys();
+      // label map
+      const labelMap = new Map();
+      getAllCheckboxValues(sourceIcsOutputsEl).forEach(({ value, label }) => labelMap.set(value, { label: 'ICS: ' + label, type: 'ics' }));
+      getAllCheckboxValues(sourceGoogleOutputsEl).forEach(({ value, label }) => labelMap.set(value, { label: 'Google: ' + label, type: 'google' }));
+
       const nextState = new Map();
-      for (const targetKey of selectedTargetKeys) {
-        const existing = sourceRuleState.get(targetKey) || {};
-        nextState.set(targetKey, {
+      for (const key of allSelected) {
+        const existing = sourceRuleState.get(key) || {};
+        nextState.set(key, {
           icon: existing.icon || '',
-          prefix: existing.prefix !== undefined ? existing.prefix : getDefaultPrefix(targetKey, ownerType),
+          prefix: existing.prefix !== undefined ? existing.prefix : getDefaultPrefix(key, ownerType),
         });
       }
       sourceRuleState.clear();
-      nextState.forEach((value, key) => sourceRuleState.set(key, value));
+      nextState.forEach((v, k) => sourceRuleState.set(k, v));
 
-      sourceTargetRulesEl.innerHTML = selectedTargetKeys.length
-        ? selectedTargetKeys
-            .map((targetKey) => {
-              const option = optionsByKey.get(targetKey) || { label: targetKey, type: 'google' };
-              const state = sourceRuleState.get(targetKey) || { icon: '', prefix: '' };
-              return '<div class="target-rule"><strong>' +
-                option.label +
-                '</strong><label>Icon<input type="text" data-rule-target="' +
-                targetKey +
-                '" data-rule-field="icon" value="' +
-                (state.icon || '').replace(/"/g, '&quot;') +
-                '" placeholder="optional icon" /></label><label>Prefix<input type="text" data-rule-target="' +
-                targetKey +
-                '" data-rule-field="prefix" value="' +
-                (state.prefix || '').replace(/"/g, '&quot;') +
-                '" placeholder="' +
-                (option.type === 'ics' && targetKey === 'family' ? 'for example N:' : 'optional prefix') +
-                '" /></label></div>';
-            })
-            .join('')
-        : '<p class="hint">Select at least one output to configure output rules.</p>';
+      sourceTargetRulesEl.innerHTML = allSelected.length
+        ? allSelected.map((key) => {
+            const info = labelMap.get(key) || { label: key, type: 'google' };
+            const state = sourceRuleState.get(key) || { icon: '', prefix: '' };
+            return '<div class="target-rule"><strong>' + info.label + '</strong>' +
+              '<label>Icon<input type="text" data-rule-target="' + key + '" data-rule-field="icon" value="' + (state.icon || '').replace(/"/g, '&quot;') + '" placeholder="optional emoji" /></label>' +
+              '<label>Prefix<input type="text" data-rule-target="' + key + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (info.type === 'ics' && key === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
+              '</div>';
+          }).join('')
+        : '';
 
       sourceTargetRulesEl.querySelectorAll('input[data-rule-target]').forEach((input) => {
         input.addEventListener('input', () => {
-          const targetKey = input.getAttribute('data-rule-target');
+          const key = input.getAttribute('data-rule-target');
           const field = input.getAttribute('data-rule-field');
-          if (!targetKey || !field) return;
-          const current = sourceRuleState.get(targetKey) || { icon: '', prefix: '' };
+          if (!key || !field) return;
+          const current = sourceRuleState.get(key) || { icon: '', prefix: '' };
           current[field] = input.value;
-          sourceRuleState.set(targetKey, current);
+          sourceRuleState.set(key, current);
         });
       });
     }
 
-    function buildSourceTargetLabels(source) {
+    function buildOutputLabels(source) {
       const links = Array.isArray(source.target_links) ? source.target_links : [];
       if (links.length) {
         return links.map((link) => {
-          const typeLabel = link.target_type === 'ics' ? 'ICS' : 'Google';
-          const ruleBits = [];
-          if (link.prefix) ruleBits.push('prefix ' + link.prefix);
-          if (link.icon) ruleBits.push('icon ' + link.icon);
-          return typeLabel + ': ' + link.target_key + (ruleBits.length ? ' (' + ruleBits.join(', ') + ')' : '');
-        });
+          const type = link.target_type === 'ics' ? 'ICS' : 'GCal';
+          return type + ':' + link.target_key;
+        }).join(', ');
       }
-      const labels = [];
-      if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) labels.push('ICS: grayson');
-      if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) labels.push('ICS: naomi');
-      if (Number(source.include_in_family_ics)) labels.push('ICS: family');
-      return labels;
+      const parts = [];
+      if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) parts.push('ICS:grayson');
+      if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) parts.push('ICS:naomi');
+      if (Number(source.include_in_family_ics)) parts.push('ICS:family');
+      return parts.join(', ');
+    }
+
+    function buildIconLabel(source) {
+      const links = Array.isArray(source.target_links) ? source.target_links : [];
+      const icons = [...new Set(links.map((l) => l.icon).filter(Boolean))];
+      return icons.join(' ') || (source.icon || '');
     }
 
     async function fetchJson(url, options) {
@@ -593,21 +641,21 @@ function renderAdminShell() {
     async function loadDashboard() {
       refreshBtn.disabled = true;
       rebuildBtn.disabled = true;
-      setStatus('Loading dashboard data...', false);
+      setStatus('Loading...', false);
       try {
         const [sourcesPayload, eventsPayload, jobsPayload, targetsPayload, contractsPayload] = await Promise.all([
           fetchJson('/api/sources'),
           fetchJson('/api/events?limit=15'),
           fetchJson('/api/jobs'),
           fetchJson('/api/targets'),
-          fetchJson('/api/feed-contracts')
+          fetchJson('/api/feed-contracts'),
         ]);
 
         const sources = sourcesPayload.sources || [];
         const events = eventsPayload.events || [];
         const jobs = jobsPayload.jobs || [];
-        const logicalTargets = targetsPayload.logicalTargets || [];
         const registeredTargets = targetsPayload.targets || [];
+        const logicalTargets = targetsPayload.logicalTargets || [];
         const contracts = contractsPayload.contracts || [];
 
         metricSources.textContent = String(sources.length);
@@ -615,209 +663,300 @@ function renderAdminShell() {
         metricJobs.textContent = String(jobs.length);
         metricTargets.textContent = String(registeredTargets.length);
 
-        const googleTargetOptions = registeredTargets
-          .map((target) => '<option value="' + (target.target_key || '') + '">Google Calendar: ' + (target.target_key || '') + '</option>')
-          .join('');
-        sourceGoogleTargetsInput.innerHTML = googleTargetOptions || '<option value="" disabled>No Google outputs configured</option>';
-        debugTargetInput.innerHTML = [
-          logicalTargets.map((targetKey) => '<option value="' + targetKey + '">' + targetKey + '</option>').join(''),
-          registeredTargets.map((target) => '<option value="' + (target.target_key || '') + '">' + (target.target_key || '') + '</option>').join('')
-        ].join('');
+        // populate google outputs checkboxes in source form
+        if (registeredTargets.length) {
+          noGoogleHint.classList.add('hidden');
+          sourceGoogleOutputsEl.innerHTML = registeredTargets
+            .map((t) => '<label><input type="checkbox" name="google-target" value="' + (t.target_key || '') + '"> ' + (t.target_key || '') + '</label>')
+            .join('');
+        } else {
+          noGoogleHint.classList.remove('hidden');
+          sourceGoogleOutputsEl.innerHTML = '';
+        }
+
+        // populate event output filter
+        const allOutputKeys = [...logicalTargets, ...registeredTargets.map((t) => t.target_key || '')].filter(Boolean);
+        eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
+          allOutputKeys.map((k) => '<option value="' + k + '">' + k + '</option>').join('');
+
         syncTargetRuleInputs();
 
+        // sources table
         const sortedSources = [...sources].sort((a, b) => {
-          const aLabel = buildSourceTargetLabels(a).join(', ');
-          const bLabel = buildSourceTargetLabels(b).join(', ');
-          if (aLabel !== bLabel) return aLabel.localeCompare(bLabel);
+          const al = buildOutputLabels(a), bl = buildOutputLabels(b);
+          if (al !== bl) return al.localeCompare(bl);
           return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''));
         });
-
         renderRows(
           sourcesBody,
-          sortedSources
-            .slice(0, 20)
-            .map((source) =>
-              '<tr><td>' + (source.display_name || source.name || '') + '</td><td>' + (source.owner_type || '') + '</td><td>' + buildSourceTargetLabels(source).join(', ') + '</td><td>' + (source.source_category || '') + '</td><td>' + (source.is_active ? 'yes' : 'no') + '</td><td><div class="actions"><button class="primary rebuild-source" data-source-id="' + (source.id || '') + '">Rebuild</button><button class="danger disable-source" data-source-id="' + (source.id || '') + '">Disable</button></div></td></tr>'
-            )
-            .join(''),
+          sortedSources.slice(0, 30).map((s) =>
+            '<tr><td>' + (s.display_name || s.name || '') +
+            '</td><td>' + (s.owner_type || '') +
+            '</td><td>' + buildOutputLabels(s) +
+            '</td><td>' + buildIconLabel(s) +
+            '</td><td>' + (s.is_active ? 'yes' : 'no') +
+            '</td><td><div class="actions"><button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button><button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button></div></td></tr>'
+          ).join(''),
           6
         );
 
-        document.querySelectorAll('.rebuild-source').forEach((button) => {
-          button.addEventListener('click', async () => {
-            const sourceId = button.getAttribute('data-source-id');
-            if (!sourceId) return;
-            button.disabled = true;
-            setStatus('Queueing rebuild for source ' + sourceId + '...', false);
+        document.querySelectorAll('.rebuild-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            btn.disabled = true;
+            setStatus('Queueing rebuild...', false);
             try {
-              const payload = await fetchJson('/api/sources/' + encodeURIComponent(sourceId) + '/rebuild', { method: 'POST' });
-              setStatus('Rebuild queued for source. Job: ' + (payload.job?.id || 'unknown'), false);
+              const p = await fetchJson('/api/sources/' + encodeURIComponent(id) + '/rebuild', { method: 'POST' });
+              setStatus('Rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
               await loadDashboard();
-            } catch (error) {
-              setStatus('Unable to queue source rebuild: ' + (error.message || String(error)), true);
-              button.disabled = false;
+            } catch (err) {
+              setStatus('Rebuild failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
             }
           });
         });
 
-        document.querySelectorAll('.disable-source').forEach((button) => {
-          button.addEventListener('click', async () => {
-            const sourceId = button.getAttribute('data-source-id');
-            if (!sourceId) return;
-            button.disabled = true;
-            setStatus('Disabling source ' + sourceId + '...', false);
+        document.querySelectorAll('.disable-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            btn.disabled = true;
             try {
-              await fetchJson('/api/sources/' + encodeURIComponent(sourceId), { method: 'DELETE' });
+              await fetchJson('/api/sources/' + encodeURIComponent(id), { method: 'DELETE' });
               setStatus('Source disabled.', false);
               await loadDashboard();
-            } catch (error) {
-              setStatus('Unable to disable source: ' + (error.message || String(error)), true);
-              button.disabled = false;
+            } catch (err) {
+              setStatus('Disable failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
             }
           });
         });
 
+        // google outputs table
+        renderRows(
+          targetsBody,
+          registeredTargets.map((t) =>
+            '<tr><td>' + (t.target_key || '') +
+            '</td><td style="max-width:260px;overflow:hidden;text-overflow:ellipsis">' + (t.calendar_id || '') +
+            '</td><td>' + (Number(t.is_active) ? 'yes' : 'no') +
+            '</td><td><button class="danger delete-target" data-target-key="' + (t.target_key || '') + '">Delete</button></td></tr>'
+          ).join(''),
+          4
+        );
+
+        document.querySelectorAll('.delete-target').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const key = btn.getAttribute('data-target-key');
+            if (!key) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/targets/' + encodeURIComponent(key), { method: 'DELETE' });
+              setStatus('Deleted ' + key + '.', false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Delete failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        // ics feeds table
         renderRows(
           contractsBody,
-          contracts
-            .map((contract) => '<tr><td>' + contract.target + '</td><td>' + contract.primary_path + '</td><td>' + (contract.alias_path || '') + '</td></tr>')
-            .join(''),
+          contracts.map((c) =>
+            '<tr><td>' + c.target + '</td><td>' + c.primary_path + '</td><td>' + (c.alias_path || '') + '</td></tr>'
+          ).join(''),
           3
         );
 
-        renderRows(
-          targetsBody,
-          registeredTargets
-            .map((target) =>
-              '<tr><td>' + (target.target_key || '') + '</td><td>' + (target.calendar_id || '') + '</td><td>' + (Number(target.is_active) ? 'yes' : 'no') + '</td><td><button class="danger delete-target" data-target-key="' + (target.target_key || '') + '">Delete</button></td></tr>'
-            )
-            .join(''),
-          5
-        );
-
-        document.querySelectorAll('.delete-target').forEach((button) => {
-          button.addEventListener('click', async () => {
-            const targetKey = button.getAttribute('data-target-key');
-            if (!targetKey) return;
-            button.disabled = true;
-            setStatus('Deleting Google target ' + targetKey + '...', false);
-            try {
-              await fetchJson('/api/targets/' + encodeURIComponent(targetKey), { method: 'DELETE' });
-              setStatus('Deleted Google target ' + targetKey + '.', false);
-              await loadDashboard();
-            } catch (error) {
-              setStatus('Unable to delete Google target: ' + (error.message || String(error)), true);
-              button.disabled = false;
-            }
-          });
-        });
-
+        // jobs
         renderRows(
           jobsBody,
-          jobs
-            .slice(0, 20)
-            .map((job) => '<tr><td>' + (job.job_type || '') + '</td><td>' + (job.scope_type || 'system') + '</td><td>' + (job.status || '') + '</td></tr>')
-            .join('')
+          jobs.slice(0, 20).map((j) =>
+            '<tr><td>' + (j.job_type || '') + '</td><td>' + (j.scope_type || 'system') + '</td><td>' + (j.status || '') + '</td></tr>'
+          ).join(''),
+          3
         );
 
-        renderRows(
-          eventsBody,
-          events
-            .slice(0, 20)
-            .map((event) => '<tr><td>' + (event.title || '') + '</td><td>' + (event.source_name || '') + '</td><td>' + (event.owner_type || '') + '</td><td>' + (event.status || '') + '</td></tr>')
-            .join('')
-        );
-
-        setStatus('Dashboard loaded.', false);
-      } catch (error) {
-        setStatus('Unable to load dashboard: ' + (error.message || String(error)), true);
+        setStatus('Loaded.', false);
+      } catch (err) {
+        setStatus('Load failed: ' + (err.message || String(err)), true);
       } finally {
         refreshBtn.disabled = false;
         rebuildBtn.disabled = false;
       }
     }
 
-    refreshBtn.addEventListener('click', loadDashboard);
-    sourceIcsTargetsInput.addEventListener('change', syncTargetRuleInputs);
-    sourceGoogleTargetsInput.addEventListener('change', syncTargetRuleInputs);
-    rebuildBtn.addEventListener('click', async () => {
-      rebuildBtn.disabled = true;
-      setStatus('Queueing full rebuild...', false);
-      try {
-        const payload = await fetchJson('/api/rebuild/full', { method: 'POST' });
-        setStatus('Full rebuild queued. Job: ' + (payload.job?.id || 'unknown'), false);
-        await loadDashboard();
-      } catch (error) {
-        setStatus('Unable to queue rebuild: ' + (error.message || String(error)), true);
-      } finally {
-        rebuildBtn.disabled = false;
-      }
-    });
+    // --- Event search & overrides ---
 
-    targetForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      targetSaveBtn.disabled = true;
-      setStatus('Saving Google target...', false);
+    async function searchEvents() {
+      const query = eventSearchInput.value.trim();
+      const outputFilter = eventOutputFilter.value;
+      eventSearchBtn.disabled = true;
       try {
-        const calendarId = String(targetCalendarInput.value || '').trim();
-        if (!calendarId.includes('@')) {
-          throw new Error('calendar_id should look like a full Google Calendar ID (contains "@").');
+        let url = '/api/events?limit=100';
+        if (outputFilter) url += '&target=' + encodeURIComponent(outputFilter);
+        const payload = await fetchJson(url);
+        let events = payload.events || [];
+        if (query) {
+          const q = query.toLowerCase();
+          events = events.filter((e) => (e.title || '').toLowerCase().includes(q));
         }
-        await fetchJson('/api/targets', {
+        eventResultsEl.innerHTML = events.length
+          ? events.slice(0, 30).map((e) =>
+              '<div class="event-item' + (e.id === selectedEventId ? ' selected' : '') + '" data-event-id="' + (e.id || '') + '" data-event-title="' + (e.title || '').replace(/"/g, '&quot;') + '" data-event-meta="' + (e.owner_type || '') + ' / ' + (e.source_name || '') + '">' +
+              '<span class="event-item-title">' + (e.title || '') + '</span>' +
+              '<span class="event-item-meta">' + (e.owner_type || '') + ' &middot; ' + (e.source_name || '') + '</span>' +
+              '</div>'
+            ).join('')
+          : '<p class="hint" style="padding:8px 0">No events found.</p>';
+
+        eventResultsEl.querySelectorAll('.event-item').forEach((item) => {
+          item.addEventListener('click', () => selectEvent(
+            item.getAttribute('data-event-id'),
+            item.getAttribute('data-event-title'),
+            item.getAttribute('data-event-meta')
+          ));
+        });
+      } catch (err) {
+        setStatus('Event search failed: ' + (err.message || String(err)), true);
+      } finally {
+        eventSearchBtn.disabled = false;
+      }
+    }
+
+    async function selectEvent(eventId, title, meta) {
+      selectedEventId = eventId;
+      selectedInstanceId = null;
+      eventDetailEl.classList.remove('hidden');
+      eventDetailTitle.textContent = title || 'Event';
+      eventDetailMeta.textContent = meta || '';
+      instanceListEl.innerHTML = '<p class="hint">Loading instances...</p>';
+      overrideListEl.innerHTML = '';
+
+      try {
+        const [instPayload, eventPayload] = await Promise.all([
+          fetchJson('/api/events/' + encodeURIComponent(eventId) + '/instances'),
+          fetchJson('/api/events/' + encodeURIComponent(eventId)),
+        ]);
+        const instances = instPayload.instances || [];
+        instanceListEl.innerHTML = instances.length
+          ? instances.map((inst) => {
+              const dt = inst.start_time ? new Date(inst.start_time).toLocaleString() : inst.instance_date || inst.id;
+              return '<div class="instance-item" data-instance-id="' + (inst.id || '') + '">' + dt + '</div>';
+            }).join('')
+          : '<p class="hint">No instances found (may be a single event).</p>';
+
+        instanceListEl.querySelectorAll('.instance-item').forEach((item) => {
+          item.addEventListener('click', () => {
+            const id = item.getAttribute('data-instance-id');
+            selectedInstanceId = selectedInstanceId === id ? null : id;
+            instanceListEl.querySelectorAll('.instance-item').forEach((el) => el.classList.remove('selected'));
+            if (selectedInstanceId) item.classList.add('selected');
+          });
+        });
+
+        currentEventOverrides = eventPayload.overrides || [];
+        renderOverrides();
+      } catch (err) {
+        instanceListEl.innerHTML = '<p class="hint" style="color:#a00">Failed to load instances.</p>';
+      }
+
+      // highlight selected event in results
+      eventResultsEl.querySelectorAll('.event-item').forEach((el) => {
+        el.classList.toggle('selected', el.getAttribute('data-event-id') === eventId);
+      });
+    }
+
+    function renderOverrides() {
+      overrideListEl.innerHTML = currentEventOverrides.length
+        ? currentEventOverrides.map((ov) =>
+            '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
+            '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
+            (ov.payload?.note ? ' — ' + ov.payload.note : '') +
+            '<div class="override-item-meta">' + (ov.event_instance_id ? 'Specific instance' : 'All instances') + ' &middot; by ' + (ov.actor_role || '') + '</div></div>' +
+            '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
+            '</div>'
+          ).join('')
+        : '';
+
+      overrideListEl.querySelectorAll('.remove-override').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-override-id');
+          if (!id) return;
+          btn.disabled = true;
+          try {
+            await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
+            setStatus('Override removed.', false);
+            await selectEvent(selectedEventId, eventDetailTitle.textContent, eventDetailMeta.textContent);
+          } catch (err) {
+            setStatus('Remove failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+
+    overrideForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!selectedEventId) return;
+      const saveBtn = document.getElementById('override-save');
+      saveBtn.disabled = true;
+      try {
+        await fetchJson('/api/events/' + encodeURIComponent(selectedEventId) + '/overrides', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            target_key: targetKeyInput.value,
-            calendar_id: calendarId,
-            ownership_mode: targetModeInput.value
-          })
+            overrideType: overrideTypeInput.value,
+            eventInstanceId: selectedInstanceId || null,
+            payload: overrideNoteInput.value ? { note: overrideNoteInput.value } : {},
+          }),
         });
-        targetKeyInput.value = '';
-        targetCalendarInput.value = '';
-        targetModeInput.value = 'managed_output';
-        setStatus('Google target saved.', false);
-        await loadDashboard();
-      } catch (error) {
-        setStatus('Unable to save Google target: ' + (error.message || String(error)), true);
+        overrideNoteInput.value = '';
+        selectedInstanceId = null;
+        instanceListEl.querySelectorAll('.instance-item').forEach((el) => el.classList.remove('selected'));
+        setStatus('Override applied.', false);
+        await selectEvent(selectedEventId, eventDetailTitle.textContent, eventDetailMeta.textContent);
+      } catch (err) {
+        setStatus('Override failed: ' + (err.message || String(err)), true);
       } finally {
-        targetSaveBtn.disabled = false;
+        saveBtn.disabled = false;
       }
     });
 
-    sourceForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      sourceSaveBtn.disabled = true;
-      setStatus('Saving ICS source...', false);
+    eventSearchBtn.addEventListener('click', searchEvents);
+    eventSearchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); searchEvents(); } });
+
+    // --- Source form ---
+    sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
+    sourceGoogleOutputsEl.addEventListener('change', syncTargetRuleInputs);
+
+    sourceForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const saveBtn = document.getElementById('source-save');
+      saveBtn.disabled = true;
+      setStatus('Saving source...', false);
       try {
         const sourceUrl = String(sourceUrlInput.value || '').trim();
-        const selectedIcsTargets = getSelectedValues(sourceIcsTargetsInput);
-        const selectedGoogleTargets = getSelectedValues(sourceGoogleTargetsInput);
+        const selectedIcs = getCheckedValues(sourceIcsOutputsEl);
+        const selectedGoogle = getCheckedValues(sourceGoogleOutputsEl);
 
         if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
           throw new Error('Source URL must start with http:// or https://');
         }
-        if (!selectedIcsTargets.length && !selectedGoogleTargets.length) {
-          throw new Error('Select at least one target (ICS or Google).');
+        if (!selectedIcs.length && !selectedGoogle.length) {
+          throw new Error('Select at least one output (ICS or Google).');
         }
-        if (selectedIcsTargets.includes('grayson') && selectedIcsTargets.includes('naomi')) {
-          throw new Error('A source cannot target both grayson and naomi ICS feeds in one row.');
+        if (selectedIcs.includes('grayson') && selectedIcs.includes('naomi')) {
+          throw new Error('A source cannot target both grayson and naomi ICS feeds.');
         }
 
-        const ownerType = selectedIcsTargets.includes('grayson')
-          ? 'grayson'
-          : selectedIcsTargets.includes('naomi')
-          ? 'naomi'
-          : 'family';
-        const includeInChildIcs = selectedIcsTargets.includes('grayson') || selectedIcsTargets.includes('naomi');
-        const includeInFamilyIcs = selectedIcsTargets.includes('family');
-        const allTargetKeys = [...new Set([...selectedIcsTargets, ...selectedGoogleTargets])];
-        const targetLinks = allTargetKeys.map((targetKey) => {
-          const rule = sourceRuleState.get(targetKey) || { icon: '', prefix: getDefaultPrefix(targetKey, ownerType) };
-          return {
-            target_key: targetKey,
-            icon: rule.icon || '',
-            prefix: rule.prefix || '',
-          };
+        const ownerType = deriveOwnerType(selectedIcs);
+        const allKeys = [...new Set([...selectedIcs, ...selectedGoogle])];
+        const targetLinks = allKeys.map((key) => {
+          const rule = sourceRuleState.get(key) || { icon: '', prefix: getDefaultPrefix(key, ownerType) };
+          return { target_key: key, icon: rule.icon || '', prefix: rule.prefix || '' };
         });
 
         await fetchJson('/api/sources', {
@@ -827,50 +966,71 @@ function renderAdminShell() {
             owner_type: ownerType,
             display_name: sourceNameInput.value,
             url: sourceUrl,
-            include_in_child_ics: includeInChildIcs,
-            include_in_family_ics: includeInFamilyIcs,
-            include_in_child_google_output: sourceGoogleOutputInput.value === '1',
-            target_links: targetLinks
-          })
+            include_in_child_ics: selectedIcs.includes('grayson') || selectedIcs.includes('naomi'),
+            include_in_family_ics: selectedIcs.includes('family'),
+            include_in_child_google_output: selectedGoogle.length > 0,
+            target_links: targetLinks,
+          }),
         });
+
         sourceNameInput.value = '';
         sourceUrlInput.value = '';
-        Array.from(sourceIcsTargetsInput.options).forEach((option) => {
-          option.selected = option.value === 'family';
-        });
-        Array.from(sourceGoogleTargetsInput.options).forEach((option) => {
-          option.selected = false;
-        });
+        sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+        sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
         sourceRuleState.clear();
         syncTargetRuleInputs();
-        setStatus('ICS source saved. Queue a rebuild to ingest now.', false);
+        setStatus('Source saved. Queue a rebuild to ingest it now.', false);
         await loadDashboard();
-      } catch (error) {
-        setStatus('Unable to save ICS source: ' + (error.message || String(error)), true);
+      } catch (err) {
+        setStatus('Save failed: ' + (err.message || String(err)), true);
       } finally {
-        sourceSaveBtn.disabled = false;
+        saveBtn.disabled = false;
       }
     });
 
-    debugLoadBtn.addEventListener('click', async () => {
-      debugLoadBtn.disabled = true;
-      const target = debugTargetInput.value;
-      setStatus('Loading debug output for target ' + target + '...', false);
+    // --- Google output form ---
+    targetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const saveBtn = document.getElementById('target-save');
+      saveBtn.disabled = true;
+      setStatus('Saving Google output...', false);
       try {
-        const payload = await fetchJson('/api/events?target=' + encodeURIComponent(target) + '&limit=50');
-        const events = payload.events || [];
-        const preview = {
-          target,
-          count: events.length,
-          sample: events.slice(0, 10),
-        };
-        debugOutputEl.textContent = JSON.stringify(preview, null, 2);
-        setStatus('Debug output loaded for ' + target + '.', false);
-      } catch (error) {
-        debugOutputEl.textContent = '';
-        setStatus('Unable to load debug output: ' + (error.message || String(error)), true);
+        const calendarId = String(targetCalendarInput.value || '').trim();
+        if (!calendarId.includes('@')) {
+          throw new Error('Calendar ID should be a full Google Calendar ID (contains "@").');
+        }
+        await fetchJson('/api/targets', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            target_key: targetKeyInput.value,
+            calendar_id: calendarId,
+            ownership_mode: targetModeInput.value,
+          }),
+        });
+        targetKeyInput.value = '';
+        targetCalendarInput.value = '';
+        setStatus('Google output saved.', false);
+        await loadDashboard();
+      } catch (err) {
+        setStatus('Save failed: ' + (err.message || String(err)), true);
       } finally {
-        debugLoadBtn.disabled = false;
+        saveBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadDashboard);
+    rebuildBtn.addEventListener('click', async () => {
+      rebuildBtn.disabled = true;
+      setStatus('Queueing full rebuild...', false);
+      try {
+        const p = await fetchJson('/api/rebuild/full', { method: 'POST' });
+        setStatus('Full rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
+        await loadDashboard();
+      } catch (err) {
+        setStatus('Rebuild failed: ' + (err.message || String(err)), true);
+      } finally {
+        rebuildBtn.disabled = false;
       }
     });
 
