@@ -117,8 +117,8 @@ export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 
   const windowEnd = new Date(now);
   windowEnd.setUTCDate(windowEnd.getUTCDate() + horizonDays);
 
-  const rule = RRule.fromString(event.rrule);
-  rule.options.dtstart = start;
+  const ruleOptions = RRule.parseString(event.rrule);
+  const rule = new RRule({ ...ruleOptions, dtstart: start });
   const occurrences = rule.between(windowStart, windowEnd, true);
 
   return occurrences.map((occurrence) => {

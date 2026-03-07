@@ -169,6 +169,10 @@ function buildSystemOutputTargets() {
   }));
 }
 
+function compareEventsForIngest(a, b) {
+  return Number(Boolean(a.recurrenceId)) - Number(Boolean(b.recurrenceId));
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -1551,12 +1555,13 @@ export class D1Repository {
       throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
     }
 
-    const events = parseICS(body);
+    const events = parseICS(body).sort(compareEventsForIngest);
     for (const event of events) {
       totalEvents += 1;
+      const canonicalProviderKey = `${sourceId}:${event.uid}:`;
       const providerKey = `${sourceId}:${event.uid}:${event.recurrenceId || ''}`;
       const fallbackKey = `${sourceId}:${event.summary}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
-      const identityKey = hashValue(event.uid ? providerKey : fallbackKey);
+      const identityKey = hashValue(event.uid ? (event.recurrenceId ? canonicalProviderKey : providerKey) : fallbackKey);
       const canonicalEventId = stableId('evt', identityKey);
       const sourceEventId = stableId('sev', providerKey || fallbackKey);
       const instances = expandRecurringEvent(event, {
@@ -1630,7 +1635,11 @@ export class D1Repository {
             last_source_change_at, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
-            title = excluded.title,
+            ${event.recurrenceId
+              ? `source_deleted = 0,
+            last_source_change_at = excluded.last_source_change_at,
+            updated_at = excluded.updated_at`
+              : `title = excluded.title,
             source_icon = excluded.source_icon,
             source_prefix = excluded.source_prefix,
             description = excluded.description,
@@ -1639,15 +1648,15 @@ export class D1Repository {
             end_at = excluded.end_at,
             timezone = excluded.timezone,
             status = excluded.status,
-            rrule = excluded.rrule,
+            rrule = COALESCE(excluded.rrule, canonical_events.rrule),
             source_deleted = 0,
             last_source_change_at = excluded.last_source_change_at,
-            updated_at = excluded.updated_at`
+            updated_at = excluded.updated_at`}`
         ).bind(
           canonicalEventId,
           sourceId,
           identityKey,
-          event.rrule ? 'series' : 'single',
+          event.rrule || event.recurrenceId ? 'series' : 'single',
           event.summary,
           sourceIcon,
           sourcePrefix,
