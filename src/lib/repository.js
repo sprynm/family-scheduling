@@ -476,9 +476,9 @@ export class D1Repository {
       SELECT
         event_overrides.id,
         event_overrides.override_type,
-        event_overrides.payload,
+        event_overrides.payload_json,
         event_overrides.event_instance_id,
-        event_overrides.actor_role,
+        event_overrides.created_by,
         event_overrides.created_at,
         canonical_events.id AS canonical_event_id,
         canonical_events.title,
@@ -494,7 +494,7 @@ export class D1Repository {
     `).bind(since).all();
     return (result.results || []).map((row) => ({
       ...row,
-      payload: typeof row.payload === 'string' ? JSON.parse(row.payload || '{}') : (row.payload || {}),
+      payload: typeof row.payload_json === 'string' ? JSON.parse(row.payload_json || '{}') : (row.payload_json || {}),
     }));
   }
 

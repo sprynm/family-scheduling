@@ -883,7 +883,9 @@ function renderAdminShell() {
       }
       try {
         const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(canonicalId));
-        const overrides = (eventPayload.overrides || []).filter((ov) => !ov.event_instance_id || ov.event_instance_id === instanceId);
+        const overrides = (eventPayload.overrides || [])
+          .filter((ov) => !ov.event_instance_id || ov.event_instance_id === instanceId)
+          .map((ov) => ({ ...ov, payload: typeof ov.payload_json === 'string' ? JSON.parse(ov.payload_json || '{}') : (ov.payload_json || {}) }));
         drawerEl.innerHTML =
           '<h4>' + (title || 'Event') + ' <span class="hint" style="font-weight:400">' + (date || '') + '</span></h4>' +
           '<form class="override-form" data-canonical-id="' + (canonicalId || '') + '" data-instance-id="' + instanceId + '">' +
@@ -901,7 +903,7 @@ function renderAdminShell() {
             '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
             '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
             (ov.payload?.note ? ' — ' + ov.payload.note : '') +
-            '<div class="override-item-meta">' + (ov.event_instance_id ? 'This instance' : 'All instances') + ' · by ' + (ov.actor_role || '') + '</div></div>' +
+            '<div class="override-item-meta">' + (ov.event_instance_id ? 'This instance' : 'All instances') + ' · by ' + (ov.created_by || '') + '</div></div>' +
             '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
             '</div>'
           ).join('') + '</div>' : '');
