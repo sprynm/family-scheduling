@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-06 (session 3)_
+_Updated: 2026-03-07 (session 4)_
 
 ## Vocabulary
 
@@ -11,7 +11,7 @@ _Updated: 2026-03-06 (session 3)_
 | **Source → Output link** | The assignment connecting a source to an output, with per-link rendering rules |
 | **Override** | An admin-applied change to how a specific event or instance is distributed |
 
-Code currently uses `target` and `google_targets` in places. These will be normalized to `output` as the UI and schema evolve.
+Code currently uses `target` and `google_targets` in places. These will be replaced by a unified `output_targets` table — see Planned Data Model Changes below.
 
 ---
 
@@ -96,15 +96,39 @@ Admin-applied changes to event handling.
 
 ---
 
-## ICS Output Configuration (Planned)
+## Planned Data Model Changes — Unified Output Targets
 
-The three ICS feeds (`family`, `grayson`, `naomi`) are currently hardcoded in the route matcher (`index.js`) and constants (`constants.js`). The intended direction is to store these as configurable output rows in D1 alongside Google outputs, so:
+**Confirmed direction (2026-03-07).** Replace the current split model (hardcoded ICS constants + `google_targets` table + string `target_key` joins) with a unified `output_targets` table using immutable IDs.
 
-- New named ICS feeds can be created without a code change
-- The same source → output link model applies uniformly to both ICS and Google outputs
-- Feed URLs and calendar names become admin-configurable
+### New `output_targets` table
 
-This requires unifying `google_targets` and the hardcoded ICS constants into a single `outputs` table. Not in scope for the current pass.
+| Field | Purpose |
+|---|---|
+| `id` | UUID, immutable relational key — the only FK used by dependent tables |
+| `target_type` | `ics` or `google` — explicit, never inferred |
+| `slug` | Human handle / URL segment (e.g. `family`, `grayson-clubs`) — for debugging only |
+| `display_name` | Shown in admin UI (e.g. `Family Feed`, `Grayson Clubs`) |
+| `calendar_id` | Google Calendar ID; null for ICS outputs |
+| `ownership_mode` | `managed_output` for Google; null for ICS |
+| `is_system` | 1 for the three built-in ICS outputs — cannot be deleted |
+| `is_active` | Whether the output is active |
+
+Built-in system outputs seeded at migration time:
+
+| slug | display_name | target_type | is_system |
+|---|---|---|---|
+| `family` | Family Feed | ics | 1 |
+| `grayson` | Grayson Feed | ics | 1 |
+| `naomi` | Naomi Feed | ics | 1 |
+
+**Benefits:**
+- No implicit type inference — `target_type` is first-class data
+- No key collisions between ICS and Google outputs
+- New feeds can be created without code changes
+- Admin UI shows human labels, never internal keys
+- `source_target_links` and `output_rules` join by `target_id`, not string
+
+**Migration sequence:** See `docs/todo.md` P2 — Output Target Refactor.
 
 ---
 
@@ -125,10 +149,15 @@ This requires unifying `google_targets` and the hardcoded ICS constants into a s
 
 ### Follow-on
 3. **Recurrence exception handling** — remap `RECURRENCE-ID` exception events to their parent instance rather than creating new canonical events.
-4. **ICS output configuration** — move hardcoded feed names to DB-driven output rows.
-5. **Richer admin edit workflows** — edit existing sources and source → output link rules in-place (currently only create and disable are supported).
-6. **Prune validation** — confirm stale data pruning behaves correctly against real D1 and R2 at scale.
-7. **`runInTransaction()` → `db.batch()`** — migrate 5 callers to atomic batches (see `TECH_DEBT.md`). Low priority while paths remain admin-only with low concurrency.
+4. **Output target refactor** — unified `output_targets` table (see Planned Data Model Changes above). Required before Google outbound sync.
+5. **Google Calendar outbound sync** — build on unified output model.
+6. **`runInTransaction()` → `db.batch()`** — 5 callers still non-atomic (see `TECH_DEBT.md`).
+7. **`poll_interval_minutes`** — implement actual frequency filtering in cron handler.
+
+### P3
+8. Recurrence exception handling, prune validation, test fidelity gaps.
+
+See `docs/todo.md` for the full detail on each item.
 
 ---
 
@@ -165,3 +194,14 @@ Do not implement new features there.
 
 **Tech debt documented**
 - `runInTransaction()` has no atomicity on D1 (D1 rejects `BEGIN`/`COMMIT`). Five callers documented in `TECH_DEBT.md` with correct `db.batch()` migration pattern.
+
+### 2026-03-07 — Session 4
+
+**Bug fixes**
+- Source status showed "error" for all sources — `parseOk` only checked `'ok'`/`'success'` but ingest writes `'parsed'`/`'parsed_no_blob'`. Fixed to accept all four values.
+- `deleteSource()` cascade converted from 9 sequential `.run()` calls to a single `db.batch()` — now atomic.
+- Feed contract URLs now derived from request origin (or `PUBLIC_HOST` env var) instead of hardcoded production hostname.
+
+**Decisions**
+- Confirmed direction: unified `output_targets` table replaces `google_targets` + hardcoded ICS constants. Full design documented in this file and `docs/todo.md`.
+- Admin UI structural problem documented: `renderAdminShell()` template literal is the root cause of recurring escaping bugs; migration to Cloudflare Static Assets added as P1 work item.

@@ -1061,6 +1061,27 @@ describe('family-scheduling worker', () => {
     expect(body.target.calendar_id).toBe('grayson-clubs@example.test');
   });
 
+  it('rejects google targets that collide with built-in ics feed keys', async () => {
+    const request = new Request('http://example.com/api/targets', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-user-role': 'admin',
+      },
+      body: JSON.stringify({
+        target_key: 'grayson',
+        calendar_id: 'grayson@example.test',
+        ownership_mode: 'managed_output',
+      }),
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(400);
+    expect(body.message).toContain('reserved for built-in ICS feeds');
+  });
+
   it('deletes google targets through admin API', async () => {
     env.APP_DB.googleTargets.push({
       id: 'gt_naomi_clubs',

@@ -620,15 +620,16 @@ function renderAdminShell() {
         const jobs = jobsPayload.jobs || [];
         const registeredTargets = targetsPayload.targets || [];
         const logicalTargets = targetsPayload.logicalTargets || [];
+        const selectableGoogleTargets = registeredTargets.filter((t) => !logicalTargets.includes(t.target_key || ''));
         metricSources.textContent = String(sources.length);
         metricEvents.textContent = String(events.length);
         metricJobs.textContent = String(jobs.length);
         metricTargets.textContent = String(registeredTargets.length);
 
         // populate google outputs checkboxes in source form
-        if (registeredTargets.length) {
+        if (selectableGoogleTargets.length) {
           noGoogleHint.classList.add('hidden');
-          sourceGoogleOutputsEl.innerHTML = registeredTargets
+          sourceGoogleOutputsEl.innerHTML = selectableGoogleTargets
             .map((t) => '<label><input type="checkbox" name="google-target" value="' + (t.target_key || '') + '"> ' + (t.target_key || '') + '</label>')
             .join('');
         } else {
@@ -642,7 +643,7 @@ function renderAdminShell() {
           sources.map((s) => '<option value="' + (s.id || '') + '"' + (s.id === prevSource ? ' selected' : '') + '>' + (s.display_name || s.name || '') + ' (' + (s.owner_type || '') + ')</option>').join('');
 
         // populate event output filter
-        const allOutputKeys = [...logicalTargets, ...registeredTargets.map((t) => t.target_key || '')].filter(Boolean);
+        const allOutputKeys = [...new Set([...logicalTargets, ...registeredTargets.map((t) => t.target_key || '')].filter(Boolean))];
         eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
           allOutputKeys.map((k) => '<option value="' + k + '">' + k + '</option>').join('');
 
@@ -1101,7 +1102,11 @@ function renderAdminShell() {
       saveBtn.disabled = true;
       setStatus('Saving Google output...', false);
       try {
+        const targetKey = String(targetKeyInput.value || '').trim().toLowerCase();
         const calendarId = String(targetCalendarInput.value || '').trim();
+        if ([...TARGETS].includes(targetKey)) {
+          throw new Error('Google output keys cannot be family, grayson, or naomi. Use a distinct key such as ' + targetKey + '_clubs.');
+        }
         if (!calendarId.includes('@')) {
           throw new Error('Calendar ID should be a full Google Calendar ID (contains "@").');
         }
