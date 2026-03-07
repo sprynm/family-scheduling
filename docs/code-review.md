@@ -106,9 +106,9 @@ This is a minor API inconsistency — the caller can see the source was created 
 
 ### 6. Admin Shell Auth — ~~Fixed~~ ✓
 
-**Fixed 2026-03-06.**  now enforces  in the Worker before returning HTML. Both the network-layer Cloudflare Access check and the Worker-level role check are active in production.
+**Fixed 2026-03-06.** `GET /admin` now enforces `requireRole(['admin','editor'])` in the Worker before returning HTML. Both the network-layer Cloudflare Access check and the Worker-level role check are active in production.
 
-Note: local dev with  still requires the  header to be present on  requests.
+Note: local dev with `ALLOW_DEV_ROLE_HEADER=true` still requires the `x-user-role` header to be present on `/admin` requests.
 
 ---
 

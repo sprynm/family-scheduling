@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Family Scheduling Admin</title>
+    <link rel="stylesheet" href="/admin.css">
+
+</head>
+<body>
+  <main>
+
+    <!-- Header -->
+    <div class="card">
+      <p class="eyebrow">Family Scheduling</p>
+      <h1>Admin Console</h1>
+      <div class="summary-grid">
+        <div class="metric-card"><p class="metric-label">Sources</p><p class="metric" id="metric-sources">-</p></div>
+        <div class="metric-card"><p class="metric-label">Events</p><p class="metric" id="metric-events">-</p></div>
+        <div class="metric-card"><p class="metric-label">Google Outputs</p><p class="metric" id="metric-targets">-</p></div>
+        <div class="metric-card"><p class="metric-label">Jobs</p><p class="metric" id="metric-jobs">-</p></div>
+      </div>
+      <div class="toolbar">
+        <button id="refresh" class="primary">Refresh</button>
+        <button id="rebuild" class="warn">Queue Full Rebuild</button>
+      </div>
+    </div>
+
+    <p id="status" class="status">Loading...</p>
+
+    <!-- Section 1: Configure Outputs -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Configure Outputs</h2>
+      </div>
+      <p class="section-desc">Outputs are delivered calendar services. Sources are assigned to one or more outputs.</p>
+
+      <!-- Google Calendar outputs -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>Google Calendar</h3>
+          <span class="badge">Google</span>
+        </div>
+        <p class="hint" style="margin-bottom:12px">Connect a Google Calendar that this system will write to on each sync.</p>
+        <form id="target-form" class="inline-form">
+          <div class="field-group">
+            <span class="field-label">Display name / key</span>
+            <input id="target-key" type="text" placeholder="e.g. grayson-clubs" required />
+          </div>
+          <div class="field-group">
+            <span class="field-label">Google Calendar ID</span>
+            <input id="target-calendar" type="text" placeholder="name@group.calendar.google.com" required />
+          </div>
+          <input type="hidden" id="target-mode" value="managed_output" />
+          <div class="field-group" style="justify-content:flex-end">
+            <span class="field-label">&nbsp;</span>
+            <button id="target-save" class="primary" type="submit">Add</button>
+          </div>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name / Key</th><th>Calendar ID</th><th>Active</th><th>Actions</th></tr></thead>
+            <tbody id="targets-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ICS feed outputs -->
+      <div class="subsection">
+        <div class="subsection-header">
+          <h3>ICS Feeds</h3>
+          <span class="badge ics">ICS</span>
+          <span class="badge planned">Configurable feeds planned</span>
+        </div>
+        <p class="hint" style="margin-bottom:12px">Shareable calendar URLs. Currently fixed to three feeds — adding named feeds without a code change is planned.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Feed</th><th>Subscription URL</th><th></th></tr></thead>
+            <tbody id="contracts-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section 2: Configure Sources -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Configure Sources</h2>
+      </div>
+      <p class="section-desc">Add an ICS URL and choose which outputs its events feed into.</p>
+
+      <form id="source-form" style="display:grid;gap:14px">
+        <div class="form-row">
+          <div class="field-group">
+            <span class="field-label">Friendly name</span>
+            <input id="source-name" type="text" placeholder="e.g. Grayson Hockey" required />
+          </div>
+          <div class="field-group">
+            <span class="field-label">ICS URL</span>
+            <input id="source-url" type="url" placeholder="https://..." required />
+          </div>
+        </div>
+        <div>
+          <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
+          <div class="checkbox-wrap" id="source-ics-outputs">
+            <label><input type="checkbox" name="ics-target" value="family"> family</label>
+            <label><input type="checkbox" name="ics-target" value="grayson"> grayson</label>
+            <label><input type="checkbox" name="ics-target" value="naomi"> naomi</label>
+          </div>
+        </div>
+        <div>
+          <p class="field-label" style="margin-bottom:6px">Google Calendar Outputs</p>
+          <div class="checkbox-wrap" id="source-google-outputs"></div>
+          <p class="hint" id="no-google-hint">No Google outputs configured yet.</p>
+        </div>
+        <div id="source-target-rules" class="target-rules"></div>
+        <div>
+          <button id="source-save" class="primary" type="submit">Add Source</button>
+        </div>
+      </form>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Owner</th>
+              <th>Outputs</th>
+              <th>Events</th>
+              <th>Last Fetch</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="sources-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Section 3: Modify Events -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Modify Events</h2>
+      </div>
+
+      <div class="form-row" style="margin-top:12px">
+        <div class="field-group">
+          <span class="field-label">Source</span>
+          <select id="event-source-filter">
+            <option value="">— pick a source —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <span class="field-label">Filter by output</span>
+          <select id="event-output-filter">
+            <option value="">All outputs</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <span class="field-label">Search</span>
+          <input type="search" id="event-search" placeholder="Title keyword..." />
+        </div>
+      </div>
+
+      <div id="inst-results" class="inst-results"><p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p></div>
+
+      <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
+        <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Future Events with Modifications</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Event Date</th><th>Event</th><th>Source</th><th>Override</th><th>Note</th><th></th></tr></thead>
+            <tbody id="modified-events-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- System -->
+    <div class="card">
+      <h2>Recent Jobs</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Type</th><th>Scope</th><th>Status</th></tr></thead>
+          <tbody id="jobs-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+    <script src="/admin.js" defer></script>
+
+</body>
+</html>

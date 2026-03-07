@@ -422,6 +422,9 @@ export class D1Repository {
 
   async upsertTarget(input) {
     const targetKey = normalizeTargetKey(input.target_key);
+    if (TARGETS.includes(targetKey)) {
+      throw new Error('target_key "' + targetKey + '" is reserved for built-in ICS feeds. Use a distinct Google output key such as "' + targetKey + '_clubs".');
+    }
     const calendarId = String(input.calendar_id || '').trim();
     if (!calendarId) {
       throw new Error('calendar_id is required');
