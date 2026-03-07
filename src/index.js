@@ -424,7 +424,7 @@ function renderAdminShell() {
         </div>
       </div>
 
-      <div id="inst-results" class="inst-results"></div>
+      <div id="inst-results" class="inst-results"><p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p></div>
 
       <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
         <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Recently Modified <span class="hint">(last 2 weeks)</span></h3>
@@ -864,8 +864,7 @@ function renderAdminShell() {
             renderInstances();
           } else {
             openDrawerInstId = id;
-            renderInstances();
-            openDrawer(id, canonicalId, title, date, meta);
+            renderInstances(); // loads drawer content at the end
           }
         });
       });
@@ -874,12 +873,6 @@ function renderAdminShell() {
         const drawerEl = document.getElementById('drawer-' + openDrawerInstId);
         if (drawerEl) loadDrawerContent(openDrawerInstId, drawerEl);
       }
-    }
-
-    async function openDrawer(instanceId, canonicalId, title, date, meta) {
-      const drawerEl = document.getElementById('drawer-' + instanceId);
-      if (!drawerEl) return;
-      await loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta);
     }
 
     async function loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta) {
