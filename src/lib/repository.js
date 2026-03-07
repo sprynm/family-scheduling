@@ -146,9 +146,9 @@ export class D1Repository {
   }
 
   async runInTransaction(work) {
-    // D1 does not support SQL BEGIN/COMMIT. Each statement is individually
-    // atomic. For multi-statement atomicity, callers should be migrated to
-    // db.batch() — tracked as a follow-on task.
+    // TECH DEBT: D1 does not support SQL BEGIN/COMMIT. This wrapper provides
+    // no atomicity — callers run as sequential independent writes. Migrate
+    // each caller to db.batch(). See TECH_DEBT.md.
     return work();
   }
 
