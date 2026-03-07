@@ -333,33 +333,6 @@ export class D1Repository {
       ).run();
     }
 
-    const googleTargetsResult = await this.db.prepare(
-      `SELECT id, target_key, calendar_id, ownership_mode, is_active FROM google_targets`
-    ).all();
-    for (const row of googleTargetsResult.results || []) {
-      const slug = normalizeTargetKey(row.target_key);
-      await this.db.prepare(
-        `INSERT INTO output_targets (
-          id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
-        ) VALUES (?, 'google', ?, ?, ?, ?, 0, ?, ?, ?)
-        ON CONFLICT(slug) DO UPDATE SET
-          target_type = 'google',
-          calendar_id = excluded.calendar_id,
-          ownership_mode = excluded.ownership_mode,
-          is_active = excluded.is_active,
-          updated_at = excluded.updated_at`
-      ).bind(
-        row.id || buildOutputTargetId('google', slug),
-        slug,
-        toDisplayNameFromSlug(slug),
-        row.calendar_id,
-        row.ownership_mode || 'managed_output',
-        Number(row.is_active ?? 1),
-        timestamp,
-        timestamp
-      ).run();
-    }
-
     const linksResult = await this.db.prepare(
       `SELECT id, target_key, target_type
        FROM source_target_links
@@ -707,14 +680,6 @@ export class D1Repository {
         is_active = excluded.is_active,
         updated_at = excluded.updated_at`
     ).bind(id, targetKey, resolvedDisplayName, calendarId, ownershipMode, isActive, timestamp, timestamp).run();
-    await this.db.prepare(
-      `INSERT INTO google_targets (id, target_key, calendar_id, ownership_mode, is_active)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(target_key) DO UPDATE SET
-         calendar_id = excluded.calendar_id,
-         ownership_mode = excluded.ownership_mode,
-         is_active = excluded.is_active`
-    ).bind(id, targetKey, calendarId, ownershipMode, isActive).run();
     return this.getOutputTargetBySlug(targetKey);
   }
 
@@ -726,7 +691,6 @@ export class D1Repository {
       this.db.prepare(`DELETE FROM source_target_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ? AND target_type = 'google')`).bind(existing.id, targetKey),
       this.db.prepare(`DELETE FROM output_rules WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey),
       this.db.prepare(`DELETE FROM google_event_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey),
-      this.db.prepare(`DELETE FROM google_targets WHERE target_key = ?`).bind(targetKey),
       this.db.prepare(`DELETE FROM output_targets WHERE id = ?`).bind(existing.id),
     ]);
     return existing;

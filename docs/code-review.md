@@ -162,10 +162,8 @@ Fix: filter the source list in the cron handler to only enqueue sources whose `l
 
 These are implementation gaps, not review findings:
 
-1. Google Calendar outbound sync is not implemented.
-2. Recurrence exception/remap (`RECURRENCE-ID` events) are parsed but not remapped to existing instances — they create new canonical events instead.
-3. Prune execution is scaffolded and tested against FakeDb but not validated against real D1 + R2.
-4. Admin UI has no edit workflow for existing sources or existing target rules — only create and disable.
+1. Prune execution is scaffolded and tested against FakeDb but not validated against real D1 + R2.
+2. Admin UI has no edit workflow for existing sources or existing target rules beyond the current change/disable flows.
 
 ---
 
@@ -181,13 +179,11 @@ These are implementation gaps, not review findings:
 ### Medium
 
 1. N+1 query in `ingestSource` — tolerable at current scale, becomes a problem with many recurring sources.
-2. `rrule` not persisted — silent data loss that will matter if recurrence hardening reads the stored value.
-3. Real-environment D1 migration/upgrade path — `ensureSupportTables` works but is not a production migration strategy.
+2. Real-environment D1 migration/upgrade path — `ensureSupportTables` works but is not a production migration strategy.
 
-### Deferred Until Google Sync
+### Deferred Follow-up
 
-1. Google outbound publish behavior and conflict handling.
-2. `google_event_links` sync state lifecycle.
+1. `google_event_links` sync state lifecycle hardening and production observability.
 
 ---
 

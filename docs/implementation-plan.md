@@ -145,17 +145,15 @@ Built-in system outputs seeded at migration time:
 
 ### Next priority
 1. **Source migration** — enter sources from `C:\Dev\ics-merge\cals.txt` into the new system.
-2. **Google Calendar outbound sync** — write `output_rules` results to managed Google Calendars via the Calendar API.
+2. **Production migration runbook** — apply the output-target cutover migrations in production before removing any rollback path.
+3. **Prune validation** — verify prune behavior against real D1 + R2, not only FakeDb.
 
-### Follow-on
-3. **Recurrence exception handling** — remap `RECURRENCE-ID` exception events to their parent instance rather than creating new canonical events.
-4. **Output target refactor** — unified `output_targets` table (see Planned Data Model Changes above). Required before Google outbound sync.
-5. **Google Calendar outbound sync** — build on unified output model.
-6. **`runInTransaction()` → `db.batch()`** — 5 callers still non-atomic (see `TECH_DEBT.md`).
-7. **`poll_interval_minutes`** — implement actual frequency filtering in cron handler.
-
-### P3
-8. Recurrence exception handling, prune validation, test fidelity gaps.
+### Completed in this pass
+4. **Output target refactor** — unified `output_targets` table is now the live model.
+5. **Google Calendar outbound sync** — linked Google outputs are now reconciled through the Calendar API using a service account.
+6. **`runInTransaction()` → `db.batch()`** — remaining high-write source sync callers were migrated.
+7. **`poll_interval_minutes`** — scheduler source selection now respects the configured interval.
+8. **Recurrence exception handling** — `RECURRENCE-ID` updates now remap to the existing series instance.
 
 See `docs/todo.md` for the full detail on each item.
 
@@ -205,3 +203,17 @@ Do not implement new features there.
 **Decisions**
 - Confirmed direction: unified `output_targets` table replaces `google_targets` + hardcoded ICS constants. Full design documented in this file and `docs/todo.md`.
 - Admin UI structural problem documented: `renderAdminShell()` template literal is the root cause of recurring escaping bugs; migration to Cloudflare Static Assets added as P1 work item.
+
+### 2026-03-07 — Session 5
+
+**Features**
+- Scheduler now respects `poll_interval_minutes` when selecting active sources for cron-driven ingest.
+- Google Calendar outbound sync added for linked Google outputs using `GOOGLE_SERVICE_ACCOUNT_JSON`.
+- Recurrence exception handling now remaps `RECURRENCE-ID` updates onto the existing series instance.
+
+**Refactor**
+- Repository cut over to `output_targets` as the live target model.
+- Legacy `google_targets` migration added in `0004_output_targets_cutover.sql`.
+
+**Test fidelity**
+- FakeDb now enforces disabled-source feed filtering and poll-interval behavior.

@@ -1266,12 +1266,17 @@ describe('family-scheduling worker', () => {
   });
 
   it('creates and updates sources through the admin API with per-target rules', async () => {
-    env.APP_DB.googleTargets.push({
-      id: 'gt_naomi_clubs',
-      target_key: 'naomi_clubs',
+    env.APP_DB.outputTargets.push({
+      id: 'outt_naomi_clubs',
+      target_type: 'google',
+      slug: 'naomi_clubs',
+      display_name: 'Naomi Clubs',
       calendar_id: 'naomi-clubs@example.test',
       ownership_mode: 'managed_output',
+      is_system: 0,
       is_active: 1,
+      created_at: '2026-03-06T00:00:00.000Z',
+      updated_at: '2026-03-06T00:00:00.000Z',
     });
     const createRequest = new Request('http://example.com/api/sources', {
       method: 'POST',
@@ -1401,16 +1406,22 @@ describe('family-scheduling worker', () => {
   });
 
   it('deletes google targets through admin API', async () => {
-    env.APP_DB.googleTargets.push({
-      id: 'gt_naomi_clubs',
-      target_key: 'naomi_clubs',
+    env.APP_DB.outputTargets.push({
+      id: 'outt_naomi_clubs',
+      target_type: 'google',
+      slug: 'naomi_clubs',
+      display_name: 'Naomi Clubs',
       calendar_id: 'naomi-clubs@example.test',
       ownership_mode: 'managed_output',
+      is_system: 0,
       is_active: 1,
+      created_at: '2026-03-06T00:00:00.000Z',
+      updated_at: '2026-03-06T00:00:00.000Z',
     });
     env.APP_DB.sourceTargetLinks.push({
       id: 'stl_naomi_clubs',
       source_id: 'src_seed',
+      target_id: 'outt_naomi_clubs',
       target_key: 'naomi_clubs',
       target_type: 'google',
       icon: '🏐',
@@ -1424,6 +1435,7 @@ describe('family-scheduling worker', () => {
       id: 'out_naomi_clubs',
       canonical_event_id: 'evt_naomi_basketball',
       event_instance_id: 'evt_naomi_basketball_inst1',
+      target_id: 'outt_naomi_clubs',
       target_key: 'naomi_clubs',
       include_state: 'included',
       derived_reason: 'test',
@@ -1440,7 +1452,7 @@ describe('family-scheduling worker', () => {
     const body = await response.json();
     expect(response.status).toBe(200);
     expect(body.deleted.target_key).toBe('naomi_clubs');
-    expect(env.APP_DB.googleTargets.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
+    expect(env.APP_DB.outputTargets.some((row) => row.slug === 'naomi_clubs')).toBe(false);
     expect(env.APP_DB.sourceTargetLinks.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
     expect(env.APP_DB.outputRules.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
   });
