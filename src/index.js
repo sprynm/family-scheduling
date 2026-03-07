@@ -147,11 +147,15 @@ export default {
       if (pathname.startsWith('/api/targets/') && request.method === 'DELETE') {
         const authError = await requireRole(request, env, ['admin']);
         if (authError) return authError;
-        const targetKey = decodeURIComponent(pathname.split('/').filter(Boolean)[2] || '');
-        const repo = await createRepository(env);
-        const removed = await repo.deleteTarget(targetKey);
-        if (!removed) return json({ error: 'Not found' }, { status: 404 });
-        return json({ deleted: removed });
+        try {
+          const targetKey = decodeURIComponent(pathname.split('/').filter(Boolean)[2] || '');
+          const repo = await createRepository(env);
+          const removed = await repo.deleteTarget(targetKey);
+          if (!removed) return json({ error: 'Not found' }, { status: 404 });
+          return json({ deleted: removed });
+        } catch (error) {
+          return asBadRequest(error);
+        }
       }
 
       if (pathname === '/api/instances' && request.method === 'GET') {

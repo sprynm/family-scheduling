@@ -652,7 +652,7 @@ class FakeDb {
     }
 
     if (sql.includes('INSERT INTO google_event_links')) {
-      const [id, targetId, targetKey, canonicalEventId, eventInstanceId, googleEventId, googleEtag, lastSyncedHash, lastSyncedAt] = values;
+      const [id, targetId, targetKey, canonicalEventId, eventInstanceId, googleEventId, googleEtag, lastSyncedHash, lastSyncedAt, syncStatus, lastError] = values;
       const existing = this.googleEventLinks.find((row) => row.id === id);
       if (existing) {
         Object.assign(existing, {
@@ -664,8 +664,8 @@ class FakeDb {
           google_etag: googleEtag,
           last_synced_hash: lastSyncedHash,
           last_synced_at: lastSyncedAt,
-          sync_status: 'synced',
-          last_error: null,
+          sync_status: syncStatus,
+          last_error: lastError,
         });
       } else {
         this.googleEventLinks.push({
@@ -678,8 +678,8 @@ class FakeDb {
           google_etag: googleEtag,
           last_synced_hash: lastSyncedHash,
           last_synced_at: lastSyncedAt,
-          sync_status: 'synced',
-          last_error: null,
+          sync_status: syncStatus,
+          last_error: lastError,
         });
       }
       return;
@@ -1457,6 +1457,19 @@ describe('family-scheduling worker', () => {
     expect(env.APP_DB.outputRules.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
   });
 
+  it('rejects deletion of system output targets', async () => {
+    const request = new Request('http://example.com/api/targets/family', {
+      method: 'DELETE',
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(400);
+    expect(body.message).toContain('Cannot delete system output target');
+  });
+
   it('disables sources and removes their output rules', async () => {
     const listRequest = new Request('http://example.com/api/sources', {
       headers: { 'x-user-role': 'admin' },
@@ -2120,6 +2133,95 @@ describe('family-scheduling worker', () => {
     await repo.disableSource('src_google_disable');
 
     expect(db.googleEventLinks).toHaveLength(0);
+  });
+
+  it('records google sync errors without aborting ingest', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_error',
+      target_type: 'google',
+      slug: 'naomi_clubs',
+      display_name: 'Naomi Clubs',
+      calendar_id: 'naomi-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_google_error',
+      name: 'naomi-volleyball',
+      display_name: 'Naomi Volleyball',
+      provider_type: 'ics',
+      owner_type: 'naomi',
+      source_category: 'sports',
+      url: 'https://example.com/naomi-google-error.ics',
+      icon: '🏐',
+      prefix: 'N:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_google_error',
+      source_id: 'src_google_error',
+      target_id: 'outt_google_error',
+      target_key: 'naomi_clubs',
+      target_type: 'google',
+      icon: '🏐',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        if (String(url) === 'https://example.com/naomi-google-error.ics') {
+          return new Response(
+            [
+              'BEGIN:VCALENDAR',
+              'BEGIN:VEVENT',
+              'UID:naomi-error-1',
+              'SUMMARY:Volleyball Practice',
+              'DTSTART:20260310T010000Z',
+              'DTEND:20260310T023000Z',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ].join('\r\n'),
+            { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+          );
+        }
+        if (String(url) === 'https://oauth2.googleapis.com/token') {
+          return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/naomi-clubs%40group.calendar.google.com/events' && options.method === 'POST') {
+          return new Response(JSON.stringify({ error: { message: 'calendar write failed' } }), { status: 500, headers: { 'content-type': 'application/json' } });
+        }
+        throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    const result = await repo.ingestSource('src_google_error');
+
+    expect(result.googleSync.failed).toBe(1);
+    expect(db.googleEventLinks).toHaveLength(1);
+    expect(db.googleEventLinks[0].sync_status).toBe('error');
+    expect(db.googleEventLinks[0].last_error).toContain('calendar write failed');
   });
 
   it('queues full rebuild jobs for admins', async () => {

@@ -178,6 +178,10 @@ function buildGoogleSyncKey(row) {
   return `${row.target_id || row.target_key}:${row.event_instance_id}`;
 }
 
+function buildSyncErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -687,6 +691,9 @@ export class D1Repository {
     const targetKey = normalizeTargetKey(targetKeyInput);
     const existing = await this.getOutputTargetBySlug(targetKey);
     if (!existing) return null;
+    if (Number(existing.is_system)) {
+      throw new Error(`Cannot delete system output target: ${targetKey}`);
+    }
     await this.db.batch([
       this.db.prepare(`DELETE FROM source_target_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ? AND target_type = 'google')`).bind(existing.id, targetKey),
       this.db.prepare(`DELETE FROM output_rules WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey),
@@ -962,6 +969,7 @@ export class D1Repository {
     let updated = 0;
     let deleted = 0;
     let skipped = 0;
+    let failed = 0;
 
     for (const row of desiredRows) {
       const eventPayload = this.buildGoogleCalendarEvent(row);
@@ -972,71 +980,139 @@ export class D1Repository {
         continue;
       }
 
-      let response;
-      if (existing?.google_event_id) {
-        response = await updateGoogleCalendarEvent({
-          accessToken,
-          calendarId: row.calendar_id,
-          eventId: existing.google_event_id,
-          event: eventPayload,
-        });
-        updated += 1;
-      } else {
-        response = await createGoogleCalendarEvent({
-          accessToken,
-          calendarId: row.calendar_id,
-          event: eventPayload,
-        });
-        created += 1;
-      }
+      try {
+        let response;
+        if (existing?.google_event_id) {
+          response = await updateGoogleCalendarEvent({
+            accessToken,
+            calendarId: row.calendar_id,
+            eventId: existing.google_event_id,
+            event: eventPayload,
+          });
+          updated += 1;
+        } else {
+          response = await createGoogleCalendarEvent({
+            accessToken,
+            calendarId: row.calendar_id,
+            event: eventPayload,
+          });
+          created += 1;
+        }
 
-      statements.push(
-        this.db.prepare(
-          `INSERT INTO google_event_links (
-            id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
-            last_synced_hash, last_synced_at, sync_status, last_error
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', NULL)
-          ON CONFLICT(id) DO UPDATE SET
-            target_id = excluded.target_id,
-            target_key = excluded.target_key,
-            google_event_id = excluded.google_event_id,
-            google_etag = excluded.google_etag,
-            last_synced_hash = excluded.last_synced_hash,
-            last_synced_at = excluded.last_synced_at,
-            sync_status = excluded.sync_status,
-            last_error = excluded.last_error`
-        ).bind(
-          existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
-          row.target_id || null,
-          row.target_key,
-          row.canonical_event_id,
-          row.event_instance_id,
-          response.id,
-          response.etag || null,
-          syncHash,
-          timestamp
-        )
-      );
+        statements.push(
+          this.db.prepare(
+            `INSERT INTO google_event_links (
+              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+              last_synced_hash, last_synced_at, sync_status, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              target_id = excluded.target_id,
+              target_key = excluded.target_key,
+              google_event_id = excluded.google_event_id,
+              google_etag = excluded.google_etag,
+              last_synced_hash = excluded.last_synced_hash,
+              last_synced_at = excluded.last_synced_at,
+              sync_status = excluded.sync_status,
+              last_error = excluded.last_error`
+          ).bind(
+            existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
+            row.target_id || null,
+            row.target_key,
+            row.canonical_event_id,
+            row.event_instance_id,
+            response.id,
+            response.etag || null,
+            syncHash,
+            timestamp,
+            'synced',
+            null
+          )
+        );
+      } catch (error) {
+        failed += 1;
+        statements.push(
+          this.db.prepare(
+            `INSERT INTO google_event_links (
+              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+              last_synced_hash, last_synced_at, sync_status, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              target_id = excluded.target_id,
+              target_key = excluded.target_key,
+              google_event_id = excluded.google_event_id,
+              google_etag = excluded.google_etag,
+              last_synced_hash = excluded.last_synced_hash,
+              last_synced_at = excluded.last_synced_at,
+              sync_status = excluded.sync_status,
+              last_error = excluded.last_error`
+          ).bind(
+            existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
+            row.target_id || null,
+            row.target_key,
+            row.canonical_event_id,
+            row.event_instance_id,
+            existing?.google_event_id || null,
+            existing?.google_etag || null,
+            existing?.last_synced_hash || null,
+            timestamp,
+            'error',
+            buildSyncErrorMessage(error)
+          )
+        );
+      }
     }
 
     for (const link of existingLinks) {
       if (desiredByKey.has(buildGoogleSyncKey(link))) continue;
-      if (link.google_event_id && link.calendar_id) {
-        await deleteGoogleCalendarEvent({
-          accessToken,
-          calendarId: link.calendar_id,
-          eventId: link.google_event_id,
-        });
+      try {
+        if (link.google_event_id && link.calendar_id) {
+          await deleteGoogleCalendarEvent({
+            accessToken,
+            calendarId: link.calendar_id,
+            eventId: link.google_event_id,
+          });
+        }
+        statements.push(this.db.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id));
+        deleted += 1;
+      } catch (error) {
+        failed += 1;
+        statements.push(
+          this.db.prepare(
+            `INSERT INTO google_event_links (
+              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+              last_synced_hash, last_synced_at, sync_status, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              target_id = excluded.target_id,
+              target_key = excluded.target_key,
+              google_event_id = excluded.google_event_id,
+              google_etag = excluded.google_etag,
+              last_synced_hash = excluded.last_synced_hash,
+              last_synced_at = excluded.last_synced_at,
+              sync_status = excluded.sync_status,
+              last_error = excluded.last_error`
+          ).bind(
+            link.id,
+            link.target_id || null,
+            link.target_key,
+            link.canonical_event_id,
+            link.event_instance_id,
+            link.google_event_id || null,
+            link.google_etag || null,
+            link.last_synced_hash || null,
+            timestamp,
+            'error',
+            buildSyncErrorMessage(error)
+          )
+        );
       }
-      statements.push(this.db.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id));
-      deleted += 1;
     }
 
     if (statements.length) {
       await this.db.batch(statements);
     }
 
-    return { synced: created, updated, deleted, skipped };
+    return { synced: created, updated, deleted, skipped, failed };
   }
 
   async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
