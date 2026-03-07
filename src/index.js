@@ -338,7 +338,7 @@ function renderAdminShell() {
         <p class="hint" style="margin-bottom:12px">Shareable calendar URLs. Currently fixed to three feeds — adding named feeds without a code change is planned.</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Feed</th><th>Primary URL</th><th>Alias URL</th></tr></thead>
+            <thead><tr><th>Feed</th><th>Subscription URL</th><th></th></tr></thead>
             <tbody id="contracts-body"></tbody>
           </table>
         </div>
@@ -389,8 +389,9 @@ function renderAdminShell() {
               <th>Name</th>
               <th>Owner</th>
               <th>Outputs</th>
-              <th>Icon</th>
-              <th>Active</th>
+              <th>Events</th>
+              <th>Last Fetch</th>
+              <th>Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -619,8 +620,6 @@ function renderAdminShell() {
         const jobs = jobsPayload.jobs || [];
         const registeredTargets = targetsPayload.targets || [];
         const logicalTargets = targetsPayload.logicalTargets || [];
-        const contracts = contractsPayload.contracts || [];
-
         metricSources.textContent = String(sources.length);
         metricEvents.textContent = String(events.length);
         metricJobs.textContent = String(jobs.length);
@@ -660,19 +659,26 @@ function renderAdminShell() {
         });
         renderRows(
           sourcesBody,
-          sortedSources.slice(0, 30).map((s) =>
-            '<tr><td>' + (s.display_name || s.name || '') +
-            '</td><td>' + (s.owner_type || '') +
-            '</td><td>' + buildOutputLabels(s) +
-            '</td><td>' + buildIconLabel(s) +
-            '</td><td>' + (s.is_active ? 'yes' : 'no') +
-            '</td><td><div class="actions">' +
+          sortedSources.slice(0, 30).map((s) => {
+            const lastFetch = s.last_fetched_at ? new Date(s.last_fetched_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+            const parseOk = s.last_parse_status === 'ok' || s.last_parse_status === 'success';
+            const statusCell = !s.last_parse_status ? '<span class="hint">never</span>'
+              : parseOk ? '<span style="color:#1a7f37">ok</span>'
+              : '<span style="color:#a00" title="' + (s.last_parse_error || '').replace(/"/g, '&quot;') + '">error</span>';
+            return '<tr>' +
+            '<td>' + (s.display_name || s.name || '') + '</td>' +
+            '<td>' + (s.owner_type || '') + '</td>' +
+            '<td>' + buildOutputLabels(s) + '</td>' +
+            '<td>' + (s.event_count || 0) + '</td>' +
+            '<td style="white-space:nowrap;font-size:0.8rem">' + lastFetch + '</td>' +
+            '<td>' + statusCell + '</td>' +
+            '<td><div class="actions">' +
             '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
             '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
             '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
             '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
-            '</div></td></tr>'
-          ).join(''),
+            '</div></td></tr>';
+          }).join(''),
           6
         );
 
@@ -783,13 +789,27 @@ function renderAdminShell() {
         });
 
         // ics feeds table
+        const feedContracts = contractsPayload.contracts || [];
         renderRows(
           contractsBody,
-          contracts.map((c) =>
-            '<tr><td>' + c.target + '</td><td>' + c.primary_path + '</td><td>' + (c.alias_path || '') + '</td></tr>'
+          feedContracts.map((c) =>
+            '<tr>' +
+            '<td><strong>' + c.target + '</strong></td>' +
+            '<td style="font-size:0.8rem;word-break:break-all"><a href="' + c.url + '" target="_blank" rel="noopener">' + c.url + '</a></td>' +
+            '<td><button class="copy-feed-url" data-url="' + c.url.replace(/"/g, '&quot;') + '">Copy</button></td>' +
+            '</tr>'
           ).join(''),
           3
         );
+        document.querySelectorAll('.copy-feed-url').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            navigator.clipboard.writeText(btn.getAttribute('data-url')).then(() => {
+              const orig = btn.textContent;
+              btn.textContent = 'Copied!';
+              setTimeout(() => { btn.textContent = orig; }, 1500);
+            });
+          });
+        });
 
         // jobs
         renderRows(

@@ -638,7 +638,7 @@ class FakeDb {
   }
 
   runAll(sql, values) {
-    if (sql.includes('FROM sources ORDER BY')) return this.sources;
+    if (sql.includes('FROM sources') && sql.includes('ORDER BY') && sql.includes('owner_type')) return this.sources;
     if (sql.includes('FROM source_target_links') && sql.includes('WHERE source_id = ?')) {
       return this.sourceTargetLinks
         .filter((row) => row.source_id === values[0] && row.is_enabled === 1)

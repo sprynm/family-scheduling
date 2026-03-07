@@ -189,10 +189,31 @@ export class D1Repository {
 
   async listSources() {
     const result = await this.db.prepare(
-      `SELECT id, name, display_name, owner_type, provider_type, source_category, url, icon, prefix,
-              include_in_child_ics, include_in_family_ics, include_in_child_google_output,
-              is_active, sort_order, poll_interval_minutes, quality_profile, updated_at
-       FROM sources ORDER BY owner_type, sort_order, COALESCE(display_name, name), name`
+      `SELECT
+         s.id, s.name, s.display_name, s.owner_type, s.provider_type, s.source_category,
+         s.url, s.icon, s.prefix,
+         s.include_in_child_ics, s.include_in_family_ics, s.include_in_child_google_output,
+         s.is_active, s.sort_order, s.poll_interval_minutes, s.quality_profile, s.updated_at,
+         snap.fetched_at AS last_fetched_at,
+         snap.http_status AS last_http_status,
+         snap.parse_status AS last_parse_status,
+         snap.parse_error_summary AS last_parse_error,
+         COALESCE(ec.event_count, 0) AS event_count
+       FROM sources s
+       LEFT JOIN (
+         SELECT source_id, MAX(fetched_at) AS max_fetched_at
+         FROM source_snapshots
+         GROUP BY source_id
+       ) latest ON latest.source_id = s.id
+       LEFT JOIN source_snapshots snap
+         ON snap.source_id = s.id AND snap.fetched_at = latest.max_fetched_at
+       LEFT JOIN (
+         SELECT source_id, COUNT(*) AS event_count
+         FROM canonical_events
+         WHERE source_deleted = 0
+         GROUP BY source_id
+       ) ec ON ec.source_id = s.id
+       ORDER BY s.owner_type, s.sort_order, COALESCE(s.display_name, s.name), s.name`
     ).all();
     const sources = result.results || [];
     const linksResult = await this.db.prepare(
@@ -649,16 +670,17 @@ export class D1Repository {
   }
 
   async getFeedContract() {
+    const host = 'https://ics.sprynewmedia.com';
+    const token = this.env.TOKEN || '';
     return {
-      host: 'https://ics.sprynewmedia.com',
+      host,
+      token,
       requiredToken: true,
       acceptedParams: ['token', 'lookback', 'name'],
-      endpoints: TARGETS.flatMap((target) => [`/${target}.isc`, `/${target}.ics`]),
-      priority: {
-        family: 'grandparents',
-        grayson: 'home-assistant',
-        naomi: 'home-assistant',
-      },
+      contracts: TARGETS.map((target) => ({
+        target,
+        url: token ? `${host}/${target}.ics?token=${encodeURIComponent(token)}` : `${host}/${target}.ics`,
+      })),
     };
   }
 
