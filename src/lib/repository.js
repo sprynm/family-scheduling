@@ -366,6 +366,25 @@ export class D1Repository {
     return this.getSourceById(sourceId);
   }
 
+  async deleteSource(sourceId) {
+    const existing = await this.getSourceById(sourceId);
+    if (!existing) return null;
+    await this.db.prepare(
+      `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+    ).bind(sourceId).run();
+    await this.db.prepare(
+      `DELETE FROM event_overrides WHERE event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+    ).bind(sourceId).run();
+    await this.db.prepare(
+      `DELETE FROM event_instances WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+    ).bind(sourceId).run();
+    await this.db.prepare(`DELETE FROM canonical_events WHERE source_id = ?`).bind(sourceId).run();
+    await this.db.prepare(`DELETE FROM source_events WHERE source_id = ?`).bind(sourceId).run();
+    await this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId).run();
+    await this.db.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId).run();
+    return existing;
+  }
+
   async listJobs(limit = 50) {
     const result = await this.db.prepare(
       `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json

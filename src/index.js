@@ -695,7 +695,12 @@ function renderAdminShell() {
             '</td><td>' + buildOutputLabels(s) +
             '</td><td>' + buildIconLabel(s) +
             '</td><td>' + (s.is_active ? 'yes' : 'no') +
-            '</td><td><div class="actions"><button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button><button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button></div></td></tr>'
+            '</td><td><div class="actions">' +
+            '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
+            '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
+            '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
+            '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
+            '</div></td></tr>'
           ).join(''),
           6
         );
@@ -717,6 +722,34 @@ function renderAdminShell() {
           });
         });
 
+        document.querySelectorAll('.change-source').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-source-id');
+            const name = btn.getAttribute('data-source-name') || '';
+            const url = btn.getAttribute('data-source-url') || '';
+            let links = [];
+            try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
+            sourceNameInput.value = name;
+            sourceUrlInput.value = url;
+            // check ICS outputs
+            sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.checked = links.some((l) => l.target_type === 'ics' && l.target_key === cb.value);
+            });
+            // check Google outputs
+            sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.checked = links.some((l) => l.target_type === 'google' && l.target_key === cb.value);
+            });
+            // restore icon/prefix state
+            sourceRuleState.clear();
+            links.forEach((l) => sourceRuleState.set(l.target_key, { icon: l.icon || '', prefix: l.prefix || '' }));
+            syncTargetRuleInputs();
+            sourceForm.setAttribute('data-editing-id', id);
+            document.getElementById('source-save').textContent = 'Update Source';
+            sourceNameInput.focus();
+            sourceForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        });
+
         document.querySelectorAll('.disable-source').forEach((btn) => {
           btn.addEventListener('click', async () => {
             const id = btn.getAttribute('data-source-id');
@@ -728,6 +761,23 @@ function renderAdminShell() {
               await loadDashboard();
             } catch (err) {
               setStatus('Disable failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        document.querySelectorAll('.delete-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            if (!confirm('Permanently delete this source and all its events? This cannot be undone.')) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/sources/' + encodeURIComponent(id) + '?permanent=true', { method: 'DELETE' });
+              setStatus('Source deleted.', false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Delete failed: ' + (err.message || String(err)), true);
               btn.disabled = false;
             }
           });
@@ -932,11 +982,23 @@ function renderAdminShell() {
     sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
     sourceGoogleOutputsEl.addEventListener('change', syncTargetRuleInputs);
 
+    function resetSourceForm() {
+      sourceNameInput.value = '';
+      sourceUrlInput.value = '';
+      sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+      sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+      sourceRuleState.clear();
+      syncTargetRuleInputs();
+      sourceForm.removeAttribute('data-editing-id');
+      document.getElementById('source-save').textContent = 'Add Source';
+    }
+
     sourceForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const saveBtn = document.getElementById('source-save');
       saveBtn.disabled = true;
-      setStatus('Saving source...', false);
+      const editingId = sourceForm.getAttribute('data-editing-id') || null;
+      setStatus(editingId ? 'Updating source...' : 'Saving source...', false);
       try {
         const sourceUrl = String(sourceUrlInput.value || '').trim();
         const selectedIcs = getCheckedValues(sourceIcsOutputsEl);
@@ -959,27 +1021,33 @@ function renderAdminShell() {
           return { target_key: key, icon: rule.icon || '', prefix: rule.prefix || '' };
         });
 
-        await fetchJson('/api/sources', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            owner_type: ownerType,
-            display_name: sourceNameInput.value,
-            url: sourceUrl,
-            include_in_child_ics: selectedIcs.includes('grayson') || selectedIcs.includes('naomi'),
-            include_in_family_ics: selectedIcs.includes('family'),
-            include_in_child_google_output: selectedGoogle.length > 0,
-            target_links: targetLinks,
-          }),
-        });
+        const body = {
+          owner_type: ownerType,
+          display_name: sourceNameInput.value,
+          url: sourceUrl,
+          include_in_child_ics: selectedIcs.includes('grayson') || selectedIcs.includes('naomi'),
+          include_in_family_ics: selectedIcs.includes('family'),
+          include_in_child_google_output: selectedGoogle.length > 0,
+          target_links: targetLinks,
+        };
 
-        sourceNameInput.value = '';
-        sourceUrlInput.value = '';
-        sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
-        sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
-        sourceRuleState.clear();
-        syncTargetRuleInputs();
-        setStatus('Source saved. Queue a rebuild to ingest it now.', false);
+        if (editingId) {
+          await fetchJson('/api/sources/' + encodeURIComponent(editingId), {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          setStatus('Source updated.', false);
+        } else {
+          await fetchJson('/api/sources', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          setStatus('Source saved. Queue a rebuild to ingest it now.', false);
+        }
+
+        resetSourceForm();
         await loadDashboard();
       } catch (err) {
         setStatus('Save failed: ' + (err.message || String(err)), true);
@@ -1236,6 +1304,11 @@ export default {
         if (authError) return authError;
         const sourceId = pathname.split('/').filter(Boolean)[2];
         const repo = await createRepository(env);
+        if (url.searchParams.get('permanent') === 'true') {
+          const source = await repo.deleteSource(sourceId);
+          if (!source) return json({ error: 'Not found' }, { status: 404 });
+          return json({ deleted: source });
+        }
         const source = await repo.disableSource(sourceId);
         if (!source) return json({ error: 'Not found' }, { status: 404 });
         return json({ source });
