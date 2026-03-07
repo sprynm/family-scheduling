@@ -595,10 +595,10 @@ export class D1Repository {
       });
     }
     const timestamp = nowIso();
-    await this.runInTransaction(async () => {
-      await this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId).run();
-      for (const targetLink of targetLinks) {
-        await this.db.prepare(
+    const statements = [this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId)];
+    for (const targetLink of targetLinks) {
+      statements.push(
+        this.db.prepare(
           `INSERT INTO source_target_links (
             id, source_id, target_id, target_key, target_type, icon, prefix, sort_order, is_enabled, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
@@ -613,26 +613,27 @@ export class D1Repository {
           Number(targetLink.sort_order || 0),
           timestamp,
           timestamp
-        ).run();
-      }
-    });
+        )
+      );
+    }
+    await this.db.batch(statements);
   }
 
   async disableSource(sourceId) {
     const timestamp = nowIso();
-    await this.runInTransaction(async () => {
-      await this.db.prepare(`UPDATE sources SET is_active = 0, updated_at = ? WHERE id = ?`).bind(timestamp, sourceId).run();
-      await this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, sourceId).run();
-      await this.db.prepare(
+    await this.db.batch([
+      this.db.prepare(`UPDATE sources SET is_active = 0, updated_at = ? WHERE id = ?`).bind(timestamp, sourceId),
+      this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, sourceId),
+      this.db.prepare(
         `UPDATE event_instances
          SET source_deleted = 1, updated_at = ?
          WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(timestamp, sourceId).run();
-      await this.db.prepare(
+      ).bind(timestamp, sourceId),
+      this.db.prepare(
         `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ?`
-      ).bind(timestamp, sourceId).run();
-      await this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId).run();
-    });
+      ).bind(timestamp, sourceId),
+      this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
+    ]);
     return this.getSourceById(sourceId);
   }
 
@@ -711,13 +712,13 @@ export class D1Repository {
     const targetKey = normalizeTargetKey(targetKeyInput);
     const existing = await this.getOutputTargetBySlug(targetKey);
     if (!existing) return null;
-    await this.runInTransaction(async () => {
-      await this.db.prepare(`DELETE FROM source_target_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ? AND target_type = 'google')`).bind(existing.id, targetKey).run();
-      await this.db.prepare(`DELETE FROM output_rules WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey).run();
-      await this.db.prepare(`DELETE FROM google_event_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey).run();
-      await this.db.prepare(`DELETE FROM google_targets WHERE target_key = ?`).bind(targetKey).run();
-      await this.db.prepare(`DELETE FROM output_targets WHERE id = ?`).bind(existing.id).run();
-    });
+    await this.db.batch([
+      this.db.prepare(`DELETE FROM source_target_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ? AND target_type = 'google')`).bind(existing.id, targetKey),
+      this.db.prepare(`DELETE FROM output_rules WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey),
+      this.db.prepare(`DELETE FROM google_event_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey),
+      this.db.prepare(`DELETE FROM google_targets WHERE target_key = ?`).bind(targetKey),
+      this.db.prepare(`DELETE FROM output_targets WHERE id = ?`).bind(existing.id),
+    ]);
     return existing;
   }
 
@@ -1249,39 +1250,45 @@ export class D1Repository {
   async syncSourceConfig(source) {
     if (!source) return;
     const timestamp = nowIso();
-    await this.runInTransaction(async () => {
-      await this.db.prepare(
+    const statements = [
+      this.db.prepare(
         `UPDATE canonical_events
          SET source_icon = ?, source_prefix = ?, updated_at = ?
          WHERE source_id = ?`
-      ).bind(source.icon || '', source.prefix || '', timestamp, source.id).run();
-
-      await this.db.prepare(
+      ).bind(source.icon || '', source.prefix || '', timestamp, source.id),
+      this.db.prepare(
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(source.id).run();
+      ).bind(source.id),
+    ];
 
-      if (!Number(source.is_active)) {
-        await this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id).run();
-        await this.db.prepare(
+    if (!Number(source.is_active)) {
+      statements.push(
+        this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
+        this.db.prepare(
           `UPDATE event_instances
            SET source_deleted = 1, updated_at = ?
            WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-        ).bind(timestamp, source.id).run();
-        return;
-      }
+        ).bind(timestamp, source.id)
+      );
+      await this.db.batch(statements);
+      return;
+    }
 
-      await this.db.prepare(`UPDATE canonical_events SET source_deleted = 0, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id).run();
-      await this.db.prepare(
+    statements.push(
+      this.db.prepare(`UPDATE canonical_events SET source_deleted = 0, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
+      this.db.prepare(
         `UPDATE event_instances
          SET source_deleted = 0, updated_at = ?
          WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(timestamp, source.id).run();
+      ).bind(timestamp, source.id)
+    );
 
-      const targets = await this.resolveTargetsForSource(source);
-      const instances = await this.listSourceInstances(source.id);
-      for (const instance of instances) {
-        for (const target of targets) {
-          await this.db.prepare(
+    const targets = await this.resolveTargetsForSource(source);
+    const instances = await this.listSourceInstances(source.id);
+    for (const instance of instances) {
+      for (const target of targets) {
+        statements.push(
+          this.db.prepare(
             `INSERT INTO output_rules (
               id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, 'included', ?, ?, ?)
@@ -1300,10 +1307,12 @@ export class D1Repository {
             'derived from source configuration',
             timestamp,
             timestamp
-          ).run();
-        }
+          )
+        );
       }
-    });
+    }
+
+    await this.db.batch(statements);
   }
 
   async markJobStatus(jobId, status, { summary = null, error = null } = {}) {
@@ -1323,7 +1332,20 @@ export class D1Repository {
 
   async listActiveSources() {
     const result = await this.db.prepare(
-      `SELECT * FROM sources WHERE is_active = 1 AND url IS NOT NULL ORDER BY owner_type, sort_order, name`
+      `SELECT s.*
+       FROM sources s
+       LEFT JOIN (
+         SELECT source_id, MAX(fetched_at) AS last_fetched_at
+         FROM source_snapshots
+         GROUP BY source_id
+       ) latest ON latest.source_id = s.id
+       WHERE s.is_active = 1
+         AND s.url IS NOT NULL
+         AND (
+           latest.last_fetched_at IS NULL
+           OR datetime(latest.last_fetched_at) <= datetime('now', '-' || s.poll_interval_minutes || ' minutes')
+         )
+       ORDER BY s.owner_type, s.sort_order, s.name`
     ).all();
     return result.results || [];
   }
@@ -1561,27 +1583,28 @@ export class D1Repository {
     }
 
     const targets = await this.resolveTargetsForSource(source);
-
-    await this.runInTransaction(async () => {
-      await this.db.prepare(
+    const statements = [
+      this.db.prepare(
         `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`
-      ).bind(fetchedAt, sourceId).run();
-      await this.db.prepare(
+      ).bind(fetchedAt, sourceId),
+      this.db.prepare(
         `UPDATE event_instances
          SET source_deleted = 1, updated_at = ?
          WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(fetchedAt, sourceId).run();
-      await this.db.prepare(
+      ).bind(fetchedAt, sourceId),
+      this.db.prepare(
         `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ?`
-      ).bind(fetchedAt, sourceId).run();
-      await this.db.prepare(
+      ).bind(fetchedAt, sourceId),
+      this.db.prepare(
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(sourceId).run();
+      ).bind(sourceId),
+    ];
 
-      for (const staged of stagedEvents) {
-        const { event, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
+    for (const staged of stagedEvents) {
+      const { event, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
 
-        await this.db.prepare(
+      statements.push(
+        this.db.prepare(
           `INSERT INTO source_events (
             id, source_id, provider_uid, provider_recurrence_id, provider_etag, raw_hash, first_seen_at, last_seen_at, is_deleted_upstream
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
@@ -1599,9 +1622,8 @@ export class D1Repository {
           hashValue(JSON.stringify(event.raw)),
           fetchedAt,
           fetchedAt
-        ).run();
-
-        await this.db.prepare(
+        ),
+        this.db.prepare(
           `INSERT INTO canonical_events (
             id, source_id, identity_key, event_kind, title, source_icon, source_prefix, description, location, start_at, end_at, timezone,
             status, rrule, series_until, source_deleted, needs_review, source_changed_since_overlay,
@@ -1639,10 +1661,12 @@ export class D1Repository {
           fetchedAt,
           fetchedAt,
           fetchedAt
-        ).run();
+        )
+      );
 
-        for (const instance of instances) {
-          await this.db.prepare(
+      for (const instance of instances) {
+        statements.push(
+          this.db.prepare(
             `INSERT INTO event_instances (
               id, canonical_event_id, occurrence_start_at, occurrence_end_at, recurrence_instance_key,
               provider_recurrence_id, status, source_deleted, needs_review, created_at, updated_at
@@ -1663,10 +1687,12 @@ export class D1Repository {
             event.status,
             fetchedAt,
             fetchedAt
-          ).run();
+          )
+        );
 
-          for (const target of targets) {
-            await this.db.prepare(
+        for (const target of targets) {
+          statements.push(
+            this.db.prepare(
               `INSERT INTO output_rules (
                 id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
               ) VALUES (?, ?, ?, ?, ?, 'included', ?, ?, ?)
@@ -1685,11 +1711,13 @@ export class D1Repository {
               `derived from ${source.owner_type} source`,
               fetchedAt,
               fetchedAt
-            ).run();
-          }
+            )
+          );
         }
       }
-    });
+    }
+
+    await this.db.batch(statements);
 
     return {
       sourceId,
