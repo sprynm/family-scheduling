@@ -1,140 +1,172 @@
-# System Workflow Diagram
+# System Workflow
+
+_Updated: 2026-03-06_
+
+## Concepts
+
+| Term | Meaning |
+|---|---|
+| **Source** | An upstream calendar feed this system ingests. Currently ICS URLs only. Google Calendar API ingestion is deferred. |
+| **Output** | A delivered calendar service. Either a named ICS feed or a managed Google Calendar. |
+| **Source → Output link** | The assignment of a source to an output. Carries per-link rendering rules (icon, prefix). Designed as a join table so rules can be extended (e.g. filters) without schema changes. |
+| **Override** | An admin-applied change to how a specific event or instance is handled — for example, removing a recurring practice from the calendar because the family cannot attend that week. |
+
+---
 
 ## Core Pipeline
 
 ```mermaid
 flowchart LR
     subgraph Triggers
-        CRON[Cron schedule]
+        CRON[Cron every 30 min]
+        PRUNE[Cron daily 3:17am]
         QUEUE[Queue consumer]
     end
 
-    subgraph ExternalSources["External calendar sources"]
-        EXT1[ICS and Google source feeds]
+    subgraph Sources["External Sources (ICS today, Google API future)"]
+        EXT[ICS feed URLs]
     end
 
     subgraph Ingest
         FETCH[Fetch active sources]
         NORM[Normalize to canonical events and instances]
-        DERIVE[Derive output rules from routing and overlays]
+        DERIVE[Derive output rules from source-output links and overrides]
     end
 
-    subgraph D1["D1 data model"]
+    subgraph Store["D1 Storage"]
         SRC[(sources)]
-        OUT[(output_calendars)]
-        JOIN[(source_output_rules)]
+        STL[(source_output_links)]
         CE[(canonical_events)]
         EI[(event_instances)]
         OV[(event_overrides)]
         OR[(output_rules)]
+        GT[(google_outputs)]
     end
 
-    subgraph Outputs
-        FEEDROUTE[Public feed routes family grayson naomi]
-        ICS[ICS outputs .ics and .isc]
-        GCSYNC[Google sync worker]
+    subgraph Outputs["Outputs (Delivered Services)"]
+        ICS["ICS feeds\nfamily / grayson / naomi\n(hardcoded now, configurable planned)"]
+        GCSYNC[Google Calendar sync]
         GCAPI[Google Calendar API]
-        GCCALS[Google managed calendars]
+        GCCALS[Managed Google Calendars]
     end
 
     subgraph Consumers
-        HA[Home Assistant]
-        GP[Grandparents]
+        HA[Home Assistant via ICS]
+        GP[Grandparents via ICS subscription]
         GCV[Google Calendar viewers]
     end
 
     CRON --> QUEUE
-    QUEUE --> FETCH
-    EXT1 --> FETCH
-
+    PRUNE --> QUEUE
+    EXT --> FETCH
     SRC --> FETCH
+    QUEUE --> FETCH
     FETCH --> NORM
     NORM --> CE
     NORM --> EI
-
-    OUT --> DERIVE
-    JOIN --> DERIVE
+    STL --> DERIVE
+    GT --> DERIVE
     CE --> DERIVE
     EI --> DERIVE
     OV --> DERIVE
     DERIVE --> OR
-
-    OR --> FEEDROUTE
-    FEEDROUTE --> ICS
-    ICS --> HA
-    ICS --> GP
-
+    OR --> ICS
     OR --> GCSYNC
     GCSYNC --> GCAPI
     GCAPI --> GCCALS
+    ICS --> HA
+    ICS --> GP
     GCCALS --> GCV
 ```
+
+---
+
+## Output Types
+
+| Output type | How it works | Status |
+|---|---|---|
+| ICS feed | Generated on-demand from `output_rules` when a consumer requests the URL | Live |
+| Google Calendar | Written to via Google Calendar API on each sync cycle | Not yet implemented |
+
+### ICS Output Configuration (Planned)
+
+The three ICS feeds (`family`, `grayson`, `naomi`) are currently hardcoded in the route matcher and constants. The intended direction is to make these configurable rows in the same output table as Google outputs, so any named ICS feed can be created or retired without a code change.
+
+---
+
+## Source → Output Links
+
+Each source can be assigned to one or more outputs. Each assignment is a row in `source_target_links` (to be renamed `source_output_links`) and carries:
+
+| Rule field | Purpose |
+|---|---|
+| `icon` | Emoji prepended to the event summary on this output |
+| `prefix` | Short label prepended before the icon (e.g. `G:` or `N:`) — primarily used on the combined `family` feed |
+| `sort_order` | Display ordering within the output |
+
+The join table design means additional rule fields (e.g. keyword filters, time-of-day filters) can be added as columns without restructuring the relationship.
+
+---
+
+## Decoration Rules by Output
+
+| Output | Prefix applied | Icon applied |
+|---|---|---|
+| `family.ics` | ✅ (e.g. `G:`, `N:`) | ✅ |
+| `grayson.ics` | ❌ | ✅ |
+| `naomi.ics` | ❌ | ✅ |
+| Google output | per-link rule | per-link rule |
+
+Icon resolution order:
+1. Explicit icon on the source → output link
+2. Explicit icon on the source
+3. Fallback sport detection from event title (legacy parity for feeds without dedicated icons)
+
+---
+
+## Overrides
+
+An override is an admin-applied instruction that changes how an event or event instance is treated in the system.
+
+Examples:
+- **Skip** — remove a specific instance of a recurring event from all outputs (e.g. "we can't make practice this Thursday")
+- **Hidden** — suppress an event from a specific output
+- **Maybe** — flag an event as uncertain
+- **Note** — attach context to an event without changing its distribution
+
+Overrides are stored in `event_overrides` and applied during the `DERIVE` step before `output_rules` are written.
+
+---
 
 ## Admin Auth Flow
 
 ```mermaid
 flowchart LR
-    USER[Admin user] --> ACCESS[Cloudflare Access policy]
-    ACCESS --> GOOGLE[Google identity provider]
+    USER[Admin] --> ACCESS[Cloudflare Access]
+    ACCESS --> GOOGLE[Google sign-in]
     GOOGLE --> ACCESS
-    ACCESS --> ROUTES[Protected routes /admin/* and /api/*]
-    ACCESS --> JWT[CF_Authorization token]
-
-    JWT --> VERIFY[Worker validates Cf-Access-Jwt-Assertion]
-    JWKS[Access JWKS certs endpoint] --> CACHE[JWKS cache]
-    CACHE --> VERIFY
-    VERIFY --> ROLE[Map verified email to admin or editor]
-
-    ROLE --> WEBAPP[Web app /admin]
-    ROLE --> API[Admin API /api/*]
-    WEBAPP --> API
-
-    API --> OUT[(output_calendars)]
-    API --> SRC[(sources)]
-    API --> JOIN[(source_output_rules)]
-    API --> OV[(event_overrides)]
-    API --> OR[(output_rules)]
+    ACCESS --> JWT[Cf-Access-Jwt-Assertion header]
+    JWT --> WORKER[Worker validates JWT against Access JWKS]
+    WORKER --> ROLE[Map verified email to admin or editor role]
+    ROLE --> ADMIN[/admin shell]
+    ROLE --> API[/api/* routes]
 ```
 
-## Admin Flow
-
-1. Create output calendars (`naomi`, `grayson`, `family`, plus managed Google outputs as needed).
-2. Add source calendars (ICS or Google).
-3. Connect each source to one or more outputs using `source_output_rules` with per-relationship rules (`prefix`, `icon`, `is_enabled`, and optional rendering controls).
-
-## Routing Model
-
-| Table | Responsibility |
-|---|---|
-| `sources` | One row per upstream feed/calendar |
-| `output_calendars` | One row per output surface |
-| `source_output_rules` | Many-to-many join + per-relationship rendering/routing rules |
-
-## Decoration Rules
-
-| Output | Icon | Child prefix (e.g. `N:`) |
-|---|---|---|
-| `naomi.ics` | ✅ | ❌ |
-| `grayson.ics` | ✅ | ❌ |
-| `family.ics` | ✅ | ✅ |
-| Google output calendars | per-output rule | per-output rule |
-
-Icon precedence:
-
-1. explicit icon on `source_output_rules`
-2. explicit icon on `sources`
-3. fallback sport detection regex on event summary/title (legacy parity behavior for feeds like school calendars without dedicated ICS streams)
+---
 
 ## Auth Boundary
 
-| Surface | Auth |
+| Surface | Protection |
 |---|---|
-| Public ICS feeds (`.ics` + `.isc`) | `?token=` required; supports `?lookback=` and `?name=` |
-| Admin API + Web App (`/api/*`, `/admin/*`) | Cloudflare Access challenge + Google login + Worker JWT validation + role mapping |
-| Access JWT verification | Validate `Cf-Access-Jwt-Assertion` using Access JWKS with cache + refresh on `kid` miss |
-| Local dev | `ALLOW_DEV_ROLE_HEADER=true` |
+| Public ICS feeds (`.ics`, `.isc`) | `?token=` query parameter |
+| Admin shell `/admin` | Cloudflare Access (network layer) |
+| Admin API `/api/*` | Cloudflare Access + Worker JWT validation + role check |
+| Local dev | `ALLOW_DEV_ROLE_HEADER=true` + `x-user-role` header |
+
+---
 
 ## Status Notes
 
-- Google outbound sync path is shown as target architecture; full production write-sync implementation is still tracked as open work.
-- Cron plus queue nodes are intentionally distinct because retention/pruning and retry behavior run through queue execution.
+- Google outbound sync is modeled in the pipeline but not yet implemented.
+- ICS output configuration is hardcoded today; moving to DB-driven configuration is the intended direction.
+- Google Calendar API ingestion (as a source) is explicitly deferred in favour of ICS URLs from Google Calendar, which are simpler and avoid a second OAuth scope.

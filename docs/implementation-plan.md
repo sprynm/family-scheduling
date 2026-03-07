@@ -2,136 +2,134 @@
 
 _Updated: 2026-03-06_
 
-This project implements the new family scheduling system in `C:\Dev\family-scheduling` and leaves the legacy worker in `C:\Dev\ics-merge` as reference only.
+## Vocabulary
 
-## Completed Now
+| Term | Meaning |
+|---|---|
+| **Source** | An upstream calendar feed the system ingests |
+| **Output** | A delivered calendar service — an ICS feed or a managed Google Calendar |
+| **Source → Output link** | The assignment connecting a source to an output, with per-link rendering rules |
+| **Override** | An admin-applied change to how a specific event or instance is distributed |
 
-1. Preserve the legacy public feed contracts for `family`, `grayson`, and `naomi`.
-2. Run the app on Cloudflare Worker + D1 + Queue + cron scaffolding.
-3. Protect admin APIs with Cloudflare Access JWT validation and app-level role mapping.
-4. Serve the admin shell at `/admin` and keep public ICS feeds token-protected outside Access.
-5. Support ICS source create, update, disable, list, and rebuild flows.
-6. Support Google target create, update, delete, and list flows.
-7. Support explicit many-to-many source-to-target assignment through `source_target_links`.
-8. Store per-target rule metadata on source-target links:
-   - `icon`
-   - `prefix`
-   - `sort_order`
-9. Use per-target rule metadata during feed rendering instead of relying only on source-level decoration fields.
-10. Clean up dependent assignments when a Google target is deleted.
+Code currently uses `target` and `google_targets` in places. These will be normalized to `output` as the UI and schema evolve.
 
-## Current Scope
+---
 
-### Upstream sources
+## What Is Shipped
 
-Do now:
+1. Legacy ICS feed contracts preserved: `family.ics`, `grayson.ics`, `naomi.ics` (and `.isc` aliases).
+2. Cloudflare Worker + D1 + Queue + cron scaffolding running.
+3. Admin protected via Cloudflare Access JWT validation with email-to-role mapping.
+4. Admin shell at `/admin`, public ICS feeds token-protected at `?token=`.
+5. ICS source create, update, disable, list, and rebuild.
+6. Google output create, update, delete, and list.
+7. Many-to-many source → output assignment via `source_target_links`.
+8. Per-link rendering rules: `icon`, `prefix`, `sort_order`.
+9. Feed rendering driven by per-link rules with fallback to source-level values.
+10. Google output deletion cascades to dependent source → output links and output rules.
 
-1. Treat upstream sources as ICS feeds only.
-2. Store one real upstream calendar per `sources` row.
-3. Keep source ingest behavior and source identity on `sources`.
+---
 
-Not in scope now:
-
-1. Google upstream source ingest.
-
-### Output surfaces
-
-Do now:
-
-1. Keep public compatibility ICS outputs:
-   - `family.ics` / `family.isc`
-   - `grayson.ics` / `grayson.isc`
-   - `naomi.ics` / `naomi.isc`
-2. Keep Google outputs modeled as `google_targets`.
-3. Assign one source to multiple outputs and one output to multiple sources.
-
-## Current Data Model
+## Data Model
 
 ### `sources`
 
-Use for:
+One row per upstream calendar feed.
 
-1. upstream source identity
-2. ingest URL
-3. ownership/category metadata
-4. active state and ingest settings
+| Field | Purpose |
+|---|---|
+| `url` | ICS feed URL to poll |
+| `owner_type` | `grayson`, `naomi`, or `family` |
+| `source_category` | `sports`, `personal`, `shared`, `general` |
+| `icon`, `prefix` | Fallback decoration if no per-link rule overrides |
+| `is_active` | Whether the source is polled and its events included |
+| `poll_interval_minutes` | How often to re-ingest |
 
-### `source_target_links`
+### `source_target_links` _(to be renamed `source_output_links`)_
 
-Use for:
+One row per source → output assignment. This is a join table — adding new rule types means adding columns here, not restructuring the relationship.
 
-1. source-to-output assignment
-2. per-target `icon`
-3. per-target `prefix`
-4. target type (`ics` or `google`)
-5. target ordering
+| Field | Purpose |
+|---|---|
+| `source_id` | Source being assigned |
+| `target_key` | Output being assigned to |
+| `target_type` | `ics` or `google` |
+| `icon` | Per-link icon rule |
+| `prefix` | Per-link prefix rule |
+| `sort_order` | Display ordering within the output |
+| `is_enabled` | Whether this assignment is active |
+
+### `google_targets` _(represents Google Calendar outputs)_
+
+One row per managed Google Calendar output.
+
+| Field | Purpose |
+|---|---|
+| `target_key` | Unique slug identifying this output |
+| `calendar_id` | Google Calendar ID to write to |
+| `ownership_mode` | `managed_output` — this system writes to it |
+
+### `canonical_events` + `event_instances`
+
+Normalised event storage. One canonical event per unique event identity; one instance row per occurrence (handles recurring events).
 
 ### `output_rules`
 
-Use for:
+Derived rows that record whether each event instance should appear on each output. Re-derived on every ingest and on source config change.
 
-1. derived inclusion state per event instance and target
-2. feed generation and downstream publish preparation
+### `event_overrides`
 
-## Admin Flow
+Admin-applied changes to event handling.
 
-Do now in this order:
+| Override type | Effect |
+|---|---|
+| `skip` | Remove a specific instance from all outputs (e.g. can't attend this week's practice) |
+| `hidden` | Suppress from a specific output |
+| `maybe` | Flag as uncertain |
+| `note` | Attach context without changing distribution |
 
-1. Authenticate through Cloudflare Access.
-2. Create Google targets.
-3. Add ICS sources.
-4. Assign each source to one or more ICS and/or Google targets.
-5. Configure icon/prefix per selected target.
-6. Rebuild and review/debug output.
+---
 
-## Auth Model
+## ICS Output Configuration (Planned)
 
-The admin surface uses Cloudflare Access with Google as the identity provider.
+The three ICS feeds (`family`, `grayson`, `naomi`) are currently hardcoded in the route matcher (`index.js`) and constants (`constants.js`). The intended direction is to store these as configurable output rows in D1 alongside Google outputs, so:
 
-Do now:
+- New named ICS feeds can be created without a code change
+- The same source → output link model applies uniformly to both ICS and Google outputs
+- Feed URLs and calendar names become admin-configurable
 
-1. Keep admin shell on `/admin`.
-2. Keep admin APIs on `/api/*`.
-3. Validate `Cf-Access-Jwt-Assertion` in the Worker.
-4. Map verified email to `admin` or `editor`.
-5. Keep public ICS routes outside Access and protected only by feed token.
+This requires unifying `google_targets` and the hardcoded ICS constants into a single `outputs` table. Not in scope for the current pass.
 
-See [Google auth decision](/c:/Dev/family-scheduling/docs/google-auth-decision.md).
+---
 
-## Rendering Contract
+## Source Types (Current and Planned)
 
-The legacy feed rendering contract remains required.
+| Source type | Status |
+|---|---|
+| ICS URL (TeamSnap, Google Calendar ICS export, any `.ics`) | Live |
+| Google Calendar API (direct read) | Deferred — ICS export from Google Calendar is sufficient for now and avoids a second OAuth scope |
 
-Do now:
+---
 
-1. Child feeds (`naomi.ics`, `grayson.ics`) render icon + title.
-2. `family.ics` renders prefix + icon + title.
-3. Per-target rule data must drive icon/prefix behavior.
-4. Fallback sport-icon detection remains available when no explicit icon is stored on the target rule.
+## Remaining Work
 
-## Action Items
+### Next priority
+1. **Google Calendar outbound sync** — write `output_rules` results to managed Google Calendars via the Calendar API.
 
-### Closed in this pass
+### Follow-on
+2. **Recurrence exception handling** — remap `RECURRENCE-ID` exception events to their parent instance rather than creating new canonical events.
+3. **ICS output configuration** — move hardcoded feed names to DB-driven output rows.
+4. **Richer admin edit workflows** — edit existing sources and source → output link rules in-place (currently only create and disable are supported).
+5. **Prune validation** — confirm stale data pruning behaves correctly against real D1 and R2 at scale.
 
-1. Restrict the admin shell to `/admin` and remove direct shell serving from `/`.
-2. Move source-to-output decoration behavior to `source_target_links`.
-3. Cascade Google target deletion into assignment cleanup.
-4. Add test coverage for `source_target_links` behavior and route handling.
-5. Align the docs with the shipped scope: ICS upstream sources now, Google upstream sources deferred.
-
-### Remaining
-
-1. Implement Google Calendar outbound sync.
-2. Harden recurrence exception/remap behavior.
-3. Continue operational prune validation beyond scaffolding.
-4. Improve parent-facing edit workflows for existing sources and target rules.
+---
 
 ## Legacy Reference
 
-Use `C:\Dev\ics-merge` only for:
+`C:\Dev\ics-merge` is the legacy production worker. Use it only for:
 
-1. current production behavior reference
-2. feed contract comparison
-3. migration context
+- Current production feed contract reference
+- Comparing old and new rendering behaviour
+- Source URL inventory (`cals.txt`)
 
-Do not implement new scheduling-platform features there.
+Do not implement new features there.
