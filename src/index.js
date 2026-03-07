@@ -1148,6 +1148,8 @@ export default {
       }
 
       if (pathname === '/admin' || pathname === '/admin/') {
+        const authError = await requireRole(request, env, ['admin', 'editor']);
+        if (authError) return authError;
         return new Response(renderAdminShell(), {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });

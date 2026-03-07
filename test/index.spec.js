@@ -800,7 +800,7 @@ describe('family-scheduling worker', () => {
   });
 
   it('serves admin shell on /admin', async () => {
-    const request = new Request('http://example.com/admin');
+    const request = new Request('http://example.com/admin', { headers: { 'x-user-role': 'admin' } });
     const ctx = createExecutionContext();
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
