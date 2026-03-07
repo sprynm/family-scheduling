@@ -737,6 +737,22 @@ class FakeDb {
   }
 
   runAll(sql, values) {
+    if (sql.includes('FROM sources s') && sql.includes('LEFT JOIN (') && sql.includes('last_fetched_at')) {
+      const now = Date.now();
+      return this.sources
+        .filter((source) => {
+          if (!source.is_active || !source.url) return false;
+          const snapshots = this.sourceSnapshots
+            .filter((row) => row.source_id === source.id)
+            .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)));
+          const latest = snapshots[0];
+          if (!latest?.fetched_at) return true;
+          const lastFetchedAt = new Date(latest.fetched_at).getTime();
+          if (!Number.isFinite(lastFetchedAt)) return true;
+          return lastFetchedAt <= now - Number(source.poll_interval_minutes || 30) * 60 * 1000;
+        })
+        .sort((a, b) => String(a.owner_type).localeCompare(String(b.owner_type)) || Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
+    }
     if (sql.includes('FROM sources') && sql.includes('ORDER BY') && sql.includes('owner_type')) return this.sources;
     if (sql.includes('FROM source_target_links') && sql.includes('WHERE source_id = ?')) {
       return this.sourceTargetLinks
@@ -846,6 +862,7 @@ class FakeDb {
         .map((rule) => {
           const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
           const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
+          if (!event || !instance || event.source_deleted || instance.source_deleted) return null;
           const source = this.sources.find((row) => row.id === event.source_id);
           const targetLink = this.sourceTargetLinks.find((row) => row.source_id === event.source_id && ((row.target_id && row.target_id === rule.target_id) || row.target_key === target) && row.is_enabled === 1);
           return {
@@ -860,7 +877,8 @@ class FakeDb {
             occurrence_start_at: instance.occurrence_start_at,
             occurrence_end_at: instance.occurrence_end_at,
           };
-        });
+        })
+        .filter(Boolean);
     }
     return [];
   }
@@ -1572,6 +1590,199 @@ describe('family-scheduling worker', () => {
 
     expect(familyFeed).toContain('SUMMARY:G: 🏒 Hockey Practice');
     expect(graysonFeed).toContain('SUMMARY:🏒 Hockey Practice');
+  });
+
+  it('remaps RECURRENCE-ID updates onto the existing series instance', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_recurrence_test',
+      name: 'grayson-recurring',
+      display_name: 'Grayson Recurring',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-recurring.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:grayson-series-1',
+            'SUMMARY:Hockey Practice',
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T020000Z',
+            'RRULE:FREQ=DAILY;COUNT=2',
+            'END:VEVENT',
+            'BEGIN:VEVENT',
+            'UID:grayson-series-1',
+            'RECURRENCE-ID:20260311T010000Z',
+            'SUMMARY:Hockey Practice - Moved',
+            'DTSTART:20260311T030000Z',
+            'DTEND:20260311T040000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_recurrence_test');
+
+    expect(db.canonicalEvents).toHaveLength(1);
+    expect(db.eventInstances).toHaveLength(2);
+    expect(db.eventInstances.some((instance) => instance.recurrence_instance_key === '2026-03-11T01:00:00.000Z' && instance.occurrence_start_at === '2026-03-11T03:00:00.000Z')).toBe(true);
+  });
+
+  it('omits disabled source events from generated feeds', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_disabled_feed',
+      name: 'grayson-disabled',
+      display_name: 'Grayson Disabled',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-disabled.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:grayson-disabled-1',
+            'SUMMARY:Hockey Practice',
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T023000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_disabled_feed');
+    await repo.disableSource('src_disabled_feed');
+
+    const familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    expect(familyFeed).not.toContain('Hockey Practice');
+  });
+
+  it('listActiveSources respects poll_interval_minutes against last snapshot time', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push(
+      {
+        id: 'src_due',
+        name: 'due-source',
+        display_name: 'Due Source',
+        provider_type: 'ics',
+        owner_type: 'family',
+        source_category: 'shared',
+        url: 'https://example.com/due.ics',
+        icon: '',
+        prefix: '',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 0,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 0,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'src_recent',
+        name: 'recent-source',
+        display_name: 'Recent Source',
+        provider_type: 'ics',
+        owner_type: 'family',
+        source_category: 'shared',
+        url: 'https://example.com/recent.ics',
+        icon: '',
+        prefix: '',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 0,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 1,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+    db.sourceSnapshots.push(
+      {
+        id: 'snap_due',
+        source_id: 'src_due',
+        fetched_at: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+        http_status: 200,
+        etag: 'due',
+        last_modified: null,
+        payload_blob_ref: null,
+        parse_status: 'parsed',
+        parse_error_summary: null,
+      },
+      {
+        id: 'snap_recent',
+        source_id: 'src_recent',
+        fetched_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        http_status: 200,
+        etag: 'recent',
+        last_modified: null,
+        payload_blob_ref: null,
+        parse_status: 'parsed',
+        parse_error_summary: null,
+      }
+    );
+
+    const repo = new D1Repository(db, env);
+    const sources = await repo.listActiveSources();
+
+    expect(sources.map((source) => source.id)).toEqual(['src_due']);
   });
 
   it('queues full rebuild jobs for admins', async () => {
