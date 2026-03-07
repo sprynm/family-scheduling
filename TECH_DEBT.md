@@ -26,7 +26,7 @@ See `C:\Dev\Agents\antipatterns\d1-sql-transactions.md` for the full pattern.
 **Priority:** Low — the failure window is narrow and the path is admin-only with
 low concurrency. Address before any high-volume or user-facing write paths are added.
 
-## deleteSource() — non-atomic cascade
+## deleteSource() — non-atomic cascade — Fixed ✓ 2026-03-06
 
 **File:** `src/lib/repository.js`
 **Function:** `deleteSource` (~line 390)
@@ -45,5 +45,4 @@ them to `db.batch([...])`. No statement in the cascade depends on the result of 
 prior statement (all use the same `sourceId` or a subquery), so they can all be
 batched in one call.
 
-**Priority:** Low — delete is admin-only and rare. Address before any automated or
-bulk source lifecycle paths are added.
+**Fixed:** Converted to a single `db.batch([...])` call. All 9 statements run atomically.

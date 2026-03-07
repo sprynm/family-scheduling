@@ -144,11 +144,11 @@ Fix: filter the source list in the cron handler to only enqueue sources whose `l
 
 ---
 
-### 10. `deleteSource()` Cascade Is Non-Atomic — Medium Priority
+### 10. `deleteSource()` Cascade Is Non-Atomic — Fixed ✓
 
 **File:** [repository.js ~line 390](src/lib/repository.js#L390)
 
-Nine sequential `.run()` calls with no `db.batch()` wrapper. A crash mid-sequence leaves the source partially deleted. See `TECH_DEBT.md` for the full entry and correct fix pattern.
+**Fixed 2026-03-06.** Converted to a single `db.batch([...])` call. All 9 cascade deletes are now atomic.
 
 ---
 
