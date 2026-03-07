@@ -427,10 +427,10 @@ function renderAdminShell() {
       <div id="inst-results" class="inst-results"><p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p></div>
 
       <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
-        <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Recently Modified <span class="hint">(last 2 weeks)</span></h3>
+        <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Future Events with Modifications</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Event</th><th>Source</th><th>Override</th><th>Note</th><th>Modified</th><th></th></tr></thead>
+            <thead><tr><th>Event Date</th><th>Event</th><th>Source</th><th>Override</th><th>Note</th><th></th></tr></thead>
             <tbody id="modified-events-body"></tbody>
           </table>
         </div>
@@ -958,17 +958,17 @@ function renderAdminShell() {
         const payload = await fetchJson('/api/overrides');
         const overrides = payload.overrides || [];
         if (!overrides.length) {
-          modifiedEventsBody.innerHTML = '<tr><td colspan="6" class="hint" style="padding:8px">No recent overrides.</td></tr>';
+          modifiedEventsBody.innerHTML = '<tr><td colspan="6" class="hint" style="padding:8px">No future events with modifications.</td></tr>';
           return;
         }
         modifiedEventsBody.innerHTML = overrides.map((ov) => {
-          const when = ov.created_at ? new Date(ov.created_at).toLocaleDateString() : '—';
+          const eventDt = ov.event_date ? new Date(ov.event_date).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
           return '<tr>' +
+            '<td style="white-space:nowrap">' + eventDt + '</td>' +
             '<td>' + (ov.title || '') + '</td>' +
             '<td>' + (ov.owner_type || '') + ' · ' + (ov.source_name || '') + '</td>' +
             '<td>' + (ov.override_type || '') + '</td>' +
             '<td>' + (ov.payload?.note || '') + '</td>' +
-            '<td>' + when + '</td>' +
             '<td><button class="danger remove-modified" data-override-id="' + (ov.id || '') + '">Remove</button></td>' +
             '</tr>';
         }).join('');
@@ -1252,8 +1252,8 @@ export default {
         const authError = await requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
-        const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-        return json({ overrides: await repo.listActiveOverrides({ since }) });
+        const now = new Date().toISOString();
+        return json({ overrides: await repo.listActiveOverrides({ now }) });
       }
 
       if (pathname === '/api/events' && request.method === 'GET') {

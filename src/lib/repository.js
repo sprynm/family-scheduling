@@ -471,27 +471,43 @@ export class D1Repository {
     return result.results || [];
   }
 
-  async listActiveOverrides({ since }) {
+  async listActiveOverrides({ now }) {
+    // Show overrides whose associated event instance is in the future.
+    // For instance-specific overrides: the specific instance must be future.
+    // For series-level overrides (event_instance_id IS NULL): show if any
+    // future instance exists for the canonical event.
     const result = await this.db.prepare(`
       SELECT
-        event_overrides.id,
-        event_overrides.override_type,
-        event_overrides.payload_json,
-        event_overrides.event_instance_id,
-        event_overrides.created_by,
-        event_overrides.created_at,
-        canonical_events.id AS canonical_event_id,
-        canonical_events.title,
-        sources.name AS source_name,
-        sources.owner_type
-      FROM event_overrides
-      JOIN canonical_events ON canonical_events.id = event_overrides.canonical_event_id
-      JOIN sources ON sources.id = canonical_events.source_id
-      WHERE event_overrides.cleared_at IS NULL
-        AND event_overrides.created_at >= ?
-      ORDER BY event_overrides.created_at DESC
+        ov.id,
+        ov.override_type,
+        ov.payload_json,
+        ov.event_instance_id,
+        ov.created_by,
+        ov.created_at,
+        ce.id AS canonical_event_id,
+        ce.title,
+        s.name AS source_name,
+        s.owner_type,
+        COALESCE(ei.occurrence_start_at, next_ei.min_start) AS event_date
+      FROM event_overrides ov
+      JOIN canonical_events ce ON ce.id = ov.canonical_event_id
+      JOIN sources s ON s.id = ce.source_id
+      LEFT JOIN event_instances ei
+        ON ei.id = ov.event_instance_id
+        AND ei.occurrence_start_at >= ?
+      LEFT JOIN (
+        SELECT canonical_event_id, MIN(occurrence_start_at) AS min_start
+        FROM event_instances
+        WHERE occurrence_start_at >= ?
+        GROUP BY canonical_event_id
+      ) next_ei
+        ON next_ei.canonical_event_id = ce.id
+        AND ov.event_instance_id IS NULL
+      WHERE ov.cleared_at IS NULL
+        AND COALESCE(ei.occurrence_start_at, next_ei.min_start) IS NOT NULL
+      ORDER BY COALESCE(ei.occurrence_start_at, next_ei.min_start) ASC
       LIMIT 100
-    `).bind(since).all();
+    `).bind(now, now).all();
     return (result.results || []).map((row) => ({
       ...row,
       payload: typeof row.payload_json === 'string' ? JSON.parse(row.payload_json || '{}') : (row.payload_json || {}),
