@@ -49,56 +49,59 @@ const statusEl = document.getElementById('status');
       body.innerHTML = rowsHtml || '<tr><td colspan="' + (colCount || 4) + '" style="color:#aaa;font-style:italic">None</td></tr>';
     }
 
-    function getCheckedValues(containerEl) {
-      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
+    function getCheckboxTargets(containerEl) {
+      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]')).map((cb) => ({
+        id: cb.value,
+        slug: cb.dataset.targetSlug || '',
+        type: cb.dataset.targetType || '',
+        label: cb.closest('label')?.textContent?.trim() || cb.value,
+      }));
     }
 
-    function getAllCheckboxValues(containerEl) {
-      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]')).map((cb) => ({ value: cb.value, label: cb.closest('label')?.textContent?.trim() || cb.value }));
+    function getCheckedTargets(containerEl) {
+      return getCheckboxTargets(containerEl).filter((target) =>
+        containerEl.querySelector('input[type="checkbox"][value="' + target.id + '"]')?.checked
+      );
     }
 
     function deriveOwnerType(selectedIcs) {
-      if (selectedIcs.includes('grayson')) return 'grayson';
-      if (selectedIcs.includes('naomi')) return 'naomi';
+      const slugs = selectedIcs.map((target) => target.slug);
+      if (slugs.includes('grayson')) return 'grayson';
+      if (slugs.includes('naomi')) return 'naomi';
       return 'family';
     }
 
-    function getDefaultPrefix(targetKey, ownerType) {
-      if (targetKey !== 'family') return '';
+    function getDefaultPrefix(targetSlug, ownerType) {
+      if (targetSlug !== 'family') return '';
       if (ownerType === 'grayson') return 'G:';
       if (ownerType === 'naomi') return 'N:';
       return '';
     }
 
     function syncTargetRuleInputs() {
-      const selectedIcs = getCheckedValues(sourceIcsOutputsEl);
-      const selectedGoogle = getCheckedValues(sourceGoogleOutputsEl);
+      const selectedIcs = getCheckedTargets(sourceIcsOutputsEl);
+      const selectedGoogle = getCheckedTargets(sourceGoogleOutputsEl);
       const ownerType = deriveOwnerType(selectedIcs);
       const allSelected = [...selectedIcs, ...selectedGoogle];
 
-      // label map
-      const labelMap = new Map();
-      getAllCheckboxValues(sourceIcsOutputsEl).forEach(({ value, label }) => labelMap.set(value, { label: 'ICS: ' + label, type: 'ics' }));
-      getAllCheckboxValues(sourceGoogleOutputsEl).forEach(({ value, label }) => labelMap.set(value, { label: 'Google: ' + label, type: 'google' }));
-
       const nextState = new Map();
-      for (const key of allSelected) {
-        const existing = sourceRuleState.get(key) || {};
-        nextState.set(key, {
+      for (const target of allSelected) {
+        const existing = sourceRuleState.get(target.id) || {};
+        nextState.set(target.id, {
           icon: existing.icon || '',
-          prefix: existing.prefix !== undefined ? existing.prefix : getDefaultPrefix(key, ownerType),
+          prefix: existing.prefix !== undefined ? existing.prefix : getDefaultPrefix(target.slug, ownerType),
         });
       }
       sourceRuleState.clear();
       nextState.forEach((v, k) => sourceRuleState.set(k, v));
 
       sourceTargetRulesEl.innerHTML = allSelected.length
-        ? allSelected.map((key) => {
-            const info = labelMap.get(key) || { label: key, type: 'google' };
-            const state = sourceRuleState.get(key) || { icon: '', prefix: '' };
-            return '<div class="target-rule"><strong>' + info.label + '</strong>' +
-              '<label>Icon<input type="text" data-rule-target="' + key + '" data-rule-field="icon" value="' + (state.icon || '').replace(/"/g, '&quot;') + '" placeholder="optional emoji" /></label>' +
-              '<label>Prefix<input type="text" data-rule-target="' + key + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (info.type === 'ics' && key === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
+        ? allSelected.map((target) => {
+            const state = sourceRuleState.get(target.id) || { icon: '', prefix: '' };
+            const label = (target.type === 'ics' ? 'ICS: ' : 'Google: ') + target.label;
+            return '<div class="target-rule"><strong>' + label + '</strong>' +
+              '<label>Icon<input type="text" data-rule-target="' + target.id + '" data-rule-field="icon" value="' + (state.icon || '').replace(/"/g, '&quot;') + '" placeholder="optional emoji" /></label>' +
+              '<label>Prefix<input type="text" data-rule-target="' + target.id + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (target.type === 'ics' && target.slug === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
               '</div>';
           }).join('')
         : '';
@@ -120,7 +123,7 @@ const statusEl = document.getElementById('status');
       if (links.length) {
         return links.map((link) => {
           const type = link.target_type === 'ics' ? 'ICS' : 'GCal';
-          return type + ':' + link.target_key;
+          return type + ': ' + (link.display_name || link.target_key);
         }).join(', ');
       }
       const parts = [];
@@ -167,19 +170,28 @@ const statusEl = document.getElementById('status');
         const sources = sourcesPayload.sources || [];
         const events = eventsPayload.events || [];
         const jobs = jobsPayload.jobs || [];
-        const registeredTargets = targetsPayload.targets || [];
-        const logicalTargets = targetsPayload.logicalTargets || [];
-        const selectableGoogleTargets = registeredTargets.filter((t) => !logicalTargets.includes(t.target_key || ''));
+        const outputs = targetsPayload.targets || [];
+        const icsTargets = outputs.filter((target) => target.target_type === 'ics' && Number(target.is_system));
+        const googleTargets = outputs.filter((target) => target.target_type === 'google');
         metricSources.textContent = String(sources.length);
         metricEvents.textContent = String(events.length);
         metricJobs.textContent = String(jobs.length);
-        metricTargets.textContent = String(registeredTargets.length);
+        metricTargets.textContent = String(googleTargets.length);
 
-        // populate google outputs checkboxes in source form
-        if (selectableGoogleTargets.length) {
+        sourceIcsOutputsEl.innerHTML = icsTargets
+          .map((target) =>
+            '<label><input type="checkbox" name="ics-target" value="' + (target.id || '') + '" data-target-slug="' + (target.slug || '') + '" data-target-type="ics"> ' +
+            (target.display_name || target.slug || '') + '</label>'
+          )
+          .join('');
+
+        if (googleTargets.length) {
           noGoogleHint.classList.add('hidden');
-          sourceGoogleOutputsEl.innerHTML = selectableGoogleTargets
-            .map((t) => '<label><input type="checkbox" name="google-target" value="' + (t.target_key || '') + '"> ' + (t.target_key || '') + '</label>')
+          sourceGoogleOutputsEl.innerHTML = googleTargets
+            .map((target) =>
+              '<label><input type="checkbox" name="google-target" value="' + (target.id || '') + '" data-target-slug="' + (target.slug || '') + '" data-target-type="google"> ' +
+              (target.display_name || target.slug || '') + '</label>'
+            )
             .join('');
         } else {
           noGoogleHint.classList.remove('hidden');
@@ -192,9 +204,13 @@ const statusEl = document.getElementById('status');
           sources.map((s) => '<option value="' + (s.id || '') + '"' + (s.id === prevSource ? ' selected' : '') + '>' + (s.display_name || s.name || '') + ' (' + (s.owner_type || '') + ')</option>').join('');
 
         // populate event output filter
-        const allOutputKeys = [...new Set([...logicalTargets, ...registeredTargets.map((t) => t.target_key || '')].filter(Boolean))];
+        const allOutputKeys = [...new Set(outputs.map((target) => target.slug || target.target_key || '').filter(Boolean))];
         eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
-          allOutputKeys.map((k) => '<option value="' + k + '">' + k + '</option>').join('');
+          allOutputKeys.map((slug) => {
+            const output = outputs.find((target) => (target.slug || target.target_key) === slug);
+            const label = output ? (output.display_name || slug) : slug;
+            return '<option value="' + slug + '">' + label + '</option>';
+          }).join('');
 
         // load modified events table
         await loadModifiedEvents();
@@ -258,17 +274,17 @@ const statusEl = document.getElementById('status');
             try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
             sourceNameInput.value = name;
             sourceUrlInput.value = url;
-            // check ICS outputs
             sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-              cb.checked = links.some((l) => l.target_type === 'ics' && l.target_key === cb.value);
+              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
             });
-            // check Google outputs
             sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-              cb.checked = links.some((l) => l.target_type === 'google' && l.target_key === cb.value);
+              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
             });
-            // restore icon/prefix state
             sourceRuleState.clear();
-            links.forEach((l) => sourceRuleState.set(l.target_key, { icon: l.icon || '', prefix: l.prefix || '' }));
+            links.forEach((link) => {
+              const stateKey = link.target_id || link.target_key;
+              sourceRuleState.set(stateKey, { icon: link.icon || '', prefix: link.prefix || '' });
+            });
             syncTargetRuleInputs();
             sourceForm.setAttribute('data-editing-id', id);
             document.getElementById('source-save').textContent = 'Update Source';
@@ -313,11 +329,11 @@ const statusEl = document.getElementById('status');
         // google outputs table
         renderRows(
           targetsBody,
-          registeredTargets.map((t) =>
-            '<tr><td>' + (t.target_key || '') +
-            '</td><td style="max-width:260px;overflow:hidden;text-overflow:ellipsis">' + (t.calendar_id || '') +
-            '</td><td>' + (Number(t.is_active) ? 'yes' : 'no') +
-            '</td><td><button class="danger delete-target" data-target-key="' + (t.target_key || '') + '">Delete</button></td></tr>'
+          googleTargets.map((target) =>
+            '<tr><td>' + (target.display_name || target.slug || '') +
+            '</td><td style="max-width:260px;overflow:hidden;text-overflow:ellipsis">' + (target.calendar_id || '') +
+            '</td><td>' + (Number(target.is_active) ? 'yes' : 'no') +
+            '</td><td><button class="danger delete-target" data-target-key="' + (target.slug || target.target_key || '') + '">Delete</button></td></tr>'
           ).join(''),
           4
         );
@@ -595,8 +611,8 @@ const statusEl = document.getElementById('status');
       setStatus(editingId ? 'Updating source...' : 'Saving source...', false);
       try {
         const sourceUrl = String(sourceUrlInput.value || '').trim();
-        const selectedIcs = getCheckedValues(sourceIcsOutputsEl);
-        const selectedGoogle = getCheckedValues(sourceGoogleOutputsEl);
+        const selectedIcs = getCheckedTargets(sourceIcsOutputsEl);
+        const selectedGoogle = getCheckedTargets(sourceGoogleOutputsEl);
 
         if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
           throw new Error('Source URL must start with http:// or https://');
@@ -604,23 +620,24 @@ const statusEl = document.getElementById('status');
         if (!selectedIcs.length && !selectedGoogle.length) {
           throw new Error('Select at least one output (ICS or Google).');
         }
-        if (selectedIcs.includes('grayson') && selectedIcs.includes('naomi')) {
+        const selectedIcsSlugs = selectedIcs.map((target) => target.slug);
+        if (selectedIcsSlugs.includes('grayson') && selectedIcsSlugs.includes('naomi')) {
           throw new Error('A source cannot target both grayson and naomi ICS feeds.');
         }
 
         const ownerType = deriveOwnerType(selectedIcs);
-        const allKeys = [...new Set([...selectedIcs, ...selectedGoogle])];
-        const targetLinks = allKeys.map((key) => {
-          const rule = sourceRuleState.get(key) || { icon: '', prefix: getDefaultPrefix(key, ownerType) };
-          return { target_key: key, icon: rule.icon || '', prefix: rule.prefix || '' };
+        const allTargets = [...selectedIcs, ...selectedGoogle];
+        const targetLinks = allTargets.map((target) => {
+          const rule = sourceRuleState.get(target.id) || { icon: '', prefix: getDefaultPrefix(target.slug, ownerType) };
+          return { target_id: target.id, target_key: target.slug, icon: rule.icon || '', prefix: rule.prefix || '' };
         });
 
         const body = {
           owner_type: ownerType,
           display_name: sourceNameInput.value,
           url: sourceUrl,
-          include_in_child_ics: selectedIcs.includes('grayson') || selectedIcs.includes('naomi'),
-          include_in_family_ics: selectedIcs.includes('family'),
+          include_in_child_ics: selectedIcsSlugs.includes('grayson') || selectedIcsSlugs.includes('naomi'),
+          include_in_family_ics: selectedIcsSlugs.includes('family'),
           include_in_child_google_output: selectedGoogle.length > 0,
           target_links: targetLinks,
         };
@@ -657,7 +674,8 @@ const statusEl = document.getElementById('status');
       saveBtn.disabled = true;
       setStatus('Saving Google output...', false);
       try {
-        const targetKey = String(targetKeyInput.value || '').trim().toLowerCase();
+        const displayName = String(targetKeyInput.value || '').trim();
+        const targetKey = displayName.trim().toLowerCase();
         const calendarId = String(targetCalendarInput.value || '').trim();
         if ([...TARGETS].includes(targetKey)) {
           throw new Error('Google output keys cannot be family, grayson, or naomi. Use a distinct key such as ' + targetKey + '_clubs.');
@@ -669,6 +687,7 @@ const statusEl = document.getElementById('status');
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
+            display_name: displayName,
             target_key: targetKeyInput.value,
             calendar_id: calendarId,
             ownership_mode: targetModeInput.value,

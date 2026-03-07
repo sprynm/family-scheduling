@@ -51,6 +51,7 @@ class FakeStatement {
 class FakeDb {
   constructor() {
     this.sources = [];
+    this.outputTargets = [];
     this.sourceTargetLinks = [];
     this.sourceSnapshots = [];
     this.sourceEvents = [];
@@ -72,6 +73,10 @@ class FakeDb {
   }
 
   run(sql, values) {
+    if (sql.includes('CREATE TABLE IF NOT EXISTS output_targets')) {
+      return;
+    }
+
     if (sql.includes('CREATE TABLE IF NOT EXISTS source_target_links')) {
       return;
     }
@@ -81,6 +86,26 @@ class FakeDb {
     }
 
     if (sql.includes('ALTER TABLE source_target_links ADD COLUMN')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE output_rules ADD COLUMN target_id')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE google_event_links ADD COLUMN target_id')) {
+      return;
+    }
+
+    if (sql.includes('CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_id_idx')) {
+      return;
+    }
+
+    if (sql.includes('CREATE INDEX IF NOT EXISTS output_rules_target_id_idx')) {
+      return;
+    }
+
+    if (sql.includes('CREATE INDEX IF NOT EXISTS google_event_links_target_id_idx')) {
       return;
     }
 
@@ -172,10 +197,11 @@ class FakeDb {
     }
 
     if (sql.includes('INSERT INTO source_target_links')) {
-      const [id, sourceId, targetKey, targetType, icon, prefix, sortOrder, createdAt, updatedAt] = values;
+      const [id, sourceId, targetId, targetKey, targetType, icon, prefix, sortOrder, createdAt, updatedAt] = values;
       const existing = this.sourceTargetLinks.find((row) => row.id === id || (row.source_id === sourceId && row.target_key === targetKey));
       if (existing) {
         Object.assign(existing, {
+          target_id: targetId,
           target_type: targetType,
           icon,
           prefix,
@@ -187,12 +213,54 @@ class FakeDb {
         this.sourceTargetLinks.push({
           id,
           source_id: sourceId,
+          target_id: targetId,
           target_key: targetKey,
           target_type: targetType,
           icon,
           prefix,
           sort_order: sortOrder,
           is_enabled: 1,
+          created_at: createdAt,
+          updated_at: updatedAt,
+        });
+      }
+      return;
+    }
+
+    if (sql.includes('INSERT INTO output_targets')) {
+      const isGoogleInsert = sql.includes("VALUES (?, 'google', ?, ?, ?, ?, 0, ?, ?, ?)");
+      const [id, ...rest] = values;
+      const targetType = isGoogleInsert ? 'google' : rest[0];
+      const slug = isGoogleInsert ? rest[0] : rest[1];
+      const displayName = isGoogleInsert ? rest[1] : rest[2];
+      const calendarId = isGoogleInsert ? rest[2] : rest[3];
+      const ownershipMode = isGoogleInsert ? rest[3] : rest[4];
+      const isSystem = isGoogleInsert ? 0 : rest[5];
+      const isActive = isGoogleInsert ? rest[4] : rest[6];
+      const createdAt = isGoogleInsert ? rest[5] : rest[7];
+      const updatedAt = isGoogleInsert ? rest[6] : rest[8];
+      const existing = this.outputTargets.find((row) => row.id === id || row.slug === slug);
+      if (existing) {
+        Object.assign(existing, {
+          target_type: targetType,
+          slug,
+          display_name: displayName,
+          calendar_id: calendarId,
+          ownership_mode: ownershipMode,
+          is_system: isSystem,
+          is_active: isActive,
+          updated_at: updatedAt,
+        });
+      } else {
+        this.outputTargets.push({
+          id,
+          target_type: targetType,
+          slug,
+          display_name: displayName,
+          calendar_id: calendarId,
+          ownership_mode: ownershipMode,
+          is_system: isSystem,
+          is_active: isActive,
           created_at: createdAt,
           updated_at: updatedAt,
         });
@@ -405,10 +473,12 @@ class FakeDb {
 
     if (sql.includes('INSERT INTO output_rules')) {
       if (sql.includes('ON CONFLICT(id) DO UPDATE')) {
-        const [id, canonicalEventId, eventInstanceId, targetKey, derivedReason, createdAt, updatedAt] = values;
+        const [id, canonicalEventId, eventInstanceId, targetId, targetKey, derivedReason, createdAt, updatedAt] = values;
         const existing = this.outputRules.find((row) => row.id === id);
         if (existing) {
           Object.assign(existing, {
+            target_id: targetId,
+            target_key: targetKey,
             include_state: 'included',
             derived_reason: derivedReason,
             updated_at: updatedAt,
@@ -418,6 +488,7 @@ class FakeDb {
             id,
             canonical_event_id: canonicalEventId,
             event_instance_id: eventInstanceId,
+            target_id: targetId,
             target_key: targetKey,
             include_state: 'included',
             derived_reason: derivedReason,
@@ -426,11 +497,12 @@ class FakeDb {
           });
         }
       } else {
-        const [id, canonicalEventId, eventInstanceId, targetKey, createdAt, updatedAt] = values;
+        const [id, canonicalEventId, eventInstanceId, targetId, targetKey, createdAt, updatedAt] = values;
         this.outputRules.push({
           id,
           canonical_event_id: canonicalEventId,
           event_instance_id: eventInstanceId,
+          target_id: targetId,
           target_key: targetKey,
           include_state: 'included',
           derived_reason: 'seeded sample data',
@@ -519,21 +591,42 @@ class FakeDb {
       return;
     }
 
-    if (sql.includes("DELETE FROM source_target_links WHERE target_key = ? AND target_type = 'google'")) {
-      const [targetKey] = values;
-      this.sourceTargetLinks = this.sourceTargetLinks.filter((row) => !(row.target_key === targetKey && row.target_type === 'google'));
+    if (sql.includes('UPDATE source_target_links SET target_id = ? WHERE id = ?')) {
+      const [targetId, linkId] = values;
+      const row = this.sourceTargetLinks.find((link) => link.id === linkId);
+      if (row) row.target_id = targetId;
       return;
     }
 
-    if (sql.includes('DELETE FROM output_rules WHERE target_key = ?')) {
-      const [targetKey] = values;
-      this.outputRules = this.outputRules.filter((row) => row.target_key !== targetKey);
+    if (sql.includes('UPDATE output_rules SET target_id = ? WHERE id = ?')) {
+      const [targetId, ruleId] = values;
+      const row = this.outputRules.find((rule) => rule.id === ruleId);
+      if (row) row.target_id = targetId;
       return;
     }
 
-    if (sql.includes('DELETE FROM google_event_links WHERE target_key = ?')) {
-      const [targetKey] = values;
-      this.googleEventLinks = this.googleEventLinks.filter((row) => row.target_key !== targetKey);
+    if (sql.includes('UPDATE google_event_links SET target_id = ? WHERE id = ?')) {
+      const [targetId, linkId] = values;
+      const row = this.googleEventLinks.find((link) => link.id === linkId);
+      if (row) row.target_id = targetId;
+      return;
+    }
+
+    if (sql.includes('DELETE FROM source_target_links WHERE target_id = ? OR')) {
+      const [targetId, targetKey] = values;
+      this.sourceTargetLinks = this.sourceTargetLinks.filter((row) => !(row.target_id === targetId || (!row.target_id && row.target_key === targetKey && row.target_type === 'google')));
+      return;
+    }
+
+    if (sql.includes('DELETE FROM output_rules WHERE target_id = ? OR')) {
+      const [targetId, targetKey] = values;
+      this.outputRules = this.outputRules.filter((row) => !(row.target_id === targetId || (!row.target_id && row.target_key === targetKey)));
+      return;
+    }
+
+    if (sql.includes('DELETE FROM google_event_links WHERE target_id = ? OR')) {
+      const [targetId, targetKey] = values;
+      this.googleEventLinks = this.googleEventLinks.filter((row) => !(row.target_id === targetId || (!row.target_id && row.target_key === targetKey)));
       return;
     }
 
@@ -601,6 +694,12 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('DELETE FROM output_targets WHERE id = ?')) {
+      const [targetId] = values;
+      this.outputTargets = this.outputTargets.filter((row) => row.id !== targetId);
+      return;
+    }
+
     if (sql.includes('UPDATE sources SET is_active = 0')) {
       const [updatedAt, sourceId] = values;
       const source = this.sources.find((row) => row.id === sourceId);
@@ -642,12 +741,36 @@ class FakeDb {
     if (sql.includes('FROM source_target_links') && sql.includes('WHERE source_id = ?')) {
       return this.sourceTargetLinks
         .filter((row) => row.source_id === values[0] && row.is_enabled === 1)
-        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.target_key).localeCompare(String(b.target_key)));
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.target_key).localeCompare(String(b.target_key)))
+        .map((row) => {
+          const target = this.outputTargets.find((entry) => entry.id === row.target_id);
+          return {
+            ...row,
+            target_key: target?.slug || row.target_key,
+            target_type: target?.target_type || row.target_type,
+            display_name: target?.display_name || row.target_key,
+          };
+        });
     }
     if (sql.includes('FROM source_target_links') && sql.includes('WHERE is_enabled = 1')) {
-      return this.sourceTargetLinks.filter((row) => row.is_enabled === 1);
+      return this.sourceTargetLinks
+        .filter((row) => row.is_enabled === 1)
+        .map((row) => {
+          const target = this.outputTargets.find((entry) => entry.id === row.target_id);
+          return {
+            ...row,
+            target_key: target?.slug || row.target_key,
+            target_type: target?.target_type || row.target_type,
+            display_name: target?.display_name || row.target_key,
+          };
+        });
     }
     if (sql.includes('FROM sync_jobs ORDER BY')) return this.syncJobs.slice(0, values[0] || 50);
+    if (sql.includes('FROM output_targets')) {
+      let rows = [...this.outputTargets];
+      if (sql.includes('WHERE slug = ?')) rows = rows.filter((row) => row.slug === values[0]);
+      return rows;
+    }
     if (sql.includes('FROM google_targets')) return this.googleTargets;
     if (sql.includes('FROM event_instances') && sql.includes('JOIN canonical_events ON canonical_events.id = event_instances.canonical_event_id')) {
       return this.eventInstances
@@ -661,9 +784,13 @@ class FakeDb {
         }));
     }
     if (sql.includes('FROM canonical_events') && sql.includes('GROUP BY canonical_events.id')) {
-      const target = values.length === 2 ? values[0] : null;
+      const target = values.length > 1 ? values[0] : null;
       const rows = this.canonicalEvents
-        .filter((event) => !target || this.outputRules.some((rule) => rule.canonical_event_id === event.id && rule.target_key === target && rule.include_state === 'included'))
+        .filter((event) => !target || this.outputRules.some((rule) => {
+          const outputTarget = this.outputTargets.find((entry) => entry.id === rule.target_id);
+          const slug = outputTarget?.slug || rule.target_key;
+          return rule.canonical_event_id === event.id && slug === target && rule.include_state === 'included';
+        }))
         .map((event) => {
           const source = this.sources.find((row) => row.id === event.source_id);
           const firstInstance = this.eventInstances.find((instance) => instance.canonical_event_id === event.id);
@@ -695,23 +822,32 @@ class FakeDb {
       return this.outputRules
         .filter((row) => row.canonical_event_id === values[0])
         .map((row) => ({
-          target_key: row.target_key,
+          target_key: this.outputTargets.find((target) => target.id === row.target_id)?.slug || row.target_key,
           include_state: row.include_state,
           derived_reason: row.derived_reason,
         }));
     }
     if (sql.includes('FROM google_event_links WHERE canonical_event_id')) {
-      return this.googleEventLinks.filter((row) => row.canonical_event_id === values[0]);
+      return this.googleEventLinks
+        .filter((row) => row.canonical_event_id === values[0])
+        .map((row) => ({
+          ...row,
+          target_key: this.outputTargets.find((target) => target.id === row.target_id)?.slug || row.target_key,
+        }));
     }
     if (sql.includes('FROM output_rules') && sql.includes('JOIN canonical_events')) {
       const target = values[0];
       return this.outputRules
-        .filter((row) => row.target_key === target && row.include_state === 'included')
+        .filter((row) => {
+          const outputTarget = this.outputTargets.find((entry) => entry.id === row.target_id);
+          const slug = outputTarget?.slug || row.target_key;
+          return slug === target && row.include_state === 'included';
+        })
         .map((rule) => {
           const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
           const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
           const source = this.sources.find((row) => row.id === event.source_id);
-          const targetLink = this.sourceTargetLinks.find((row) => row.source_id === event.source_id && row.target_key === target && row.is_enabled === 1);
+          const targetLink = this.sourceTargetLinks.find((row) => row.source_id === event.source_id && ((row.target_id && row.target_id === rule.target_id) || row.target_key === target) && row.is_enabled === 1);
           return {
             canonical_event_id: event.id,
             title: event.title,
@@ -752,6 +888,12 @@ class FakeDb {
     }
     if (sql.includes('SELECT * FROM sources WHERE id = ?')) {
       return this.sources.find((row) => row.id === values[0]) || null;
+    }
+    if (sql.includes('FROM output_targets') && sql.includes('WHERE slug = ?')) {
+      return this.outputTargets.find((row) => row.slug === values[0]) || null;
+    }
+    if (sql.includes('FROM output_targets') && sql.includes('WHERE id = ?')) {
+      return this.outputTargets.find((row) => row.id === values[0]) || null;
     }
     if (sql.includes('FROM google_targets WHERE target_key = ?')) {
       return this.googleTargets.find((row) => row.target_key === values[0]) || null;
@@ -999,6 +1141,13 @@ describe('family-scheduling worker', () => {
   });
 
   it('creates and updates sources through the admin API with per-target rules', async () => {
+    env.APP_DB.googleTargets.push({
+      id: 'gt_naomi_clubs',
+      target_key: 'naomi_clubs',
+      calendar_id: 'naomi-clubs@example.test',
+      ownership_mode: 'managed_output',
+      is_active: 1,
+    });
     const createRequest = new Request('http://example.com/api/sources', {
       method: 'POST',
       headers: {
@@ -1026,6 +1175,7 @@ describe('family-scheduling worker', () => {
     expect(createResponse.status).toBe(201);
     expect(created.source.url).toBe('https://example.com/naomi-volleyball.ics');
     expect(env.APP_DB.sourceTargetLinks.filter((row) => row.source_id === created.source.id)).toHaveLength(3);
+    expect(created.source.target_links.every((link) => typeof link.target_id === 'string' && link.target_id.length > 0)).toBe(true);
 
     const patchRequest = new Request(`http://example.com/api/sources/${created.source.id}`, {
       method: 'PATCH',
@@ -1071,6 +1221,37 @@ describe('family-scheduling worker', () => {
     expect(response.status).toBe(201);
     expect(body.target.target_key).toBe('grayson_clubs');
     expect(body.target.calendar_id).toBe('grayson-clubs@example.test');
+    expect(body.target.target_type).toBe('google');
+  });
+
+  it('lists unified output targets with system ics outputs and google outputs', async () => {
+    const createRequest = new Request('http://example.com/api/targets', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-user-role': 'admin',
+      },
+      body: JSON.stringify({
+        display_name: 'Naomi Clubs',
+        calendar_id: 'naomi-clubs@example.test',
+        ownership_mode: 'managed_output',
+      }),
+    });
+    const createCtx = createExecutionContext();
+    const createResponse = await worker.fetch(createRequest, env, createCtx);
+    await waitOnExecutionContext(createCtx);
+    expect(createResponse.status).toBe(201);
+
+    const request = new Request('http://example.com/api/targets', {
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.targets.some((target) => target.target_type === 'ics' && target.slug === 'family')).toBe(true);
+    expect(body.targets.some((target) => target.target_type === 'google' && target.slug === 'naomi_clubs')).toBe(true);
   });
 
   it('rejects google targets that collide with built-in ics feed keys', async () => {
