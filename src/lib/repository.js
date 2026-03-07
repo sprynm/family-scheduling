@@ -104,13 +104,17 @@ function normalizeTargetLinks(input, ownerType, defaults = {}) {
   const seen = new Set();
 
   for (const [index, item] of items.entries()) {
+    const rawTargetId =
+      typeof item === 'object' && item !== null && typeof item?.target_id === 'string' ? item.target_id : '';
     const rawTargetKey =
       typeof item === 'string' ? item : typeof item?.target_key === 'string' ? item.target_key : '';
+    const targetId = String(rawTargetId || '').trim();
     const targetKey = String(rawTargetKey || '').trim().toLowerCase();
-    if (!targetKey || seen.has(targetKey)) continue;
-    seen.add(targetKey);
+    const dedupeKey = targetId || targetKey;
+    if (!dedupeKey || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
 
-    const fallback = buildDefaultTargetRule(targetKey, ownerType, defaults);
+    const fallback = buildDefaultTargetRule(targetKey || targetId, ownerType, defaults);
     const icon = typeof item === 'object' && item !== null && 'icon' in item ? cleanRuleValue(item.icon) : fallback.icon;
     const prefix =
       typeof item === 'object' && item !== null && 'prefix' in item
@@ -118,6 +122,7 @@ function normalizeTargetLinks(input, ownerType, defaults = {}) {
         : fallback.prefix;
 
     normalized.push({
+      target_id: targetId || null,
       target_key: targetKey,
       target_type: TARGETS.includes(targetKey) ? 'ics' : 'google',
       icon,
@@ -139,6 +144,31 @@ function normalizeTargetKey(value) {
   return key;
 }
 
+function buildOutputTargetId(targetType, slug) {
+  return stableId('outt', `${targetType}:${slug}`);
+}
+
+function toDisplayNameFromSlug(slug) {
+  return String(slug || '')
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function buildSystemOutputTargets() {
+  return TARGETS.map((target) => ({
+    id: buildOutputTargetId('ics', target),
+    target_type: 'ics',
+    slug: target,
+    display_name: `${TARGET_LABELS[target] || toDisplayNameFromSlug(target)} Feed`,
+    calendar_id: null,
+    ownership_mode: null,
+    is_system: 1,
+    is_active: 1,
+  }));
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -153,6 +183,20 @@ export class D1Repository {
   }
 
   async ensureSupportTables() {
+    await this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS output_targets (
+        id TEXT PRIMARY KEY,
+        target_type TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        calendar_id TEXT,
+        ownership_mode TEXT,
+        is_system INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`
+    ).run();
     await this.db.prepare(
       `CREATE TABLE IF NOT EXISTS source_target_links (
         id TEXT PRIMARY KEY,
@@ -185,6 +229,160 @@ export class D1Repository {
     await ensureColumn('icon', "TEXT NOT NULL DEFAULT ''");
     await ensureColumn('prefix', "TEXT NOT NULL DEFAULT ''");
     await ensureColumn('sort_order', 'INTEGER NOT NULL DEFAULT 0');
+    await ensureColumn('target_id', 'TEXT REFERENCES output_targets(id)');
+
+    const ensureOutputRuleTargetId = async () => {
+      try {
+        await this.db.prepare(`ALTER TABLE output_rules ADD COLUMN target_id TEXT REFERENCES output_targets(id)`).run();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/duplicate column name|already exists/i.test(message)) throw error;
+      }
+    };
+
+    const ensureGoogleEventLinkTargetId = async () => {
+      try {
+        await this.db.prepare(`ALTER TABLE google_event_links ADD COLUMN target_id TEXT REFERENCES output_targets(id)`).run();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/duplicate column name|already exists/i.test(message)) throw error;
+      }
+    };
+
+    await ensureOutputRuleTargetId();
+    await ensureGoogleEventLinkTargetId();
+    await this.db.prepare(
+      `CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_id_idx
+       ON source_target_links(source_id, target_id)`
+    ).run();
+    await this.db.prepare(
+      `CREATE INDEX IF NOT EXISTS output_rules_target_id_idx
+       ON output_rules(target_id)`
+    ).run();
+    await this.db.prepare(
+      `CREATE INDEX IF NOT EXISTS google_event_links_target_id_idx
+       ON google_event_links(target_id)`
+    ).run();
+    await this.bootstrapOutputTargets();
+  }
+
+  async listOutputTargets({ includeInactive = true } = {}) {
+    const result = await this.db.prepare(
+      `SELECT id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active
+       FROM output_targets
+       ${includeInactive ? '' : 'WHERE is_active = 1'}
+       ORDER BY is_system DESC, target_type ASC, display_name ASC, slug ASC`
+    ).all();
+    return (result.results || []).map((row) => ({
+      ...mapRow(row),
+      target_key: row.slug,
+    }));
+  }
+
+  async getOutputTargetBySlug(slugInput) {
+    const slug = normalizeTargetKey(slugInput);
+    const row = await this.db.prepare(
+      `SELECT id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active
+       FROM output_targets
+       WHERE slug = ?`
+    ).bind(slug).first();
+    return row ? { ...mapRow(row), target_key: row.slug } : null;
+  }
+
+  async getOutputTargetById(id) {
+    const row = await this.db.prepare(
+      `SELECT id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active
+       FROM output_targets
+       WHERE id = ?`
+    ).bind(id).first();
+    return row ? { ...mapRow(row), target_key: row.slug } : null;
+  }
+
+  async bootstrapOutputTargets() {
+    const timestamp = nowIso();
+    for (const target of buildSystemOutputTargets()) {
+      await this.db.prepare(
+        `INSERT INTO output_targets (
+          id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          target_type = excluded.target_type,
+          display_name = excluded.display_name,
+          is_system = excluded.is_system,
+          updated_at = excluded.updated_at`
+      ).bind(
+        target.id,
+        target.target_type,
+        target.slug,
+        target.display_name,
+        target.calendar_id,
+        target.ownership_mode,
+        target.is_system,
+        target.is_active,
+        timestamp,
+        timestamp
+      ).run();
+    }
+
+    const googleTargetsResult = await this.db.prepare(
+      `SELECT id, target_key, calendar_id, ownership_mode, is_active FROM google_targets`
+    ).all();
+    for (const row of googleTargetsResult.results || []) {
+      const slug = normalizeTargetKey(row.target_key);
+      await this.db.prepare(
+        `INSERT INTO output_targets (
+          id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
+        ) VALUES (?, 'google', ?, ?, ?, ?, 0, ?, ?, ?)
+        ON CONFLICT(slug) DO UPDATE SET
+          target_type = 'google',
+          calendar_id = excluded.calendar_id,
+          ownership_mode = excluded.ownership_mode,
+          is_active = excluded.is_active,
+          updated_at = excluded.updated_at`
+      ).bind(
+        row.id || buildOutputTargetId('google', slug),
+        slug,
+        toDisplayNameFromSlug(slug),
+        row.calendar_id,
+        row.ownership_mode || 'managed_output',
+        Number(row.is_active ?? 1),
+        timestamp,
+        timestamp
+      ).run();
+    }
+
+    const linksResult = await this.db.prepare(
+      `SELECT id, target_key, target_type
+       FROM source_target_links
+       WHERE target_id IS NULL`
+    ).all();
+    for (const row of linksResult.results || []) {
+      const target = await this.getOutputTargetBySlug(row.target_key);
+      if (!target) continue;
+      await this.db.prepare(`UPDATE source_target_links SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
+    }
+
+    const rulesResult = await this.db.prepare(
+      `SELECT id, target_key
+       FROM output_rules
+       WHERE target_id IS NULL`
+    ).all();
+    for (const row of rulesResult.results || []) {
+      const target = await this.getOutputTargetBySlug(row.target_key);
+      if (!target) continue;
+      await this.db.prepare(`UPDATE output_rules SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
+    }
+
+    const googleLinksResult = await this.db.prepare(
+      `SELECT id, target_key
+       FROM google_event_links
+       WHERE target_id IS NULL`
+    ).all();
+    for (const row of googleLinksResult.results || []) {
+      const target = await this.getOutputTargetBySlug(row.target_key);
+      if (!target) continue;
+      await this.db.prepare(`UPDATE google_event_links SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
+    }
   }
 
   async listSources() {
@@ -217,17 +415,28 @@ export class D1Repository {
     ).all();
     const sources = result.results || [];
     const linksResult = await this.db.prepare(
-      `SELECT source_id, target_key, target_type, icon, prefix, sort_order
+      `SELECT
+         source_target_links.source_id,
+         source_target_links.target_id,
+         COALESCE(output_targets.slug, source_target_links.target_key) AS target_key,
+         COALESCE(output_targets.target_type, source_target_links.target_type) AS target_type,
+         COALESCE(output_targets.display_name, source_target_links.target_key) AS display_name,
+         source_target_links.icon,
+         source_target_links.prefix,
+         source_target_links.sort_order
        FROM source_target_links
-       WHERE is_enabled = 1`
+       LEFT JOIN output_targets ON output_targets.id = source_target_links.target_id
+       WHERE source_target_links.is_enabled = 1`
     ).all();
     const links = linksResult.results || [];
     const bySource = new Map();
     for (const link of links) {
       if (!bySource.has(link.source_id)) bySource.set(link.source_id, []);
       bySource.get(link.source_id).push({
+        target_id: link.target_id || null,
         target_key: link.target_key,
         target_type: link.target_type,
+        display_name: link.display_name || link.target_key,
         icon: cleanRuleValue(link.icon),
         prefix: cleanRuleValue(link.prefix),
         sort_order: Number(link.sort_order || 0),
@@ -344,19 +553,59 @@ export class D1Repository {
     return source;
   }
 
+  async resolveInputTarget(item, defaults = {}) {
+    const rawTargetId =
+      typeof item === 'object' && item !== null && typeof item.target_id === 'string' ? item.target_id : '';
+    const targetId = String(rawTargetId || '').trim();
+    if (targetId) {
+      const target = await this.getOutputTargetById(targetId);
+      if (!target) {
+        throw new Error(`Unknown target_id: ${targetId}`);
+      }
+      return target;
+    }
+
+    const rawTargetKey =
+      typeof item === 'string' ? item : typeof item?.target_key === 'string' ? item.target_key : '';
+    const targetKey = String(rawTargetKey || '').trim().toLowerCase();
+    if (!targetKey) {
+      throw new Error('target_key or target_id is required');
+    }
+
+    const target = await this.getOutputTargetBySlug(targetKey);
+    if (!target) {
+      throw new Error(`Unknown target: ${targetKey}`);
+    }
+    return target;
+  }
+
   async setSourceTargets(sourceId, targetLinksInput, defaults = {}) {
-    const targetLinks = normalizeTargetLinks(targetLinksInput, defaults.ownerType || 'family', defaults);
+    const normalizedInput = normalizeTargetLinks(targetLinksInput, defaults.ownerType || 'family', defaults);
+    const targetLinks = [];
+    for (const item of normalizedInput) {
+      const target = await this.resolveInputTarget(item, defaults);
+      targetLinks.push({
+        target_id: target.id,
+        target_key: target.slug || target.target_key,
+        target_type: target.target_type,
+        display_name: target.display_name || target.slug || target.target_key,
+        icon: cleanRuleValue(item.icon),
+        prefix: cleanRuleValue(item.prefix),
+        sort_order: Number(item.sort_order || 0),
+      });
+    }
     const timestamp = nowIso();
     await this.runInTransaction(async () => {
       await this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId).run();
       for (const targetLink of targetLinks) {
         await this.db.prepare(
           `INSERT INTO source_target_links (
-            id, source_id, target_key, target_type, icon, prefix, sort_order, is_enabled, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+            id, source_id, target_id, target_key, target_type, icon, prefix, sort_order, is_enabled, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
         ).bind(
-          stableId('stl', `${sourceId}:${targetLink.target_key}`),
+          stableId('stl', `${sourceId}:${targetLink.target_id || targetLink.target_key}`),
           sourceId,
+          targetLink.target_id || null,
           targetLink.target_key,
           targetLink.target_type,
           targetLink.icon || '',
@@ -414,14 +663,12 @@ export class D1Repository {
   }
 
   async listTargets() {
-    const result = await this.db.prepare(
-      `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets ORDER BY target_key`
-    ).all();
-    return result.results || [];
+    return this.listOutputTargets({ includeInactive: true });
   }
 
   async upsertTarget(input) {
-    const targetKey = normalizeTargetKey(input.target_key);
+    const displayName = String(input.display_name || input.target_key || '').trim();
+    const targetKey = normalizeTargetKey(input.slug || input.target_key || displayName);
     if (TARGETS.includes(targetKey)) {
       throw new Error('target_key "' + targetKey + '" is reserved for built-in ICS feeds. Use a distinct Google output key such as "' + targetKey + '_clubs".');
     }
@@ -434,7 +681,21 @@ export class D1Repository {
       throw new Error(`Unsupported ownership_mode: ${ownershipMode}`);
     }
     const isActive = toBoolInt(input.is_active, 1);
-    const id = stableId('gt', targetKey);
+    const id = buildOutputTargetId('google', targetKey);
+    const resolvedDisplayName = displayName || toDisplayNameFromSlug(targetKey);
+    const timestamp = nowIso();
+    await this.db.prepare(
+      `INSERT INTO output_targets (
+        id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
+      ) VALUES (?, 'google', ?, ?, ?, ?, 0, ?, ?, ?)
+      ON CONFLICT(slug) DO UPDATE SET
+        target_type = 'google',
+        display_name = excluded.display_name,
+        calendar_id = excluded.calendar_id,
+        ownership_mode = excluded.ownership_mode,
+        is_active = excluded.is_active,
+        updated_at = excluded.updated_at`
+    ).bind(id, targetKey, resolvedDisplayName, calendarId, ownershipMode, isActive, timestamp, timestamp).run();
     await this.db.prepare(
       `INSERT INTO google_targets (id, target_key, calendar_id, ownership_mode, is_active)
        VALUES (?, ?, ?, ?, ?)
@@ -443,25 +704,21 @@ export class D1Repository {
          ownership_mode = excluded.ownership_mode,
          is_active = excluded.is_active`
     ).bind(id, targetKey, calendarId, ownershipMode, isActive).run();
-    const row = await this.db.prepare(
-      `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets WHERE target_key = ?`
-    ).bind(targetKey).first();
-    return mapRow(row);
+    return this.getOutputTargetBySlug(targetKey);
   }
 
   async deleteTarget(targetKeyInput) {
     const targetKey = normalizeTargetKey(targetKeyInput);
-    const existing = await this.db.prepare(
-      `SELECT target_key, calendar_id, ownership_mode, is_active FROM google_targets WHERE target_key = ?`
-    ).bind(targetKey).first();
+    const existing = await this.getOutputTargetBySlug(targetKey);
     if (!existing) return null;
     await this.runInTransaction(async () => {
-      await this.db.prepare(`DELETE FROM source_target_links WHERE target_key = ? AND target_type = 'google'`).bind(targetKey).run();
-      await this.db.prepare(`DELETE FROM output_rules WHERE target_key = ?`).bind(targetKey).run();
-      await this.db.prepare(`DELETE FROM google_event_links WHERE target_key = ?`).bind(targetKey).run();
+      await this.db.prepare(`DELETE FROM source_target_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ? AND target_type = 'google')`).bind(existing.id, targetKey).run();
+      await this.db.prepare(`DELETE FROM output_rules WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey).run();
+      await this.db.prepare(`DELETE FROM google_event_links WHERE target_id = ? OR (target_id IS NULL AND target_key = ?)`).bind(existing.id, targetKey).run();
       await this.db.prepare(`DELETE FROM google_targets WHERE target_key = ?`).bind(targetKey).run();
+      await this.db.prepare(`DELETE FROM output_targets WHERE id = ?`).bind(existing.id).run();
     });
-    return mapRow(existing);
+    return existing;
   }
 
   async listInstances({ sourceId, outputKey, future, limit = 200 }) {
@@ -484,8 +741,11 @@ export class D1Repository {
     if (future) conditions.push('event_instances.occurrence_start_at >= ?') && binds.push(now);
     if (sourceId) conditions.push('canonical_events.source_id = ?') && binds.push(sourceId);
     if (outputKey) {
-      sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.target_key = ? AND output_rules.include_state = 'included'`;
-      binds.unshift(outputKey);
+      sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.include_state = 'included'
+               LEFT JOIN output_targets output_filter_target
+                 ON output_filter_target.id = output_rules.target_id`;
+      conditions.push(`(output_filter_target.slug = ? OR (output_rules.target_id IS NULL AND output_rules.target_key = ?))`);
+      binds.push(outputKey, outputKey);
     }
     if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
     sql += ' ORDER BY event_instances.occurrence_start_at ASC LIMIT ?';
@@ -557,8 +817,11 @@ export class D1Repository {
     `;
     const binds = [];
     if (target) {
-      sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.target_key = ? AND output_rules.include_state = 'included'`;
-      binds.push(target);
+      sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.include_state = 'included'
+               LEFT JOIN output_targets output_filter_target
+                 ON output_filter_target.id = output_rules.target_id`;
+      sql += ` AND (output_filter_target.slug = ? OR (output_rules.target_id IS NULL AND output_rules.target_key = ?))`;
+      binds.push(target, target);
     }
     sql += `
       GROUP BY canonical_events.id
@@ -588,12 +851,18 @@ export class D1Repository {
        ORDER BY created_at DESC`
     ).bind(id).all();
     const outputsResult = await this.db.prepare(
-      `SELECT target_key, include_state, derived_reason
-       FROM output_rules WHERE canonical_event_id = ? ORDER BY target_key`
+      `SELECT COALESCE(output_targets.slug, output_rules.target_key) AS target_key, include_state, derived_reason
+       FROM output_rules
+       LEFT JOIN output_targets ON output_targets.id = output_rules.target_id
+       WHERE canonical_event_id = ?
+       ORDER BY target_key`
     ).bind(id).all();
     const linksResult = await this.db.prepare(
-      `SELECT target_key, google_event_id, sync_status, last_synced_at, last_error
-       FROM google_event_links WHERE canonical_event_id = ? ORDER BY target_key`
+      `SELECT COALESCE(output_targets.slug, google_event_links.target_key) AS target_key, google_event_id, sync_status, last_synced_at, last_error
+       FROM google_event_links
+       LEFT JOIN output_targets ON output_targets.id = google_event_links.target_id
+       WHERE canonical_event_id = ?
+       ORDER BY target_key`
     ).bind(id).all();
 
     return {
@@ -703,16 +972,21 @@ export class D1Repository {
       JOIN canonical_events ON canonical_events.id = output_rules.canonical_event_id
       JOIN sources ON sources.id = canonical_events.source_id
       JOIN event_instances ON event_instances.id = output_rules.event_instance_id
+      LEFT JOIN output_targets
+        ON output_targets.id = output_rules.target_id
       LEFT JOIN source_target_links
         ON source_target_links.source_id = canonical_events.source_id
-       AND source_target_links.target_key = output_rules.target_key
+       AND (
+         source_target_links.target_id = output_rules.target_id
+         OR (source_target_links.target_id IS NULL AND source_target_links.target_key = output_rules.target_key)
+       )
        AND source_target_links.is_enabled = 1
-      WHERE output_rules.target_key = ?
+      WHERE (output_targets.slug = ? OR (output_rules.target_id IS NULL AND output_rules.target_key = ?))
         AND output_rules.include_state = 'included'
         AND canonical_events.source_deleted = 0
         AND event_instances.source_deleted = 0
       ORDER BY event_instances.occurrence_start_at ASC`
-    ).bind(target).all();
+    ).bind(target, target).all();
 
     const rows = result.results || [];
     const lookbackCutoff = new Date();
@@ -919,17 +1193,47 @@ export class D1Repository {
       ]);
 
       for (const target of sample.ownerTargets) {
+        const outputTargetId = buildOutputTargetId('ics', target);
         await this.db.prepare(
           `INSERT INTO output_rules (
-            id, canonical_event_id, event_instance_id, target_key, include_state, derived_reason, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'included', 'seeded sample data', ?, ?)`
-        ).bind(stableId('out', `${sample.id}:${target}`), sample.id, `${sample.id}_inst1`, target, timestamp, timestamp).run();
+            id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'included', 'seeded sample data', ?, ?)`
+        ).bind(stableId('out', `${sample.id}:${outputTargetId}`), sample.id, `${sample.id}_inst1`, outputTargetId, target, timestamp, timestamp).run();
       }
     }
   }
 
   async getSourceById(id) {
-    return this.db.prepare(`SELECT * FROM sources WHERE id = ?`).bind(id).first();
+    const source = await this.db.prepare(`SELECT * FROM sources WHERE id = ?`).bind(id).first();
+    if (!source) return null;
+    const links = await this.db.prepare(
+      `SELECT
+         source_target_links.target_id,
+         COALESCE(output_targets.slug, source_target_links.target_key) AS target_key,
+         COALESCE(output_targets.target_type, source_target_links.target_type) AS target_type,
+         COALESCE(output_targets.display_name, source_target_links.target_key) AS display_name,
+         source_target_links.icon,
+         source_target_links.prefix,
+         source_target_links.sort_order
+       FROM source_target_links
+       LEFT JOIN output_targets ON output_targets.id = source_target_links.target_id
+       WHERE source_target_links.source_id = ? AND source_target_links.is_enabled = 1
+       ORDER BY source_target_links.sort_order ASC, target_key ASC`
+    ).bind(id).all();
+    const targetLinks = (links.results || []).map((row) => ({
+      target_id: row.target_id || null,
+      target_key: row.target_key,
+      target_type: row.target_type,
+      display_name: row.display_name || row.target_key,
+      icon: cleanRuleValue(row.icon),
+      prefix: cleanRuleValue(row.prefix),
+      sort_order: Number(row.sort_order || 0),
+    }));
+    return {
+      ...mapRow(source),
+      target_links: targetLinks,
+      target_keys: targetLinks.map((link) => link.target_key),
+    };
   }
 
   async listSourceInstances(sourceId) {
@@ -979,16 +1283,19 @@ export class D1Repository {
         for (const target of targets) {
           await this.db.prepare(
             `INSERT INTO output_rules (
-              id, canonical_event_id, event_instance_id, target_key, include_state, derived_reason, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'included', ?, ?, ?)
+              id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'included', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+              target_id = excluded.target_id,
+              target_key = excluded.target_key,
               include_state = excluded.include_state,
               derived_reason = excluded.derived_reason,
               updated_at = excluded.updated_at`
           ).bind(
-            stableId('out', `${instance.id}:${target.target_key}`),
+            stableId('out', `${instance.id}:${target.target_id || target.target_key}`),
             instance.canonical_event_id,
             instance.id,
+            target.target_id || null,
             target.target_key,
             'derived from source configuration',
             timestamp,
@@ -1071,32 +1378,52 @@ export class D1Repository {
   deriveLegacyTargetsForSource(source) {
     const targets = [];
     if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) {
-      targets.push(buildDefaultTargetRule('grayson', source.owner_type, { icon: source.icon || '', prefix: '' }));
+      targets.push({
+        ...buildDefaultTargetRule('grayson', source.owner_type, { icon: source.icon || '', prefix: '' }),
+        target_id: buildOutputTargetId('ics', 'grayson'),
+        display_name: 'Grayson Feed',
+      });
     }
     if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) {
-      targets.push(buildDefaultTargetRule('naomi', source.owner_type, { icon: source.icon || '', prefix: '' }));
+      targets.push({
+        ...buildDefaultTargetRule('naomi', source.owner_type, { icon: source.icon || '', prefix: '' }),
+        target_id: buildOutputTargetId('ics', 'naomi'),
+        display_name: 'Naomi Feed',
+      });
     }
     if (Number(source.include_in_family_ics)) {
-      targets.push(
-        buildDefaultTargetRule('family', source.owner_type, {
+      targets.push({
+        ...buildDefaultTargetRule('family', source.owner_type, {
           icon: source.icon || '',
           prefix: source.prefix || this.derivePrefix(source.owner_type),
-        })
-      );
+        }),
+        target_id: buildOutputTargetId('ics', 'family'),
+        display_name: 'Family Feed',
+      });
     }
     return targets;
   }
 
   async resolveTargetsForSource(source) {
     const links = await this.db.prepare(
-      `SELECT target_key, target_type, icon, prefix, sort_order
+      `SELECT
+         source_target_links.target_id,
+         COALESCE(output_targets.slug, source_target_links.target_key) AS target_key,
+         COALESCE(output_targets.target_type, source_target_links.target_type) AS target_type,
+         COALESCE(output_targets.display_name, source_target_links.target_key) AS display_name,
+         source_target_links.icon,
+         source_target_links.prefix,
+         source_target_links.sort_order
        FROM source_target_links
+       LEFT JOIN output_targets ON output_targets.id = source_target_links.target_id
        WHERE source_id = ? AND is_enabled = 1
        ORDER BY sort_order ASC, target_key ASC`
     ).bind(source.id).all();
     const targetLinks = (links.results || []).map((row) => ({
+      target_id: row.target_id || null,
       target_key: row.target_key,
       target_type: row.target_type || (TARGETS.includes(row.target_key) ? 'ics' : 'google'),
+      display_name: row.display_name || row.target_key,
       icon: cleanRuleValue(row.icon),
       prefix: cleanRuleValue(row.prefix),
       sort_order: Number(row.sort_order || 0),
@@ -1341,16 +1668,19 @@ export class D1Repository {
           for (const target of targets) {
             await this.db.prepare(
               `INSERT INTO output_rules (
-                id, canonical_event_id, event_instance_id, target_key, include_state, derived_reason, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, 'included', ?, ?, ?)
+                id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, 'included', ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
+                target_id = excluded.target_id,
+                target_key = excluded.target_key,
                 include_state = excluded.include_state,
                 derived_reason = excluded.derived_reason,
                 updated_at = excluded.updated_at`
             ).bind(
-              stableId('out', `${instance.id}:${target.target_key}`),
+              stableId('out', `${instance.id}:${target.target_id || target.target_key}`),
               canonicalEventId,
               instance.id,
+              target.target_id || null,
               target.target_key,
               `derived from ${source.owner_type} source`,
               fetchedAt,

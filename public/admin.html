@@ -44,8 +44,8 @@
         <p class="hint" style="margin-bottom:12px">Connect a Google Calendar that this system will write to on each sync.</p>
         <form id="target-form" class="inline-form">
           <div class="field-group">
-            <span class="field-label">Display name / key</span>
-            <input id="target-key" type="text" placeholder="e.g. grayson-clubs" required />
+            <span class="field-label">Display name</span>
+            <input id="target-key" type="text" placeholder="e.g. Grayson Clubs" required />
           </div>
           <div class="field-group">
             <span class="field-label">Google Calendar ID</span>
@@ -59,7 +59,7 @@
         </form>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Name / Key</th><th>Calendar ID</th><th>Active</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Display Name</th><th>Calendar ID</th><th>Active</th><th>Actions</th></tr></thead>
             <tbody id="targets-body"></tbody>
           </table>
         </div>
@@ -102,11 +102,7 @@
         </div>
         <div>
           <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
-          <div class="checkbox-wrap" id="source-ics-outputs">
-            <label><input type="checkbox" name="ics-target" value="family"> family</label>
-            <label><input type="checkbox" name="ics-target" value="grayson"> grayson</label>
-            <label><input type="checkbox" name="ics-target" value="naomi"> naomi</label>
-          </div>
+          <div class="checkbox-wrap" id="source-ics-outputs"></div>
         </div>
         <div>
           <p class="field-label" style="margin-bottom:6px">Google Calendar Outputs</p>
