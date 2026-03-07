@@ -770,6 +770,17 @@ beforeEach(() => {
   env.ALLOW_DEV_ROLE_HEADER = 'true';
   env.SEED_SAMPLE_DATA = 'true';
   env.APP_DB = new FakeDb();
+  env.ASSETS = {
+    fetch: vi.fn(async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === '/admin.html') {
+        return new Response('<!doctype html><html><body><h1>Admin Console</h1></body></html>', {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      return new Response('Not found', { status: 404 });
+    }),
+  };
   clearAuthCachesForTest();
 });
 
@@ -808,6 +819,7 @@ describe('family-scheduling worker', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(body).toContain('Admin Console');
+    expect(env.ASSETS.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('redirects the root path to /admin', async () => {

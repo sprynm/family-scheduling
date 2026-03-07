@@ -13,6 +13,7 @@ npm run dev
 ## Docs
 
 - [Todo / work items](./docs/todo.md)
+- [Coding standards](./docs/coding-standards.md)
 - [Implementation plan](./docs/implementation-plan.md)
 - [Code review](./docs/code-review.md)
 - [Tech debt](./TECH_DEBT.md)

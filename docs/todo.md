@@ -107,6 +107,24 @@ Build on top of the unified `output_targets` model (above). After ingest, write/
 
 ---
 
+## P3 — Code Quality (from JS standards scan)
+
+### Fix clipboard `.catch()` missing — [index.js:807](../src/index.js#L807)
+`navigator.clipboard.writeText(...).then(...)` has no `.catch()`. If the clipboard API is denied (non-HTTPS, permission blocked), the rejection is silent and the button gives no feedback.
+
+Fix: add `.catch(() => { btn.textContent = 'Failed'; setTimeout(...) })` after the `.then()`.
+
+### Add error handling to top-level `loadDashboard()` call — [index.js:1148](../src/index.js#L1148)
+`loadDashboard()` is called fire-and-forget on page load. It has internal `try/catch` so it won't throw under normal conditions, but the call site is unguarded. Wrap in `.catch(err => setStatus(err.message, true))`.
+
+### Extract magic numbers to named constants — [index.js:810](../src/index.js#L810), [index.js:1194](../src/index.js#L1194)
+- `1500` (ms clipboard reset) — add an inline comment at minimum
+- `max-age=300` (ICS feed cache TTL) — move to `env.FEED_CACHE_MAX_AGE` or a named constant in `constants.js`
+
+**Ref:** `docs/coding-standards.md`
+
+---
+
 ## P3 — Follow-on
 
 ### Recurrence exception handling
