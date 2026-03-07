@@ -25,3 +25,25 @@ See `C:\Dev\Agents\antipatterns\d1-sql-transactions.md` for the full pattern.
 
 **Priority:** Low — the failure window is narrow and the path is admin-only with
 low concurrency. Address before any high-volume or user-facing write paths are added.
+
+## deleteSource() — non-atomic cascade
+
+**File:** `src/lib/repository.js`
+**Function:** `deleteSource` (~line 390)
+
+`deleteSource()` executes 9 sequential `.run()` calls to cascade-delete all child
+rows before removing the source row. There is no `db.batch()` wrapper. If the
+Worker crashes or D1 times out mid-sequence, the source is left partially deleted —
+child rows removed, parent row still present, or vice versa.
+
+**Most exposed step:** The delete of `canonical_events` after its children are gone.
+A crash between `DELETE FROM event_instances` and `DELETE FROM canonical_events`
+leaves orphaned canonical events with no instances.
+
+**Correct fix:** Collect all 9 statements as prepared (un-run) statements and pass
+them to `db.batch([...])`. No statement in the cascade depends on the result of a
+prior statement (all use the same `sourceId` or a subquery), so they can all be
+batched in one call.
+
+**Priority:** Low — delete is admin-only and rare. Address before any automated or
+bulk source lifecycle paths are added.

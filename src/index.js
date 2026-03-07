@@ -661,7 +661,7 @@ function renderAdminShell() {
           sourcesBody,
           sortedSources.slice(0, 30).map((s) => {
             const lastFetch = s.last_fetched_at ? new Date(s.last_fetched_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
-            const parseOk = s.last_parse_status === 'ok' || s.last_parse_status === 'success';
+            const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob'].includes(s.last_parse_status);
             const statusCell = !s.last_parse_status ? '<span class="hint">never</span>'
               : parseOk ? '<span style="color:#1a7f37">ok</span>'
               : '<span style="color:#a00" title="' + (s.last_parse_error || '').replace(/"/g, '&quot;') + '">error</span>';
@@ -1195,7 +1195,7 @@ export default {
         const authError = await requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
         const repo = await createRepository(env);
-        return json(await repo.getFeedContract());
+        return json(await repo.getFeedContract(request.url));
       }
 
       if (pathname === '/api/sources' && request.method === 'GET') {

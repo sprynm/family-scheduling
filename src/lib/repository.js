@@ -390,17 +390,22 @@ export class D1Repository {
   async deleteSource(sourceId) {
     const existing = await this.getSourceById(sourceId);
     if (!existing) return null;
+    // Delete in FK-dependency order (children before parents)
     await this.db.prepare(
       `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
     ).bind(sourceId).run();
     await this.db.prepare(
-      `DELETE FROM event_overrides WHERE event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+      `DELETE FROM event_overrides WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+    ).bind(sourceId).run();
+    await this.db.prepare(
+      `DELETE FROM google_event_links WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
     ).bind(sourceId).run();
     await this.db.prepare(
       `DELETE FROM event_instances WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
     ).bind(sourceId).run();
     await this.db.prepare(`DELETE FROM canonical_events WHERE source_id = ?`).bind(sourceId).run();
     await this.db.prepare(`DELETE FROM source_events WHERE source_id = ?`).bind(sourceId).run();
+    await this.db.prepare(`DELETE FROM source_snapshots WHERE source_id = ?`).bind(sourceId).run();
     await this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId).run();
     await this.db.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId).run();
     return existing;
@@ -669,8 +674,8 @@ export class D1Repository {
     };
   }
 
-  async getFeedContract() {
-    const host = 'https://ics.sprynewmedia.com';
+  async getFeedContract(requestUrl) {
+    const host = this.env.PUBLIC_HOST || (requestUrl ? new URL(requestUrl).origin : 'https://ics.sprynewmedia.com');
     const token = this.env.TOKEN || '';
     return {
       host,

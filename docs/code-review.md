@@ -96,28 +96,19 @@ This is a minor API inconsistency — the caller can see the source was created 
 
 ---
 
-### 5. Hardcoded Host in `getFeedContract` — Low Priority
+### 5. Hardcoded Host in `getFeedContract` — Fixed ✓
 
 **File:** [repository.js:574](src/lib/repository.js#L574)
 
-```js
-host: 'https://ics.sprynewmedia.com',
-```
-
-This should come from an env var (e.g. `env.PUBLIC_HOST`) so staging and dev environments don't report the production hostname.
+**Fixed 2026-03-06.** `getFeedContract(requestUrl)` now derives the host from `env.PUBLIC_HOST` if set, falling back to the origin of the incoming request URL, and finally to the hardcoded production hostname as a last resort.
 
 ---
 
-### 6. Admin Shell Served Without Worker-Level Auth Check — Low Risk, Worth Noting
+### 6. Admin Shell Auth — ~~Fixed~~ ✓
 
-**File:** [index.js:908-912](src/index.js#L908)
+**Fixed 2026-03-06.**  now enforces  in the Worker before returning HTML. Both the network-layer Cloudflare Access check and the Worker-level role check are active in production.
 
-`GET /admin` returns the full admin shell HTML without any auth check in the Worker. This is the intended design — Cloudflare Access gates the path at the network layer before the Worker sees the request. This is correct for production but means that:
-
-- If Access is ever misconfigured or bypassed, the shell is exposed.
-- Local dev with `ALLOW_DEV_ROLE_HEADER=true` serves the shell to anyone who can reach the Worker.
-
-No code change required, but this is worth keeping in mind when onboarding to a new Access policy.
+Note: local dev with  still requires the  header to be present on  requests.
 
 ---
 
@@ -140,6 +131,30 @@ The target rule card HTML is built via string concatenation:
 **File:** [test/index.spec.js:706-728](test/index.spec.js#L706)
 
 The `FakeDb.runAll` handler for the feed generation query (`FROM output_rules JOIN canonical_events`) does not filter on `canonical_events.source_deleted = 0` or `event_instances.source_deleted = 0`, unlike the real SQL at [repository.js:609-610](src/lib/repository.js#L609). Deleted events would appear in test feeds that shouldn't have them. The test for `disableSource` currently doesn't verify feed output after disable, so this gap isn't caught.
+
+---
+
+### 9. `poll_interval_minutes` Is Inert — Low Priority
+
+**File:** [repository.js ~line 1020](src/lib/repository.js#L1020), [index.js ~line 1431](src/index.js#L1431)
+
+The `poll_interval_minutes` field is documented as controlling how often a source is re-ingested. In practice the cron handler enqueues every active source on every tick unconditionally. The field is stored and displayed but has no effect at runtime.
+
+Fix: filter the source list in the cron handler to only enqueue sources whose `last_fetched_at` is older than their `poll_interval_minutes` value.
+
+---
+
+### 10. `deleteSource()` Cascade Is Non-Atomic — Medium Priority
+
+**File:** [repository.js ~line 390](src/lib/repository.js#L390)
+
+Nine sequential `.run()` calls with no `db.batch()` wrapper. A crash mid-sequence leaves the source partially deleted. See `TECH_DEBT.md` for the full entry and correct fix pattern.
+
+---
+
+### 11. Source Status Display Used Wrong `parse_status` Values — Fixed ✓
+
+**Fixed 2026-03-06.** The admin Sources table showed "error" for all sources because the UI only checked for `'ok'` and `'success'`, while the ingest code writes `'parsed'` and `'parsed_no_blob'`. Fixed: `parseOk` now accepts all four values.
 
 ---
 
