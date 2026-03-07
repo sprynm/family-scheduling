@@ -894,7 +894,7 @@ function renderAdminShell() {
           '<option value="maybe">Maybe — flag as uncertain</option>' +
           '<option value="note">Note — attach context only</option>' +
           '</select></div>' +
-          '<div class="field-group"><span class="field-label">Note (optional)</span><input type="text" name="override-note" placeholder="e.g. Can\'t make it this week" /></div>' +
+          '<div class="field-group"><span class="field-label">Note (optional)</span><input type="text" name="override-note" placeholder="e.g. Can&#39;t make it this week" /></div>' +
           '<div class="field-group" style="justify-content:flex-end"><span class="field-label">&nbsp;</span><button class="primary" type="submit">Apply</button></div>' +
           '</form>' +
           (overrides.length ? '<div class="override-list">' + overrides.map((ov) =>
