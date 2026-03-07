@@ -22,6 +22,27 @@ async function createAccessJwt({ privateKey, kid, payload }) {
   return `${signedPart}.${Buffer.from(signature).toString('base64url')}`;
 }
 
+async function createServiceAccountJson() {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const pkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+  const privateKeyPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(pkcs8).toString('base64')}\n-----END PRIVATE KEY-----\n`;
+  return JSON.stringify({
+    type: 'service_account',
+    client_email: 'worker@example.com',
+    private_key: privateKeyPem,
+    token_uri: 'https://oauth2.googleapis.com/token',
+  });
+}
+
 class FakeStatement {
   constructor(db, sql) {
     this.db = db;
@@ -630,6 +651,46 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('INSERT INTO google_event_links')) {
+      const [id, targetId, targetKey, canonicalEventId, eventInstanceId, googleEventId, googleEtag, lastSyncedHash, lastSyncedAt] = values;
+      const existing = this.googleEventLinks.find((row) => row.id === id);
+      if (existing) {
+        Object.assign(existing, {
+          target_id: targetId,
+          target_key: targetKey,
+          canonical_event_id: canonicalEventId,
+          event_instance_id: eventInstanceId,
+          google_event_id: googleEventId,
+          google_etag: googleEtag,
+          last_synced_hash: lastSyncedHash,
+          last_synced_at: lastSyncedAt,
+          sync_status: 'synced',
+          last_error: null,
+        });
+      } else {
+        this.googleEventLinks.push({
+          id,
+          target_id: targetId,
+          target_key: targetKey,
+          canonical_event_id: canonicalEventId,
+          event_instance_id: eventInstanceId,
+          google_event_id: googleEventId,
+          google_etag: googleEtag,
+          last_synced_hash: lastSyncedHash,
+          last_synced_at: lastSyncedAt,
+          sync_status: 'synced',
+          last_error: null,
+        });
+      }
+      return;
+    }
+
+    if (sql.includes('DELETE FROM google_event_links WHERE id = ?')) {
+      const [linkId] = values;
+      this.googleEventLinks = this.googleEventLinks.filter((row) => row.id !== linkId);
+      return;
+    }
+
     if (sql.includes('UPDATE canonical_events')) {
       const [updatedAt, eventId] = values;
       const row = this.canonicalEvents.find((event) => event.id === eventId);
@@ -851,7 +912,53 @@ class FakeDb {
           target_key: this.outputTargets.find((target) => target.id === row.target_id)?.slug || row.target_key,
         }));
     }
+    if (sql.includes('FROM google_event_links') && sql.includes('JOIN canonical_events ON canonical_events.id = google_event_links.canonical_event_id')) {
+      return this.googleEventLinks
+        .filter((row) => this.canonicalEvents.find((event) => event.id === row.canonical_event_id)?.source_id === values[0])
+        .map((row) => {
+          const target = this.outputTargets.find((entry) => entry.id === row.target_id);
+          return {
+            ...row,
+            target_key: target?.slug || row.target_key,
+            calendar_id: target?.calendar_id || null,
+          };
+        });
+    }
     if (sql.includes('FROM output_rules') && sql.includes('JOIN canonical_events')) {
+      if (sql.includes('output_targets.display_name') && sql.includes("output_targets.target_type = 'google'")) {
+        return this.outputRules
+          .filter((rule) => {
+            const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
+            const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
+            const target = this.outputTargets.find((entry) => entry.id === rule.target_id);
+            return event && instance && target && target.target_type === 'google' && event.source_id === values[0] && !event.source_deleted && !instance.source_deleted && rule.include_state === 'included';
+          })
+          .map((rule) => {
+            const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
+            const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
+            const source = this.sources.find((row) => row.id === event.source_id);
+            const target = this.outputTargets.find((entry) => entry.id === rule.target_id);
+            const targetLink = this.sourceTargetLinks.find((row) => row.source_id === event.source_id && ((row.target_id && row.target_id === rule.target_id) || row.target_key === target?.slug) && row.is_enabled === 1);
+            return {
+              output_rule_id: rule.id,
+              target_id: rule.target_id,
+              target_key: target.slug,
+              display_name: target.display_name,
+              calendar_id: target.calendar_id,
+              canonical_event_id: event.id,
+              title: event.title,
+              description: event.description,
+              location: event.location,
+              status: event.status,
+              timezone: event.timezone,
+              source_icon: targetLink?.icon || event.source_icon || source?.icon || '',
+              source_prefix: targetLink?.prefix || event.source_prefix || source?.prefix || '',
+              event_instance_id: instance.id,
+              occurrence_start_at: instance.occurrence_start_at,
+              occurrence_end_at: instance.occurrence_end_at,
+            };
+          });
+      }
       const target = values[0];
       return this.outputRules
         .filter((row) => {
@@ -1783,6 +1890,224 @@ describe('family-scheduling worker', () => {
     const sources = await repo.listActiveSources();
 
     expect(sources.map((source) => source.id)).toEqual(['src_due']);
+  });
+
+  it('syncs linked google output events after ingest and updates them on change', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_grayson_clubs',
+      target_type: 'google',
+      slug: 'grayson_clubs',
+      display_name: 'Grayson Clubs',
+      calendar_id: 'grayson-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_google_sync',
+      name: 'grayson-hockey',
+      display_name: 'Grayson Hockey',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-google.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_google_sync',
+      source_id: 'src_google_sync',
+      target_id: 'outt_google_grayson_clubs',
+      target_key: 'grayson_clubs',
+      target_type: 'google',
+      icon: '🏒',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let icsSummary = 'Hockey Practice';
+    const fetchMock = vi.fn(async (url, options = {}) => {
+      if (String(url) === 'https://example.com/grayson-google.ics') {
+        return new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:grayson-google-1',
+            `SUMMARY:${icsSummary}`,
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T023000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        );
+      }
+      if (String(url) === 'https://oauth2.googleapis.com/token') {
+        return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events' && options.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'google-event-1', etag: 'etag-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/google-event-1' && options.method === 'PUT') {
+        return new Response(JSON.stringify({ id: 'google-event-1', etag: 'etag-2' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const repo = new D1Repository(db, env);
+    const firstSync = await repo.ingestSource('src_google_sync');
+    expect(firstSync.googleSync.synced).toBe(1);
+    expect(db.googleEventLinks).toHaveLength(1);
+    expect(db.googleEventLinks[0].google_event_id).toBe('google-event-1');
+
+    icsSummary = 'Hockey Practice Updated';
+    const secondSync = await repo.ingestSource('src_google_sync');
+    expect(secondSync.googleSync.updated).toBe(1);
+    expect(db.googleEventLinks[0].google_etag).toBe('etag-2');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/google-event-1',
+      expect.objectContaining({ method: 'PUT' })
+    );
+  });
+
+  it('deletes stale google output events when a source is disabled', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_family_clubs',
+      target_type: 'google',
+      slug: 'family_clubs',
+      display_name: 'Family Clubs',
+      calendar_id: 'family-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_google_disable',
+      name: 'family-shared',
+      display_name: 'Family Shared',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-google.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_google_disable',
+      source_id: 'src_google_disable',
+      target_id: 'outt_google_family_clubs',
+      target_key: 'family_clubs',
+      target_type: 'google',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push({
+      id: 'evt_google_disable',
+      source_id: 'src_google_disable',
+      identity_key: 'identity',
+      event_kind: 'single',
+      title: 'Family Dinner',
+      source_icon: '',
+      source_prefix: '',
+      description: '',
+      location: '',
+      start_at: '2026-03-10T01:00:00.000Z',
+      end_at: '2026-03-10T02:00:00.000Z',
+      timezone: 'UTC',
+      status: 'confirmed',
+      rrule: null,
+      series_until: null,
+      source_deleted: 0,
+      needs_review: 0,
+      source_changed_since_overlay: 0,
+      last_source_change_at: '2026-03-03T00:00:00.000Z',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.eventInstances.push({
+      id: 'inst_google_disable',
+      canonical_event_id: 'evt_google_disable',
+      occurrence_start_at: '2026-03-10T01:00:00.000Z',
+      occurrence_end_at: '2026-03-10T02:00:00.000Z',
+      recurrence_instance_key: '2026-03-10T01:00:00.000Z',
+      provider_recurrence_id: null,
+      status: 'confirmed',
+      source_deleted: 0,
+      needs_review: 0,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.googleEventLinks.push({
+      id: 'gel_google_disable',
+      target_id: 'outt_google_family_clubs',
+      target_key: 'family_clubs',
+      canonical_event_id: 'evt_google_disable',
+      event_instance_id: 'inst_google_disable',
+      google_event_id: 'google-event-delete',
+      google_etag: 'etag-delete',
+      last_synced_hash: 'hash-delete',
+      last_synced_at: '2026-03-03T00:00:00.000Z',
+      sync_status: 'synced',
+      last_error: null,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        if (String(url) === 'https://oauth2.googleapis.com/token') {
+          return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/family-clubs%40group.calendar.google.com/events/google-event-delete' && options.method === 'DELETE') {
+          return new Response('', { status: 204 });
+        }
+        throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.disableSource('src_google_disable');
+
+    expect(db.googleEventLinks).toHaveLength(0);
   });
 
   it('queues full rebuild jobs for admins', async () => {
