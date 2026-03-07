@@ -230,53 +230,43 @@ function renderAdminShell() {
     }
     .status.error { background: #fff5f1; color: #8d2a14; border-color: #f2d1c8; }
     .hint { font-size: 0.82rem; color: var(--muted); }
-    /* event search results */
-    .event-list { display: grid; gap: 4px; margin-top: 10px; }
-    .event-item {
-      display: flex;
+    /* instance list (Modify Events) */
+    .inst-results { display: grid; gap: 2px; margin-top: 10px; }
+    .inst-row {
+      display: grid;
+      grid-template-columns: 140px 1fr auto;
       align-items: center;
       gap: 10px;
-      padding: 8px 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 0.88rem;
-      background: #fff;
-    }
-    .event-item:hover { background: #f0f5ff; border-color: #bcd0f5; }
-    .event-item.selected { background: #e8f0fe; border-color: var(--accent-2); }
-    .event-item-title { font-weight: 600; color: var(--ink); flex: 1; }
-    .event-item-meta { font-size: 0.78rem; color: var(--muted); }
-    /* event detail */
-    #event-detail { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 16px; }
-    .instance-list { display: grid; gap: 4px; margin: 10px 0; max-height: 200px; overflow-y: auto; }
-    .instance-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
       padding: 6px 10px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      font-size: 0.83rem;
-      cursor: pointer;
+      border-radius: 5px;
       background: #fff;
+      cursor: pointer;
+      font-size: 0.88rem;
     }
-    .instance-item:hover { background: #f0f5ff; }
-    .instance-item.selected { background: #e8f0fe; border-color: var(--accent-2); }
-    .override-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-top: 12px; }
-    .override-list { margin-top: 12px; display: grid; gap: 6px; }
-    .override-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 12px;
-      background: #fff8f0;
-      border: 1px solid #f0d8b8;
-      border-radius: 8px;
-      font-size: 0.85rem;
+    .inst-row:hover { background: #f0f5ff; border-color: #bcd0f5; }
+    .inst-row.open { background: #e8f0fe; border-color: var(--accent-2); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+    .inst-row-date { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
+    .inst-row-title { font-weight: 600; color: var(--ink); }
+    .inst-row-meta { font-size: 0.76rem; color: var(--muted); white-space: nowrap; }
+    .inst-drawer {
+      border: 1px solid var(--accent-2);
+      border-top: none;
+      border-radius: 0 0 6px 6px;
+      background: #f5f8ff;
+      padding: 14px 16px;
+      margin-bottom: 6px;
     }
-    .override-item-info { flex: 1; color: var(--ink); }
-    .override-item-meta { font-size: 0.78rem; color: var(--muted); }
+    .inst-drawer h4 { font-size: 0.85rem; font-weight: 600; margin: 0 0 10px; color: var(--ink); }
+    .inst-drawer .override-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 0; }
+    .inst-drawer .override-list { margin-top: 10px; display: grid; gap: 6px; }
+    .inst-drawer .override-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 10px; border: 1px solid var(--line); border-radius: 5px;
+      background: #fff; font-size: 0.85rem;
+    }
+    .inst-drawer .override-item-info { flex: 1; }
+    .inst-drawer .override-item-meta { font-size: 0.78rem; color: var(--muted); }
     .hidden { display: none !important; }
   </style>
 </head>
@@ -414,12 +404,13 @@ function renderAdminShell() {
       <div class="card-header">
         <h2>Modify Events</h2>
       </div>
-      <p class="section-desc">Search for an event and apply an override — skip an instance, hide it from an output, flag as maybe, or attach a note.</p>
 
       <div class="form-row" style="margin-top:12px">
         <div class="field-group">
-          <span class="field-label">Search events</span>
-          <input type="search" id="event-search" placeholder="Title keyword..." />
+          <span class="field-label">Source</span>
+          <select id="event-source-filter">
+            <option value="">— pick a source —</option>
+          </select>
         </div>
         <div class="field-group">
           <span class="field-label">Filter by output</span>
@@ -427,42 +418,22 @@ function renderAdminShell() {
             <option value="">All outputs</option>
           </select>
         </div>
-        <div class="field-group" style="justify-content:flex-end">
-          <span class="field-label">&nbsp;</span>
-          <button id="event-search-btn" class="primary">Search</button>
+        <div class="field-group">
+          <span class="field-label">Search</span>
+          <input type="search" id="event-search" placeholder="Title keyword..." />
         </div>
       </div>
 
-      <div id="event-results" class="event-list"></div>
+      <div id="inst-results" class="inst-results"></div>
 
-      <div id="event-detail" class="hidden">
-        <h3 id="event-detail-title" style="margin-bottom:8px"></h3>
-        <p class="hint" id="event-detail-meta"></p>
-
-        <p class="field-label" style="margin:12px 0 6px">Instances — select one to override, or leave none selected to apply to all instances</p>
-        <div class="instance-list" id="instance-list"></div>
-
-        <form id="override-form" class="override-form">
-          <div class="field-group">
-            <span class="field-label">Override type</span>
-            <select id="override-type">
-              <option value="skip">Skip — remove from all outputs</option>
-              <option value="hidden">Hidden — suppress from a specific output</option>
-              <option value="maybe">Maybe — flag as uncertain</option>
-              <option value="note">Note — attach context only</option>
-            </select>
-          </div>
-          <div class="field-group">
-            <span class="field-label">Note (optional)</span>
-            <input type="text" id="override-note" placeholder="e.g. Can't make it this week" />
-          </div>
-          <div class="field-group" style="justify-content:flex-end">
-            <span class="field-label">&nbsp;</span>
-            <button id="override-save" class="primary" type="submit">Apply Override</button>
-          </div>
-        </form>
-
-        <div id="override-list" class="override-list"></div>
+      <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
+        <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Recently Modified <span class="hint">(last 2 weeks)</span></h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Event</th><th>Source</th><th>Override</th><th>Note</th><th>Modified</th><th></th></tr></thead>
+            <tbody id="modified-events-body"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -503,17 +474,10 @@ function renderAdminShell() {
 
     // events / overrides
     const eventSearchInput = document.getElementById('event-search');
+    const eventSourceFilter = document.getElementById('event-source-filter');
     const eventOutputFilter = document.getElementById('event-output-filter');
-    const eventSearchBtn = document.getElementById('event-search-btn');
-    const eventResultsEl = document.getElementById('event-results');
-    const eventDetailEl = document.getElementById('event-detail');
-    const eventDetailTitle = document.getElementById('event-detail-title');
-    const eventDetailMeta = document.getElementById('event-detail-meta');
-    const instanceListEl = document.getElementById('instance-list');
-    const overrideForm = document.getElementById('override-form');
-    const overrideTypeInput = document.getElementById('override-type');
-    const overrideNoteInput = document.getElementById('override-note');
-    const overrideListEl = document.getElementById('override-list');
+    const instResultsEl = document.getElementById('inst-results');
+    const modifiedEventsBody = document.getElementById('modified-events-body');
 
     // metrics
     const metricSources = document.getElementById('metric-sources');
@@ -523,9 +487,8 @@ function renderAdminShell() {
     const jobsBody = document.getElementById('jobs-body');
 
     const sourceRuleState = new Map();
-    let selectedEventId = null;
-    let selectedInstanceId = null;
-    let currentEventOverrides = [];
+    let openDrawerInstId = null;
+    let allInstances = [];
 
     function setStatus(message, isError) {
       statusEl.textContent = message;
@@ -674,10 +637,18 @@ function renderAdminShell() {
           sourceGoogleOutputsEl.innerHTML = '';
         }
 
+        // populate source filter (Modify Events)
+        const prevSource = eventSourceFilter.value;
+        eventSourceFilter.innerHTML = '<option value="">— pick a source —</option>' +
+          sources.map((s) => '<option value="' + (s.id || '') + '"' + (s.id === prevSource ? ' selected' : '') + '>' + (s.display_name || s.name || '') + ' (' + (s.owner_type || '') + ')</option>').join('');
+
         // populate event output filter
         const allOutputKeys = [...logicalTargets, ...registeredTargets.map((t) => t.target_key || '')].filter(Boolean);
         eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
           allOutputKeys.map((k) => '<option value="' + k + '">' + k + '</option>').join('');
+
+        // load modified events table
+        await loadModifiedEvents();
 
         syncTargetRuleInputs();
 
@@ -838,145 +809,197 @@ function renderAdminShell() {
       }
     }
 
-    // --- Event search & overrides ---
+    // --- Instance list & overrides ---
 
-    async function searchEvents() {
-      const query = eventSearchInput.value.trim();
-      const outputFilter = eventOutputFilter.value;
-      eventSearchBtn.disabled = true;
+    async function loadInstances() {
+      const sourceId = eventSourceFilter.value;
+      const outputKey = eventOutputFilter.value;
+      if (!sourceId && !outputKey) {
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p>';
+        allInstances = [];
+        return;
+      }
+      instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Loading...</p>';
+      openDrawerInstId = null;
       try {
-        let url = '/api/events?limit=100';
-        if (outputFilter) url += '&target=' + encodeURIComponent(outputFilter);
+        let url = '/api/instances?future=1&limit=200';
+        if (sourceId) url += '&source=' + encodeURIComponent(sourceId);
+        if (outputKey) url += '&output=' + encodeURIComponent(outputKey);
         const payload = await fetchJson(url);
-        let events = payload.events || [];
-        if (query) {
-          const q = query.toLowerCase();
-          events = events.filter((e) => (e.title || '').toLowerCase().includes(q));
-        }
-        eventResultsEl.innerHTML = events.length
-          ? events.slice(0, 30).map((e) =>
-              '<div class="event-item' + (e.id === selectedEventId ? ' selected' : '') + '" data-event-id="' + (e.id || '') + '" data-event-title="' + (e.title || '').replace(/"/g, '&quot;') + '" data-event-meta="' + (e.owner_type || '') + ' / ' + (e.source_name || '') + '">' +
-              '<span class="event-item-title">' + (e.title || '') + '</span>' +
-              '<span class="event-item-meta">' + (e.owner_type || '') + ' &middot; ' + (e.source_name || '') + '</span>' +
-              '</div>'
-            ).join('')
-          : '<p class="hint" style="padding:8px 0">No events found.</p>';
-
-        eventResultsEl.querySelectorAll('.event-item').forEach((item) => {
-          item.addEventListener('click', () => selectEvent(
-            item.getAttribute('data-event-id'),
-            item.getAttribute('data-event-title'),
-            item.getAttribute('data-event-meta')
-          ));
-        });
+        allInstances = payload.instances || [];
+        renderInstances();
       } catch (err) {
-        setStatus('Event search failed: ' + (err.message || String(err)), true);
-      } finally {
-        eventSearchBtn.disabled = false;
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0;color:#a00">Failed to load instances.</p>';
       }
     }
 
-    async function selectEvent(eventId, title, meta) {
-      selectedEventId = eventId;
-      selectedInstanceId = null;
-      eventDetailEl.classList.remove('hidden');
-      eventDetailTitle.textContent = title || 'Event';
-      eventDetailMeta.textContent = meta || '';
-      instanceListEl.innerHTML = '<p class="hint">Loading instances...</p>';
-      overrideListEl.innerHTML = '';
-
-      try {
-        const [instPayload, eventPayload] = await Promise.all([
-          fetchJson('/api/events/' + encodeURIComponent(eventId) + '/instances'),
-          fetchJson('/api/events/' + encodeURIComponent(eventId)),
-        ]);
-        const instances = instPayload.instances || [];
-        instanceListEl.innerHTML = instances.length
-          ? instances.map((inst) => {
-              const dt = inst.start_time ? new Date(inst.start_time).toLocaleString() : inst.instance_date || inst.id;
-              return '<div class="instance-item" data-instance-id="' + (inst.id || '') + '">' + dt + '</div>';
-            }).join('')
-          : '<p class="hint">No instances found (may be a single event).</p>';
-
-        instanceListEl.querySelectorAll('.instance-item').forEach((item) => {
-          item.addEventListener('click', () => {
-            const id = item.getAttribute('data-instance-id');
-            selectedInstanceId = selectedInstanceId === id ? null : id;
-            instanceListEl.querySelectorAll('.instance-item').forEach((el) => el.classList.remove('selected'));
-            if (selectedInstanceId) item.classList.add('selected');
-          });
-        });
-
-        currentEventOverrides = eventPayload.overrides || [];
-        renderOverrides();
-      } catch (err) {
-        instanceListEl.innerHTML = '<p class="hint" style="color:#a00">Failed to load instances.</p>';
+    function renderInstances() {
+      const query = eventSearchInput.value.trim().toLowerCase();
+      let rows = allInstances;
+      if (query) rows = rows.filter((i) => (i.title || '').toLowerCase().includes(query));
+      if (!rows.length) {
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">No upcoming events found.</p>';
+        return;
       }
+      instResultsEl.innerHTML = rows.slice(0, 100).map((inst) => {
+        const dt = inst.occurrence_start_at ? new Date(inst.occurrence_start_at).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+        const meta = (inst.owner_type || '') + ' · ' + (inst.source_name || '');
+        return '<div class="inst-row' + (inst.id === openDrawerInstId ? ' open' : '') + '" data-inst-id="' + (inst.id || '') + '" data-canonical-id="' + (inst.canonical_event_id || '') + '" data-title="' + (inst.title || '').replace(/"/g, '&quot;') + '" data-date="' + dt.replace(/"/g, '&quot;') + '" data-meta="' + meta.replace(/"/g, '&quot;') + '">' +
+          '<span class="inst-row-date">' + dt + '</span>' +
+          '<span class="inst-row-title">' + (inst.title || '') + '</span>' +
+          '<span class="inst-row-meta">' + meta + '</span>' +
+          '</div>' +
+          (inst.id === openDrawerInstId ? '<div class="inst-drawer" id="drawer-' + inst.id + '"><p class="hint">Loading...</p></div>' : '');
+      }).join('');
 
-      // highlight selected event in results
-      eventResultsEl.querySelectorAll('.event-item').forEach((el) => {
-        el.classList.toggle('selected', el.getAttribute('data-event-id') === eventId);
-      });
-    }
-
-    function renderOverrides() {
-      overrideListEl.innerHTML = currentEventOverrides.length
-        ? currentEventOverrides.map((ov) =>
-            '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
-            '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
-            (ov.payload?.note ? ' — ' + ov.payload.note : '') +
-            '<div class="override-item-meta">' + (ov.event_instance_id ? 'Specific instance' : 'All instances') + ' &middot; by ' + (ov.actor_role || '') + '</div></div>' +
-            '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
-            '</div>'
-          ).join('')
-        : '';
-
-      overrideListEl.querySelectorAll('.remove-override').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const id = btn.getAttribute('data-override-id');
-          if (!id) return;
-          btn.disabled = true;
-          try {
-            await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
-            setStatus('Override removed.', false);
-            await selectEvent(selectedEventId, eventDetailTitle.textContent, eventDetailMeta.textContent);
-          } catch (err) {
-            setStatus('Remove failed: ' + (err.message || String(err)), true);
-            btn.disabled = false;
+      instResultsEl.querySelectorAll('.inst-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const id = row.getAttribute('data-inst-id');
+          const canonicalId = row.getAttribute('data-canonical-id');
+          const title = row.getAttribute('data-title');
+          const date = row.getAttribute('data-date');
+          const meta = row.getAttribute('data-meta');
+          if (openDrawerInstId === id) {
+            openDrawerInstId = null;
+            renderInstances();
+          } else {
+            openDrawerInstId = id;
+            renderInstances();
+            openDrawer(id, canonicalId, title, date, meta);
           }
         });
       });
+
+      if (openDrawerInstId) {
+        const drawerEl = document.getElementById('drawer-' + openDrawerInstId);
+        if (drawerEl) loadDrawerContent(openDrawerInstId, drawerEl);
+      }
     }
 
-    overrideForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      if (!selectedEventId) return;
-      const saveBtn = document.getElementById('override-save');
-      saveBtn.disabled = true;
-      try {
-        await fetchJson('/api/events/' + encodeURIComponent(selectedEventId) + '/overrides', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            overrideType: overrideTypeInput.value,
-            eventInstanceId: selectedInstanceId || null,
-            payload: overrideNoteInput.value ? { note: overrideNoteInput.value } : {},
-          }),
-        });
-        overrideNoteInput.value = '';
-        selectedInstanceId = null;
-        instanceListEl.querySelectorAll('.instance-item').forEach((el) => el.classList.remove('selected'));
-        setStatus('Override applied.', false);
-        await selectEvent(selectedEventId, eventDetailTitle.textContent, eventDetailMeta.textContent);
-      } catch (err) {
-        setStatus('Override failed: ' + (err.message || String(err)), true);
-      } finally {
-        saveBtn.disabled = false;
-      }
-    });
+    async function openDrawer(instanceId, canonicalId, title, date, meta) {
+      const drawerEl = document.getElementById('drawer-' + instanceId);
+      if (!drawerEl) return;
+      await loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta);
+    }
 
-    eventSearchBtn.addEventListener('click', searchEvents);
-    eventSearchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); searchEvents(); } });
+    async function loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta) {
+      if (!canonicalId) {
+        // find from allInstances
+        const inst = allInstances.find((i) => i.id === instanceId);
+        if (inst) { canonicalId = inst.canonical_event_id; title = inst.title; }
+      }
+      try {
+        const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(canonicalId));
+        const overrides = (eventPayload.overrides || []).filter((ov) => !ov.event_instance_id || ov.event_instance_id === instanceId);
+        drawerEl.innerHTML =
+          '<h4>' + (title || 'Event') + ' <span class="hint" style="font-weight:400">' + (date || '') + '</span></h4>' +
+          '<form class="override-form" data-canonical-id="' + (canonicalId || '') + '" data-instance-id="' + instanceId + '">' +
+          '<div class="field-group"><span class="field-label">Override type</span>' +
+          '<select name="override-type">' +
+          '<option value="skip">Skip — remove from all outputs</option>' +
+          '<option value="hidden">Hidden — suppress from a specific output</option>' +
+          '<option value="maybe">Maybe — flag as uncertain</option>' +
+          '<option value="note">Note — attach context only</option>' +
+          '</select></div>' +
+          '<div class="field-group"><span class="field-label">Note (optional)</span><input type="text" name="override-note" placeholder="e.g. Can\'t make it this week" /></div>' +
+          '<div class="field-group" style="justify-content:flex-end"><span class="field-label">&nbsp;</span><button class="primary" type="submit">Apply</button></div>' +
+          '</form>' +
+          (overrides.length ? '<div class="override-list">' + overrides.map((ov) =>
+            '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
+            '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
+            (ov.payload?.note ? ' — ' + ov.payload.note : '') +
+            '<div class="override-item-meta">' + (ov.event_instance_id ? 'This instance' : 'All instances') + ' · by ' + (ov.actor_role || '') + '</div></div>' +
+            '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
+            '</div>'
+          ).join('') + '</div>' : '');
+
+        const form = drawerEl.querySelector('form');
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('button[type="submit"]');
+          btn.disabled = true;
+          try {
+            await fetchJson('/api/events/' + encodeURIComponent(canonicalId) + '/overrides', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                overrideType: form.querySelector('[name="override-type"]').value,
+                eventInstanceId: instanceId,
+                payload: form.querySelector('[name="override-note"]').value ? { note: form.querySelector('[name="override-note"]').value } : {},
+              }),
+            });
+            setStatus('Override applied.', false);
+            await loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta);
+            await loadModifiedEvents();
+          } catch (err) {
+            setStatus('Override failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+
+        drawerEl.querySelectorAll('.remove-override').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-override-id');
+            if (!id) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
+              setStatus('Override removed.', false);
+              await loadDrawerContent(instanceId, drawerEl, canonicalId, title, date, meta);
+              await loadModifiedEvents();
+            } catch (err) {
+              setStatus('Remove failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (err) {
+        drawerEl.innerHTML = '<p class="hint" style="color:#a00">Failed to load event detail.</p>';
+      }
+    }
+
+    async function loadModifiedEvents() {
+      try {
+        const payload = await fetchJson('/api/overrides');
+        const overrides = payload.overrides || [];
+        if (!overrides.length) {
+          modifiedEventsBody.innerHTML = '<tr><td colspan="6" class="hint" style="padding:8px">No recent overrides.</td></tr>';
+          return;
+        }
+        modifiedEventsBody.innerHTML = overrides.map((ov) => {
+          const when = ov.created_at ? new Date(ov.created_at).toLocaleDateString() : '—';
+          return '<tr>' +
+            '<td>' + (ov.title || '') + '</td>' +
+            '<td>' + (ov.owner_type || '') + ' · ' + (ov.source_name || '') + '</td>' +
+            '<td>' + (ov.override_type || '') + '</td>' +
+            '<td>' + (ov.payload?.note || '') + '</td>' +
+            '<td>' + when + '</td>' +
+            '<td><button class="danger remove-modified" data-override-id="' + (ov.id || '') + '">Remove</button></td>' +
+            '</tr>';
+        }).join('');
+        modifiedEventsBody.querySelectorAll('.remove-modified').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-override-id');
+            if (!id) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
+              setStatus('Override removed.', false);
+              await loadModifiedEvents();
+            } catch (err) {
+              setStatus('Remove failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (err) {
+        // non-fatal, modified events table is secondary
+      }
+    }
+
+    eventSourceFilter.addEventListener('change', loadInstances);
+    eventOutputFilter.addEventListener('change', loadInstances);
+    eventSearchInput.addEventListener('input', renderInstances);
 
     // --- Source form ---
     sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
@@ -1214,6 +1237,28 @@ export default {
         const removed = await repo.deleteTarget(targetKey);
         if (!removed) return json({ error: 'Not found' }, { status: 404 });
         return json({ deleted: removed });
+      }
+
+      if (pathname === '/api/instances' && request.method === 'GET') {
+        const authError = await requireRole(request, env, ['admin', 'editor']);
+        if (authError) return authError;
+        const repo = await createRepository(env);
+        return json({
+          instances: await repo.listInstances({
+            sourceId: url.searchParams.get('source') || null,
+            outputKey: url.searchParams.get('output') || null,
+            future: url.searchParams.get('future') === '1',
+            limit: Number(url.searchParams.get('limit') || 200),
+          }),
+        });
+      }
+
+      if (pathname === '/api/overrides' && request.method === 'GET') {
+        const authError = await requireRole(request, env, ['admin', 'editor']);
+        if (authError) return authError;
+        const repo = await createRepository(env);
+        const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+        return json({ overrides: await repo.listActiveOverrides({ since }) });
       }
 
       if (pathname === '/api/events' && request.method === 'GET') {

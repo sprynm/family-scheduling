@@ -441,6 +441,63 @@ export class D1Repository {
     return mapRow(existing);
   }
 
+  async listInstances({ sourceId, outputKey, future, limit = 200 }) {
+    const now = new Date().toISOString();
+    let sql = `
+      SELECT
+        event_instances.id,
+        event_instances.occurrence_start_at,
+        event_instances.occurrence_end_at,
+        canonical_events.id AS canonical_event_id,
+        canonical_events.title,
+        sources.name AS source_name,
+        sources.owner_type
+      FROM event_instances
+      JOIN canonical_events ON canonical_events.id = event_instances.canonical_event_id
+      JOIN sources ON sources.id = canonical_events.source_id
+    `;
+    const binds = [];
+    const conditions = [];
+    if (future) conditions.push('event_instances.occurrence_start_at >= ?') && binds.push(now);
+    if (sourceId) conditions.push('canonical_events.source_id = ?') && binds.push(sourceId);
+    if (outputKey) {
+      sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.target_key = ? AND output_rules.include_state = 'included'`;
+      binds.unshift(outputKey);
+    }
+    if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+    sql += ' ORDER BY event_instances.occurrence_start_at ASC LIMIT ?';
+    binds.push(limit);
+    const result = await this.db.prepare(sql).bind(...binds).all();
+    return result.results || [];
+  }
+
+  async listActiveOverrides({ since }) {
+    const result = await this.db.prepare(`
+      SELECT
+        event_overrides.id,
+        event_overrides.override_type,
+        event_overrides.payload,
+        event_overrides.event_instance_id,
+        event_overrides.actor_role,
+        event_overrides.created_at,
+        canonical_events.id AS canonical_event_id,
+        canonical_events.title,
+        sources.name AS source_name,
+        sources.owner_type
+      FROM event_overrides
+      JOIN canonical_events ON canonical_events.id = event_overrides.canonical_event_id
+      JOIN sources ON sources.id = canonical_events.source_id
+      WHERE event_overrides.cleared_at IS NULL
+        AND event_overrides.created_at >= ?
+      ORDER BY event_overrides.created_at DESC
+      LIMIT 100
+    `).bind(since).all();
+    return (result.results || []).map((row) => ({
+      ...row,
+      payload: typeof row.payload === 'string' ? JSON.parse(row.payload || '{}') : (row.payload || {}),
+    }));
+  }
+
   async listEvents({ target, limit = 200 }) {
     let sql = `
       SELECT
