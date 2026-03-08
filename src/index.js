@@ -1,5 +1,5 @@
 import { getRoleFromRequest, requireRole } from './lib/auth.js';
-import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT, TARGETS } from './lib/constants.js';
+import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
 import { json, text } from './lib/responses.js';
 
@@ -126,10 +126,7 @@ export default {
         const authError = await requireRole(request, env, ADMIN_ROLES);
         if (authError) return authError;
         const repo = await createRepository(env);
-        return json({
-          targets: await repo.listTargets(),
-          logicalTargets: TARGETS,
-        });
+        return json({ targets: await repo.listTargets() });
       }
 
       if (pathname === '/api/targets' && request.method === 'POST') {

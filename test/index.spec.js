@@ -80,7 +80,6 @@ class FakeDb {
     this.eventInstances = [];
     this.eventOverrides = [];
     this.outputRules = [];
-    this.googleTargets = [];
     this.googleEventLinks = [];
     this.syncJobs = [];
   }
@@ -728,33 +727,6 @@ class FakeDb {
       return;
     }
 
-    if (sql.includes('INSERT INTO google_targets')) {
-      const [id, targetKey, calendarId, ownershipMode, isActive] = values;
-      const existing = this.googleTargets.find((row) => row.target_key === targetKey);
-      if (existing) {
-        Object.assign(existing, {
-          calendar_id: calendarId,
-          ownership_mode: ownershipMode,
-          is_active: isActive,
-        });
-      } else {
-        this.googleTargets.push({
-          id,
-          target_key: targetKey,
-          calendar_id: calendarId,
-          ownership_mode: ownershipMode,
-          is_active: isActive,
-        });
-      }
-      return;
-    }
-
-    if (sql.includes('DELETE FROM google_targets WHERE target_key = ?')) {
-      const [targetKey] = values;
-      this.googleTargets = this.googleTargets.filter((row) => row.target_key !== targetKey);
-      return;
-    }
-
     if (sql.includes('DELETE FROM output_targets WHERE id = ?')) {
       const [targetId] = values;
       this.outputTargets = this.outputTargets.filter((row) => row.id !== targetId);
@@ -848,7 +820,6 @@ class FakeDb {
       if (sql.includes('WHERE slug = ?')) rows = rows.filter((row) => row.slug === values[0]);
       return rows;
     }
-    if (sql.includes('FROM google_targets')) return this.googleTargets;
     if (sql.includes('FROM event_instances') && sql.includes('JOIN canonical_events ON canonical_events.id = event_instances.canonical_event_id')) {
       return this.eventInstances
         .filter((instance) => {
@@ -1019,9 +990,6 @@ class FakeDb {
     }
     if (sql.includes('FROM output_targets') && sql.includes('WHERE id = ?')) {
       return this.outputTargets.find((row) => row.id === values[0]) || null;
-    }
-    if (sql.includes('FROM google_targets WHERE target_key = ?')) {
-      return this.googleTargets.find((row) => row.target_key === values[0]) || null;
     }
     return null;
   }

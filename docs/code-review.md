@@ -64,22 +64,7 @@ The backfill loop fetches all `source_target_links WHERE target_id IS NULL`, the
 
 ---
 
-### 4. `TARGETS` / `logicalTargets` Still Exposed via API — Low
-
-**File:** [index.js:131](../src/index.js#L131)
-
-```js
-return json({
-  targets: await repo.listTargets(),
-  logicalTargets: TARGETS,
-});
-```
-
-System ICS targets are already in `listTargets()` with `is_system: 1`. The `logicalTargets` field exposes the hardcoded array redundantly. If the admin UI still consumes `logicalTargets`, that dependency should be removed and the field dropped.
-
----
-
-### 5. `&&` Side-Effect Pattern in `listInstances` — Low
+### 4. `&&` Side-Effect Pattern in `listInstances` — Low
 
 **File:** [repository.js:716](../src/lib/repository.js#L716)
 
@@ -112,8 +97,7 @@ None.
 
 1. `ensureSupportTables` per-request cost — remove after 0004 is confirmed deployed.
 2. `bootstrapOutputTargets` N+1 backfill — replace with a batch UPDATE.
-3. `logicalTargets` legacy exposure in `/api/targets` response.
-4. `&&` side-effect in `listInstances`.
+3. `&&` side-effect in `listInstances`.
 
 ---
 

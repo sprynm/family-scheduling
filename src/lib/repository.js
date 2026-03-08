@@ -188,13 +188,6 @@ export class D1Repository {
     this.env = env;
   }
 
-  async runInTransaction(work) {
-    // TECH DEBT: D1 does not support SQL BEGIN/COMMIT. This wrapper provides
-    // no atomicity — callers run as sequential independent writes. Migrate
-    // each caller to db.batch(). See TECH_DEBT.md.
-    return work();
-  }
-
   async ensureSupportTables() {
     await this.db.prepare(
       `CREATE TABLE IF NOT EXISTS output_targets (
