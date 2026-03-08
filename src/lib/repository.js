@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { TARGETS, TARGET_LABELS } from './constants.js';
-import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, updateGoogleCalendarEvent } from './google-calendar.js';
+import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, isGoogleRateLimitError, updateGoogleCalendarEvent } from './google-calendar.js';
 import { buildICS, expandRecurringEvent, parseICS } from './ics.js';
 import { decorateEventSummary } from './presentation.js';
 
@@ -182,6 +182,34 @@ function buildSyncErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function buildDeferredRateLimitMessage(message) {
+  return `Deferred after rate limit: ${message}`;
+}
+
+function isDeferredRateLimitMessage(message) {
+  return String(message || '').startsWith('Deferred after rate limit:');
+}
+
+const GOOGLE_SYNC_JOB_CHUNK_SIZE = 10;
+
+function buildSourceTargetScopeId(sourceId, targetId, mode = 'sync') {
+  return `${sourceId}|${targetId}|${mode}`;
+}
+
+function parseSourceTargetScopeId(scopeId) {
+  const [sourceId = '', targetId = '', mode = 'sync'] = String(scopeId || '').split('|');
+  return { sourceId, targetId, mode };
+}
+
+function tryParseJson(value, fallback = null) {
+  if (value === undefined || value === null || value === '') return fallback;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -257,6 +285,7 @@ export class D1Repository {
 
     await ensureOutputRuleTargetId();
     await ensureGoogleEventLinkTargetId();
+    await this.ensureGoogleEventLinksNullableEventId();
     await this.db.prepare(
       `CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_id_idx
        ON source_target_links(source_id, target_id)`
@@ -270,6 +299,51 @@ export class D1Repository {
        ON google_event_links(target_id)`
     ).run();
     await this.bootstrapOutputTargets();
+  }
+
+  async ensureGoogleEventLinksNullableEventId() {
+    const schema = await this.db.prepare(`PRAGMA table_info(google_event_links)`).all();
+    const columns = schema.results || [];
+    const googleEventIdColumn = columns.find((column) => column.name === 'google_event_id');
+    if (!googleEventIdColumn || !googleEventIdColumn.notnull) {
+      return;
+    }
+
+    await this.db.batch([
+      this.db.prepare(
+        `CREATE TABLE google_event_links_v2 (
+          id TEXT PRIMARY KEY,
+          target_key TEXT NOT NULL,
+          canonical_event_id TEXT,
+          event_instance_id TEXT,
+          google_event_id TEXT,
+          google_etag TEXT,
+          last_synced_hash TEXT,
+          last_synced_at TEXT,
+          sync_status TEXT NOT NULL DEFAULT 'pending',
+          last_error TEXT,
+          target_id TEXT REFERENCES output_targets(id),
+          FOREIGN KEY (canonical_event_id) REFERENCES canonical_events(id),
+          FOREIGN KEY (event_instance_id) REFERENCES event_instances(id)
+        )`
+      ),
+      this.db.prepare(
+        `INSERT INTO google_event_links_v2 (
+          id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+          last_synced_hash, last_synced_at, sync_status, last_error, target_id
+        )
+        SELECT
+          id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+          last_synced_hash, last_synced_at, sync_status, last_error, target_id
+        FROM google_event_links`
+      ),
+      this.db.prepare(`DROP TABLE google_event_links`),
+      this.db.prepare(`ALTER TABLE google_event_links_v2 RENAME TO google_event_links`),
+      this.db.prepare(
+        `CREATE INDEX IF NOT EXISTS google_event_links_target_id_idx
+         ON google_event_links(target_id)`
+      ),
+    ]);
   }
 
   async listOutputTargets({ includeInactive = true } = {}) {
@@ -408,6 +482,79 @@ export class D1Repository {
        WHERE source_target_links.is_enabled = 1`
     ).all();
     const links = linksResult.results || [];
+    const jobsResult = await this.db.prepare(
+      `SELECT scope_type, scope_id, job_type, status, started_at, finished_at, summary_json, error_json
+       FROM sync_jobs
+       WHERE scope_type IN ('source', 'source_target')
+       ORDER BY started_at DESC
+       LIMIT 500`
+    ).all();
+    const latestJobsBySource = new Map();
+    for (const job of jobsResult.results || []) {
+      const sourceId = job.scope_type === 'source_target' ? parseSourceTargetScopeId(job.scope_id).sourceId : job.scope_id;
+      if (!sourceId || latestJobsBySource.has(sourceId)) continue;
+      latestJobsBySource.set(sourceId, {
+        job_type: job.job_type,
+        scope_type: job.scope_type,
+        scope_id: job.scope_id,
+        status: job.status,
+        started_at: job.started_at,
+        finished_at: job.finished_at,
+        summary: tryParseJson(job.summary_json, null),
+        error: tryParseJson(job.error_json, null),
+      });
+    }
+    const googleErrorsResult = await this.db.prepare(
+      `SELECT canonical_events.source_id,
+              COUNT(*) AS error_count,
+              MAX(google_event_links.last_synced_at) AS last_synced_at,
+              google_event_links.last_error
+       FROM google_event_links
+       JOIN canonical_events ON canonical_events.id = google_event_links.canonical_event_id
+       WHERE google_event_links.sync_status = 'error'
+       GROUP BY canonical_events.source_id, google_event_links.last_error`
+    ).all();
+    const latestGoogleErrorBySource = new Map();
+    for (const row of googleErrorsResult.results || []) {
+      const current = latestGoogleErrorBySource.get(row.source_id);
+      if (!current || String(row.last_synced_at || '') > String(current.last_synced_at || '')) {
+        latestGoogleErrorBySource.set(row.source_id, {
+          error_count: Number(row.error_count || 0),
+          last_synced_at: row.last_synced_at || null,
+          message: row.last_error || null,
+        });
+      }
+    }
+    const googleCountsResult = await this.db.prepare(
+      `SELECT
+         canonical_events.source_id,
+         COUNT(output_rules.id) AS desired_count,
+         SUM(CASE WHEN google_event_links.sync_status = 'synced' AND google_event_links.google_event_id IS NOT NULL THEN 1 ELSE 0 END) AS synced_count,
+         SUM(CASE WHEN google_event_links.sync_status = 'error' AND (google_event_links.last_error IS NULL OR google_event_links.last_error NOT LIKE 'Deferred after rate limit:%') THEN 1 ELSE 0 END) AS error_count
+       FROM output_rules
+       JOIN canonical_events ON canonical_events.id = output_rules.canonical_event_id
+       JOIN output_targets ON output_targets.id = output_rules.target_id AND output_targets.target_type = 'google'
+       LEFT JOIN google_event_links
+         ON google_event_links.canonical_event_id = output_rules.canonical_event_id
+        AND google_event_links.event_instance_id = output_rules.event_instance_id
+        AND (
+          google_event_links.target_id = output_rules.target_id
+          OR (google_event_links.target_id IS NULL AND google_event_links.target_key = output_rules.target_key)
+        )
+       WHERE output_rules.include_state = 'included'
+         AND canonical_events.source_deleted = 0
+       GROUP BY canonical_events.source_id`
+    ).all();
+    const googleCountsBySource = new Map(
+      (googleCountsResult.results || []).map((row) => [
+        row.source_id,
+        {
+          synced: Number(row.synced_count || 0),
+          deferred: Math.max(Number(row.desired_count || 0) - Number(row.synced_count || 0) - Number(row.error_count || 0), 0),
+          errors: Number(row.error_count || 0),
+        },
+      ])
+    );
     const bySource = new Map();
     for (const link of links) {
       if (!bySource.has(link.source_id)) bySource.set(link.source_id, []);
@@ -423,6 +570,9 @@ export class D1Repository {
     }
     return sources.map((source) => ({
       ...source,
+      latest_job: latestJobsBySource.get(source.id) || null,
+      latest_google_sync_error: latestGoogleErrorBySource.get(source.id) || null,
+      google_sync_counts: googleCountsBySource.get(source.id) || { synced: 0, deferred: 0, errors: 0 },
       target_links: (bySource.get(source.id) || []).sort(
         (a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.target_key).localeCompare(String(b.target_key))
       ),
@@ -613,7 +763,7 @@ export class D1Repository {
       ).bind(timestamp, sourceId),
       this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
     ]);
-    await this.syncGoogleOutputsForSource(sourceId);
+    await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'cleanup' });
     return this.getSourceById(sourceId);
   }
 
@@ -849,8 +999,9 @@ export class D1Repository {
     };
   }
 
-  async listDesiredGoogleSyncRows(sourceId) {
-    const result = await this.db.prepare(
+  async listDesiredGoogleSyncRows(sourceId, targetId = null) {
+    const binds = [sourceId];
+    let sql =
       `SELECT
          output_rules.id AS output_rule_id,
          output_rules.target_id,
@@ -885,14 +1036,19 @@ export class D1Repository {
          AND canonical_events.source_deleted = 0
          AND event_instances.source_deleted = 0
          AND COALESCE(output_targets.target_type, output_rules.target_key) IS NOT NULL
-         AND output_targets.target_type = 'google'
-       ORDER BY output_targets.display_name ASC, event_instances.occurrence_start_at ASC`
-    ).bind(sourceId).all();
+         AND output_targets.target_type = 'google'`;
+    if (targetId) {
+      sql += ` AND output_rules.target_id = ?`;
+      binds.push(targetId);
+    }
+    sql += ` ORDER BY output_targets.display_name ASC, event_instances.occurrence_start_at ASC`;
+    const result = await this.db.prepare(sql).bind(...binds).all();
     return result.results || [];
   }
 
-  async listExistingGoogleEventLinksForSource(sourceId) {
-    const result = await this.db.prepare(
+  async listExistingGoogleEventLinksForSource(sourceId, targetId = null) {
+    const binds = [sourceId];
+    let sql =
       `SELECT
          google_event_links.id,
          google_event_links.target_id,
@@ -909,8 +1065,12 @@ export class D1Repository {
        FROM google_event_links
        LEFT JOIN output_targets ON output_targets.id = google_event_links.target_id
        JOIN canonical_events ON canonical_events.id = google_event_links.canonical_event_id
-       WHERE canonical_events.source_id = ?`
-    ).bind(sourceId).all();
+       WHERE canonical_events.source_id = ?`;
+    if (targetId) {
+      sql += ` AND google_event_links.target_id = ?`;
+      binds.push(targetId);
+    }
+    const result = await this.db.prepare(sql).bind(...binds).all();
     return result.results || [];
   }
 
@@ -943,11 +1103,48 @@ export class D1Repository {
     };
   }
 
-  async syncGoogleOutputsForSource(sourceId) {
-    const desiredRows = await this.listDesiredGoogleSyncRows(sourceId);
-    const existingLinks = await this.listExistingGoogleEventLinksForSource(sourceId);
+  async listGoogleTargetsForSource(sourceId) {
+    const result = await this.db.prepare(
+      `SELECT DISTINCT output_targets.id, output_targets.slug, output_targets.display_name
+       FROM source_target_links
+       JOIN output_targets ON output_targets.id = source_target_links.target_id
+       WHERE source_target_links.source_id = ?
+         AND source_target_links.is_enabled = 1
+         AND output_targets.target_type = 'google'
+         AND output_targets.is_active = 1
+       ORDER BY output_targets.display_name ASC, output_targets.slug ASC`
+    ).bind(sourceId).all();
+    return result.results || [];
+  }
+
+  async enqueueGoogleSyncJobsForSource(sourceId, { mode = 'sync' } = {}) {
+    const targets = await this.listGoogleTargetsForSource(sourceId);
+    let queued = 0;
+    for (const target of targets) {
+      await this.enqueueJob({
+        jobType: 'sync_google_target',
+        scopeType: 'source_target',
+        scopeId: buildSourceTargetScopeId(sourceId, target.id, mode),
+        payload: {
+          sourceId,
+          targetId: target.id,
+          mode,
+        },
+      });
+      queued += 1;
+    }
+    return {
+      mode,
+      queued_jobs: queued,
+      queued_targets: queued,
+    };
+  }
+
+  async syncGoogleOutputsForTargetChunk(sourceId, targetId, { mode = 'sync', limit = GOOGLE_SYNC_JOB_CHUNK_SIZE } = {}) {
+    const desiredRows = mode === 'cleanup' ? [] : await this.listDesiredGoogleSyncRows(sourceId, targetId);
+    const existingLinks = await this.listExistingGoogleEventLinksForSource(sourceId, targetId);
     if (!desiredRows.length && !existingLinks.length) {
-      return { synced: 0, updated: 0, deleted: 0, skipped: 0 };
+      return { synced: 0, updated: 0, deleted: 0, skipped: 0, failed: 0, deferred: 0, rate_limited: 0, remaining: 0, has_more: false };
     }
     if (!this.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is required for Google output sync');
@@ -958,11 +1155,57 @@ export class D1Repository {
     const existingByKey = new Map(existingLinks.map((row) => [buildGoogleSyncKey(row), row]));
     const timestamp = nowIso();
     const statements = [];
+    const operations = [];
     let created = 0;
     let updated = 0;
     let deleted = 0;
     let skipped = 0;
     let failed = 0;
+    let deferred = 0;
+    let rateLimited = 0;
+    let rateLimitMessage = '';
+    let writeCount = 0;
+
+    const persistGoogleLinkState = ({
+      id,
+      targetId,
+      targetKey,
+      canonicalEventId,
+      eventInstanceId,
+      googleEventId,
+      googleEtag,
+      lastSyncedHash,
+      lastSyncedAt,
+      syncStatus,
+      lastError,
+    }) =>
+      this.db.prepare(
+        `INSERT INTO google_event_links (
+          id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
+          last_synced_hash, last_synced_at, sync_status, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          target_id = excluded.target_id,
+          target_key = excluded.target_key,
+          google_event_id = excluded.google_event_id,
+          google_etag = excluded.google_etag,
+          last_synced_hash = excluded.last_synced_hash,
+          last_synced_at = excluded.last_synced_at,
+          sync_status = excluded.sync_status,
+          last_error = excluded.last_error`
+      ).bind(
+        id,
+        targetId,
+        targetKey,
+        canonicalEventId,
+        eventInstanceId,
+        googleEventId,
+        googleEtag,
+        lastSyncedHash,
+        lastSyncedAt,
+        syncStatus,
+        lastError
+      );
 
     for (const row of desiredRows) {
       const eventPayload = this.buildGoogleCalendarEvent(row);
@@ -972,132 +1215,163 @@ export class D1Repository {
         skipped += 1;
         continue;
       }
+      operations.push({ type: existing?.google_event_id ? 'update' : 'create', row, existing, syncHash, eventPayload });
+    }
+
+    for (const link of existingLinks) {
+      if (desiredByKey.has(buildGoogleSyncKey(link))) continue;
+      operations.push({ type: 'delete', link });
+    }
+
+    const chunk = operations.slice(0, limit);
+    for (const operation of chunk) {
+      if (rateLimitMessage) {
+        deferred += 1;
+        if (operation.type === 'delete') {
+          const link = operation.link;
+          statements.push(
+            persistGoogleLinkState({
+              id: link.id,
+              targetId: link.target_id || null,
+              targetKey: link.target_key,
+              canonicalEventId: link.canonical_event_id,
+              eventInstanceId: link.event_instance_id,
+              googleEventId: link.google_event_id || null,
+              googleEtag: link.google_etag || null,
+              lastSyncedHash: link.last_synced_hash || null,
+              lastSyncedAt: timestamp,
+              syncStatus: 'error',
+              lastError: buildDeferredRateLimitMessage(rateLimitMessage),
+            })
+          );
+        } else {
+          const { row, existing } = operation;
+          statements.push(
+            persistGoogleLinkState({
+              id: existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
+              targetId: row.target_id || null,
+              targetKey: row.target_key,
+              canonicalEventId: row.canonical_event_id,
+              eventInstanceId: row.event_instance_id,
+              googleEventId: existing?.google_event_id || null,
+              googleEtag: existing?.google_etag || null,
+              lastSyncedHash: existing?.last_synced_hash || null,
+              lastSyncedAt: timestamp,
+              syncStatus: 'error',
+              lastError: buildDeferredRateLimitMessage(rateLimitMessage),
+            })
+          );
+        }
+        continue;
+      }
 
       try {
-        let response;
-        if (existing?.google_event_id) {
-          response = await updateGoogleCalendarEvent({
+        if (writeCount > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 75));
+        }
+        if (operation.type === 'update') {
+          const { row, existing, syncHash, eventPayload } = operation;
+          const response = await updateGoogleCalendarEvent({
             accessToken,
             calendarId: row.calendar_id,
             eventId: existing.google_event_id,
             event: eventPayload,
           });
           updated += 1;
-        } else {
-          response = await createGoogleCalendarEvent({
+          writeCount += 1;
+          statements.push(
+            persistGoogleLinkState({
+              id: existing.id,
+              targetId: row.target_id || null,
+              targetKey: row.target_key,
+              canonicalEventId: row.canonical_event_id,
+              eventInstanceId: row.event_instance_id,
+              googleEventId: response.id,
+              googleEtag: response.etag || null,
+              lastSyncedHash: syncHash,
+              lastSyncedAt: timestamp,
+              syncStatus: 'synced',
+              lastError: null,
+            })
+          );
+        } else if (operation.type === 'create') {
+          const { row, existing, syncHash, eventPayload } = operation;
+          const response = await createGoogleCalendarEvent({
             accessToken,
             calendarId: row.calendar_id,
             event: eventPayload,
           });
           created += 1;
+          writeCount += 1;
+          statements.push(
+            persistGoogleLinkState({
+              id: existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
+              targetId: row.target_id || null,
+              targetKey: row.target_key,
+              canonicalEventId: row.canonical_event_id,
+              eventInstanceId: row.event_instance_id,
+              googleEventId: response.id,
+              googleEtag: response.etag || null,
+              lastSyncedHash: syncHash,
+              lastSyncedAt: timestamp,
+              syncStatus: 'synced',
+              lastError: null,
+            })
+          );
+        } else if (operation.type === 'delete') {
+          const { link } = operation;
+          if (link.google_event_id && link.calendar_id) {
+            await deleteGoogleCalendarEvent({
+              accessToken,
+              calendarId: link.calendar_id,
+              eventId: link.google_event_id,
+            });
+          }
+          deleted += 1;
+          writeCount += 1;
+          statements.push(this.db.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id));
         }
-
-        statements.push(
-          this.db.prepare(
-            `INSERT INTO google_event_links (
-              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
-              last_synced_hash, last_synced_at, sync_status, last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              target_id = excluded.target_id,
-              target_key = excluded.target_key,
-              google_event_id = excluded.google_event_id,
-              google_etag = excluded.google_etag,
-              last_synced_hash = excluded.last_synced_hash,
-              last_synced_at = excluded.last_synced_at,
-              sync_status = excluded.sync_status,
-              last_error = excluded.last_error`
-          ).bind(
-            existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
-            row.target_id || null,
-            row.target_key,
-            row.canonical_event_id,
-            row.event_instance_id,
-            response.id,
-            response.etag || null,
-            syncHash,
-            timestamp,
-            'synced',
-            null
-          )
-        );
       } catch (error) {
         failed += 1;
-        statements.push(
-          this.db.prepare(
-            `INSERT INTO google_event_links (
-              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
-              last_synced_hash, last_synced_at, sync_status, last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              target_id = excluded.target_id,
-              target_key = excluded.target_key,
-              google_event_id = excluded.google_event_id,
-              google_etag = excluded.google_etag,
-              last_synced_hash = excluded.last_synced_hash,
-              last_synced_at = excluded.last_synced_at,
-              sync_status = excluded.sync_status,
-              last_error = excluded.last_error`
-          ).bind(
-            existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
-            row.target_id || null,
-            row.target_key,
-            row.canonical_event_id,
-            row.event_instance_id,
-            existing?.google_event_id || null,
-            existing?.google_etag || null,
-            existing?.last_synced_hash || null,
-            timestamp,
-            'error',
-            buildSyncErrorMessage(error)
-          )
-        );
-      }
-    }
-
-    for (const link of existingLinks) {
-      if (desiredByKey.has(buildGoogleSyncKey(link))) continue;
-      try {
-        if (link.google_event_id && link.calendar_id) {
-          await deleteGoogleCalendarEvent({
-            accessToken,
-            calendarId: link.calendar_id,
-            eventId: link.google_event_id,
-          });
+        if (isGoogleRateLimitError(error)) {
+          rateLimited += 1;
+          rateLimitMessage = buildSyncErrorMessage(error);
         }
-        statements.push(this.db.prepare(`DELETE FROM google_event_links WHERE id = ?`).bind(link.id));
-        deleted += 1;
-      } catch (error) {
-        failed += 1;
-        statements.push(
-          this.db.prepare(
-            `INSERT INTO google_event_links (
-              id, target_id, target_key, canonical_event_id, event_instance_id, google_event_id, google_etag,
-              last_synced_hash, last_synced_at, sync_status, last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              target_id = excluded.target_id,
-              target_key = excluded.target_key,
-              google_event_id = excluded.google_event_id,
-              google_etag = excluded.google_etag,
-              last_synced_hash = excluded.last_synced_hash,
-              last_synced_at = excluded.last_synced_at,
-              sync_status = excluded.sync_status,
-              last_error = excluded.last_error`
-          ).bind(
-            link.id,
-            link.target_id || null,
-            link.target_key,
-            link.canonical_event_id,
-            link.event_instance_id,
-            link.google_event_id || null,
-            link.google_etag || null,
-            link.last_synced_hash || null,
-            timestamp,
-            'error',
-            buildSyncErrorMessage(error)
-          )
-        );
+        if (operation.type === 'delete') {
+          const { link } = operation;
+          statements.push(
+            persistGoogleLinkState({
+              id: link.id,
+              targetId: link.target_id || null,
+              targetKey: link.target_key,
+              canonicalEventId: link.canonical_event_id,
+              eventInstanceId: link.event_instance_id,
+              googleEventId: link.google_event_id || null,
+              googleEtag: link.google_etag || null,
+              lastSyncedHash: link.last_synced_hash || null,
+              lastSyncedAt: timestamp,
+              syncStatus: 'error',
+              lastError: buildSyncErrorMessage(error),
+            })
+          );
+        } else {
+          const { row, existing } = operation;
+          statements.push(
+            persistGoogleLinkState({
+              id: existing?.id || stableId('gel', `${row.target_id || row.target_key}:${row.event_instance_id}`),
+              targetId: row.target_id || null,
+              targetKey: row.target_key,
+              canonicalEventId: row.canonical_event_id,
+              eventInstanceId: row.event_instance_id,
+              googleEventId: existing?.google_event_id || null,
+              googleEtag: existing?.google_etag || null,
+              lastSyncedHash: existing?.last_synced_hash || null,
+              lastSyncedAt: timestamp,
+              syncStatus: 'error',
+              lastError: buildSyncErrorMessage(error),
+            })
+          );
+        }
       }
     }
 
@@ -1105,7 +1379,18 @@ export class D1Repository {
       await this.db.batch(statements);
     }
 
-    return { synced: created, updated, deleted, skipped, failed };
+    const remaining = Math.max(operations.length - chunk.length, 0);
+    return {
+      synced: created,
+      updated,
+      deleted,
+      skipped,
+      failed,
+      deferred,
+      rate_limited: rateLimited,
+      remaining,
+      has_more: remaining > 0,
+    };
   }
 
   async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
@@ -1149,7 +1434,7 @@ export class D1Repository {
     return this.getEvent(override.canonical_event_id);
   }
 
-  async enqueueJob({ jobType, scopeType, scopeId }) {
+  async enqueueJob({ jobType, scopeType, scopeId, payload = null }) {
     const timestamp = nowIso();
     const jobId = makeOpaqueId('job', `${jobType}:${scopeType}:${scopeId || ''}`);
     await this.db.prepare(
@@ -1162,6 +1447,7 @@ export class D1Repository {
         jobType,
         scopeType,
         scopeId: scopeId || null,
+        ...(payload && typeof payload === 'object' ? payload : {}),
       });
     }
     return {
@@ -1504,6 +1790,7 @@ export class D1Repository {
         ).bind(timestamp, source.id)
       );
       await this.db.batch(statements);
+      await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'cleanup' });
       return;
     }
 
@@ -1546,7 +1833,7 @@ export class D1Repository {
     }
 
     await this.db.batch(statements);
-    await this.syncGoogleOutputsForSource(source.id);
+    await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'sync' });
   }
 
   async markJobStatus(jobId, status, { summary = null, error = null } = {}) {
@@ -1956,8 +2243,15 @@ export class D1Repository {
       }
     }
 
-    await this.db.batch(statements);
-    const googleSync = await this.syncGoogleOutputsForSource(sourceId);
+    // Run soft-delete header statements first, then chunk upserts to avoid
+    // D1 execution timeouts on large sources (many events × instances × targets).
+    const INGEST_BATCH_SIZE = 100;
+    const headerStatements = statements.splice(0, 4);
+    await this.db.batch(headerStatements);
+    for (let i = 0; i < statements.length; i += INGEST_BATCH_SIZE) {
+      await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));
+    }
+    const googleSync = await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'sync' });
 
     return {
       sourceId,

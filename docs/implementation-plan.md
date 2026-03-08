@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-07 (session 4)_
+_Updated: 2026-03-08 (session 6)_
 
 ## Vocabulary
 
@@ -29,10 +29,13 @@ Code currently uses `target` and `google_targets` in places. These will be repla
 10. Google output deletion cascades to dependent source → output links and output rules.
 11. Admin shell protected at route level via `requireRole(['admin','editor'])` — HTML is not served unauthenticated.
 12. ICS feed subscription URLs exposed in admin UI (full URL with token, copy-to-clipboard button).
-13. Per-source status in admin: active event count, last fetch timestamp, last HTTP/parse status with error tooltip.
+13. Per-source status in admin: active event count, last fetch timestamp, latest job state (`queued`, `running`, `partial`, `error`, `ok`) with inline actionable detail.
 14. Modify Events redesigned as instance-first UI: source picker auto-loads a flat dated instance list; clicking a row opens an inline drawer with the override form; "Future Events with Modifications" table shows all upcoming instances with active overrides.
 15. New API routes: `GET /api/instances` (filterable by source, output, future, limit) and `GET /api/overrides` (future instances with active overrides).
 16. `deleteSource()` now cascades correctly through all dependent tables (`event_overrides`, `google_event_links`, `output_rules`, `event_instances`, `canonical_events`, `source_events`, `source_snapshots`, `source_target_links`).
+17. `google_event_links.google_event_id` is now nullable so failed Google sync attempts can be persisted instead of crashing the job.
+18. Google Calendar sync now retries rate-limit responses briefly, slows write bursts, and defers the remainder of a source run after the first persistent rate-limit error.
+19. Admin auto-refreshes while jobs are queued or running so rebuild progress is visible without manual refresh.
 
 ---
 
@@ -65,15 +68,17 @@ One row per source → output assignment. This is a join table — adding new ru
 | `sort_order` | Display ordering within the output |
 | `is_enabled` | Whether this assignment is active |
 
-### `google_targets` _(represents Google Calendar outputs)_
+### `output_targets` _(represents ICS and Google outputs)_
 
-One row per managed Google Calendar output.
+One row per output target. Google outputs live here now; `google_targets` is retired.
 
 | Field | Purpose |
 |---|---|
-| `target_key` | Unique slug identifying this output |
+| `slug` | Unique slug identifying this output |
+| `target_type` | `ics` or `google` |
 | `calendar_id` | Google Calendar ID to write to |
 | `ownership_mode` | `managed_output` — this system writes to it |
+| `is_system` | 1 for built-in ICS outputs |
 
 ### `canonical_events` + `event_instances`
 
@@ -82,6 +87,17 @@ Normalised event storage. One canonical event per unique event identity; one ins
 ### `output_rules`
 
 Derived rows that record whether each event instance should appear on each output. Re-derived on every ingest and on source config change.
+
+### `google_event_links`
+
+Tracks Google Calendar reconciliation state per event instance and output.
+
+| Field | Purpose |
+|---|---|
+| `google_event_id` | Remote Google event ID; nullable when a sync attempt failed before creation |
+| `sync_status` | `synced`, `error`, or pending transitional state |
+| `last_error` | Latest Google/API error message for that instance/output |
+| `last_synced_hash` | Hash of last successfully synced payload to avoid redundant writes |
 
 ### `event_overrides`
 
@@ -147,13 +163,17 @@ Built-in system outputs seeded at migration time:
 1. **Source migration** — enter sources from `C:\Dev\ics-merge\cals.txt` into the new system.
 2. **Production migration runbook** — apply the output-target cutover migrations in production before removing any rollback path.
 3. **Prune validation** — verify prune behavior against real D1 + R2, not only FakeDb.
+4. **Google sync batching / quota control** — current mitigation retries and defers on rate-limit, but large backfills still need deeper chunking or queue fan-out for smoother catch-up.
 
 ### Completed in this pass
-4. **Output target refactor** — unified `output_targets` table is now the live model.
-5. **Google Calendar outbound sync** — linked Google outputs are now reconciled through the Calendar API using a service account.
-6. **`runInTransaction()` → `db.batch()`** — remaining high-write source sync callers were migrated.
-7. **`poll_interval_minutes`** — scheduler source selection now respects the configured interval.
-8. **Recurrence exception handling** — `RECURRENCE-ID` updates now remap to the existing series instance.
+5. **Output target refactor** — unified `output_targets` table is now the live model.
+6. **Google Calendar outbound sync** — linked Google outputs are now reconciled through the Calendar API using a service account.
+7. **`runInTransaction()` → `db.batch()`** — remaining high-write source sync callers were migrated.
+8. **`poll_interval_minutes`** — scheduler source selection now respects the configured interval.
+9. **Recurrence exception handling** — `RECURRENCE-ID` updates now remap to the existing series instance.
+10. **Google sync schema repair** — `google_event_links.google_event_id` constraint mismatch fixed via migration `0005_google_event_links_nullable.sql`.
+11. **Operational debugging surfaced** — admin source rows now expose latest job and Google sync error detail inline.
+12. **Rate-limit mitigation** — Google writes now retry briefly and stop the rest of a run after persistent quota errors instead of hammering the API.
 
 See `docs/todo.md` for the full detail on each item.
 
@@ -217,3 +237,30 @@ Do not implement new features there.
 
 **Test fidelity**
 - FakeDb now enforces disabled-source feed filtering and poll-interval behavior.
+
+### 2026-03-08 — Session 6
+
+**Operational findings**
+- The Worker was reaching Google successfully, but writes initially failed because the Google Calendar API was not enabled on project `famcal-489417`.
+- Once the API was enabled, live sync confirmed a second production issue: large rebuilds hit Google `Rate Limit Exceeded`.
+- The previous generic `error` label in `/admin` hid actionable details. The job/error data already existed in D1; the UI simply was not surfacing it.
+
+**Bug fixes**
+- Added migration `0005_google_event_links_nullable.sql` because the live schema still had `google_event_links.google_event_id NOT NULL`, which prevented failed sync attempts from being recorded and crashed jobs with `SQLITE_CONSTRAINT`.
+- Added runtime schema repair in `ensureSupportTables()` so older environments self-heal even before migrations are applied.
+- Browser-side admin bug fixed: `TARGETS is not defined` when creating Google outputs after the target API cleanup.
+
+**Behavior changes**
+- Admin source rows now show the latest source job state and error detail inline:
+  - `queued`
+  - `running`
+  - `partial`
+  - `error`
+  - `ok`
+- Dashboard auto-refreshes while jobs are queued or running.
+- Google Calendar writes now retry brief rate-limit responses and defer the remainder of a source run after the first persistent quota failure. This prevents repeated no-value write spam during rebuilds.
+
+**Learnings**
+- Persisted job state is not enough if the UI collapses it into a generic `error`; operators need the exact failing subsystem and message in the primary table.
+- Google output sync is operationally distinct from ICS ingest. A source can ingest successfully and still partially fail on outbound Google writes.
+- Schema compatibility for error-state tables matters as much as success-path schema. The original `NOT NULL` constraint on `google_event_id` made live debugging much harder because it prevented error recording.

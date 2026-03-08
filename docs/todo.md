@@ -11,11 +11,54 @@ Prioritized work items. Update this file as items are completed or reprioritized
 
 **Fix:** Read `C:\Dev\ics-merge\cals.txt`, cross-reference against existing sources in the admin UI, and add any missing ones (Configure Sources → Add Source). Assign outputs and queue a rebuild for each.
 
+### Limit Google sync to the same lookback window as ICS feeds
+**Why:** `listDesiredGoogleSyncRows` has no date filter — it writes every `event_instances` row that has an output rule, regardless of age. The ingest window is controlled by `DEFAULT_LOOKBACK_DAYS` (default 7), but past that window old event instances can accumulate in D1 and get written to Google unnecessarily on each rebuild.
+
+**Fix:** Add a `WHERE event_instances.occurrence_end_at >= ?` filter to `listDesiredGoogleSyncRows`, bound to `now - DEFAULT_LOOKBACK_DAYS`. This keeps Google sync consistent with what ICS feeds already expose and reduces subrequest pressure on large sources.
+
+**Note:** Events older than the lookback that already exist in Google Calendar will be treated as orphans and deleted on the next sync run. That is the correct behavior — they are outside the managed window.
+
 ### Prune validation against real D1 + R2
 Prune logic passes FakeDb tests but hasn't been verified against real infrastructure at scale.
 
 ### Production migration runbook
 Run the D1 migrations through production and confirm the `google_targets` cutover migration completes before deploying code that no longer reads the legacy table.
+
+### Google sync follow-up: subrequest-safe batching for large backfills
+**Why:** Live testing confirmed that the next real blocker is no longer only Google quota. Large source rebuilds can still fail with `Too many subrequests.`, which is a Worker execution limit. Current mitigation handles Google rate limits better, but it still performs too much Google reconciliation in one source run.
+
+**Execution plan:**
+1. **Separate ingest from Google reconciliation**
+   - Keep ICS fetch/parse/materialize in the existing source job
+   - Stop doing full Google reconciliation inline at the end of `ingestSource()`
+2. **Add queued Google sync jobs**
+   - enqueue **per-source+target** Google sync jobs after ingest
+   - this isolates one Google calendar's quota/failure state from another and keeps chunk sizing predictable
+   - include cursor/offset state so work can continue across multiple runs
+3. **Process Google sync in bounded chunks**
+   - each job handles a fixed number of Google writes/deletes
+   - persist progress and enqueue the next chunk until drained
+   - treat Google delete `404` as success so queue retries do not fail on already-removed remote events
+4. **Keep status counters source-centric**
+   - continue showing `Events`, `Sync'd`, `Deferred`, `Errors`
+   - add “job still running” / “continuing sync” messaging while chunks are draining
+5. **Add tests for chunk continuation**
+   - verify partial chunk completion
+   - verify follow-up job enqueue
+   - verify no duplicate event creation across retries
+   - verify mid-chunk failure + re-enqueue resumes safely
+   - verify repeated delete chunk retries treat remote `404` as success
+
+**Acceptance:** A large source rebuild no longer ends with `Too many subrequests.` and can catch up over multiple queue runs.
+
+### Operator visibility: richer job timeline / source sync drill-down
+**Why:** Inline source status is now materially better, but operators still have to infer progress from a compact summary. For longer rebuilds and partial failures, deeper visibility would reduce confusion.
+
+**Fix:** Add a source-centric job history or detail drawer showing:
+- latest queued/running/completed job timestamps
+- Google sync counts (`synced`, `updated`, `skipped`, `failed`, `deferred`)
+- latest source fetch error
+- latest Google sync error
 
 ---
 
@@ -85,23 +128,13 @@ Completed. `listActiveSources()` now filters by `last_fetched_at` and `poll_inte
 ### Google Calendar outbound sync
 Completed. Ingest/source sync now reconciles linked Google outputs using `GOOGLE_SERVICE_ACCOUNT_JSON` and persists sync state in `google_event_links`.
 
+### Google sync schema repair + live diagnostics
+Completed. Added `0005_google_event_links_nullable.sql`, runtime compatibility repair, actionable source status messaging, auto-refresh while jobs are active, and rate-limit mitigation for Google writes.
+
+### Fix timezone handling for floating-time ICS events
+Completed. `parseICS` now reads calendar-level `X-WR-TIMEZONE`, floating local datetimes no longer get coerced to UTC with a fake trailing `Z`, and Google sync preserves wall-clock `dateTime` plus `timeZone` for those events.
+
 ---
-
-## P3 — Code Quality (from JS standards scan)
-
-### Fix clipboard `.catch()` missing — [index.js:807](../src/index.js#L807)
-`navigator.clipboard.writeText(...).then(...)` has no `.catch()`. If the clipboard API is denied (non-HTTPS, permission blocked), the rejection is silent and the button gives no feedback.
-
-Fix: add `.catch(() => { btn.textContent = 'Failed'; setTimeout(...) })` after the `.then()`.
-
-### Add error handling to top-level `loadDashboard()` call — [index.js:1148](../src/index.js#L1148)
-`loadDashboard()` is called fire-and-forget on page load. It has internal `try/catch` so it won't throw under normal conditions, but the call site is unguarded. Wrap in `.catch(err => setStatus(err.message, true))`.
-
-### Extract magic numbers to named constants — [index.js:810](../src/index.js#L810), [index.js:1194](../src/index.js#L1194)
-- `1500` (ms clipboard reset) — add an inline comment at minimum
-- `max-age=300` (ICS feed cache TTL) — move to `env.FEED_CACHE_MAX_AGE` or a named constant in `constants.js`
-
-**Ref:** `docs/coding-standards.md`
 
 ---
 
@@ -122,3 +155,10 @@ Fix: add `.catch(() => { btn.textContent = 'Failed'; setTimeout(...) })` after t
 - [x] FakeDb feed filtering now respects `source_deleted` and scheduler timing — 2026-03-07
 - [x] Google Calendar outbound sync implemented for linked Google outputs — 2026-03-07
 - [x] Repository cut over from `google_targets` to `output_targets` with legacy migration — 2026-03-07
+- [x] `google_event_links.google_event_id` made nullable so failed Google sync attempts persist real errors — 2026-03-08
+- [x] Admin source status now shows latest job / Google sync detail inline and auto-refreshes while jobs are active — 2026-03-08
+- [x] Google write loop now retries quota errors briefly and defers remaining work after persistent rate-limit failures — 2026-03-08
+- [x] Floating-time ICS events now respect `X-WR-TIMEZONE` and preserve local wall-clock times into Google sync — 2026-03-08
+- [x] Clipboard copy flow now handles denied permissions and resets button state correctly — 2026-03-08
+- [x] Top-level `loadDashboard()` call is now guarded with `.catch(...)` — 2026-03-08
+- [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired — 2026-03-08

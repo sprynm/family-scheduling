@@ -307,6 +307,22 @@ export default {
         let summary = { status: 'noop' };
         if (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source') {
           summary = await repo.ingestSource(job.scopeId);
+        } else if (job.jobType === 'sync_google_target') {
+          summary = await repo.syncGoogleOutputsForTargetChunk(job.sourceId, job.targetId, {
+            mode: job.mode || 'sync',
+          });
+          if (summary.has_more) {
+            await repo.enqueueJob({
+              jobType: 'sync_google_target',
+              scopeType: 'source_target',
+              scopeId: job.scopeId,
+              payload: {
+                sourceId: job.sourceId,
+                targetId: job.targetId,
+                mode: job.mode || 'sync',
+              },
+            });
+          }
         } else if (job.jobType === 'rebuild_system') {
           const sources = await repo.listActiveSources();
           const results = [];
