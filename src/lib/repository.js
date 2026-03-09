@@ -149,6 +149,14 @@ function buildOutputTargetId(targetType, slug) {
   return stableId('outt', `${targetType}:${slug}`);
 }
 
+function normalizeTargetIdentity(targetId, targetKey) {
+  if (targetId) return targetId;
+  if (TARGETS.includes(targetKey)) {
+    return buildOutputTargetId('ics', targetKey);
+  }
+  return null;
+}
+
 function toDisplayNameFromSlug(slug) {
   return String(slug || '')
     .split(/[_-]+/)
@@ -191,6 +199,8 @@ function isDeferredRateLimitMessage(message) {
 }
 
 const GOOGLE_SYNC_JOB_CHUNK_SIZE = 10;
+const supportTablesReadyByDb = new WeakSet();
+const supportTablesInitByDb = new WeakMap();
 
 function buildSourceTargetScopeId(sourceId, targetId, mode = 'sync') {
   return `${sourceId}|${targetId}|${mode}`;
@@ -208,6 +218,10 @@ function tryParseJson(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function parseOverridePayload(value) {
+  return typeof value === 'string' ? tryParseJson(value, {}) || {} : (value || {});
 }
 
 export class D1Repository {
@@ -380,62 +394,64 @@ export class D1Repository {
 
   async bootstrapOutputTargets() {
     const timestamp = nowIso();
+    const statements = [];
     for (const target of buildSystemOutputTargets()) {
-      await this.db.prepare(
-        `INSERT INTO output_targets (
-          id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(slug) DO UPDATE SET
-          target_type = excluded.target_type,
-          display_name = excluded.display_name,
-          is_system = excluded.is_system,
-          updated_at = excluded.updated_at`
-      ).bind(
-        target.id,
-        target.target_type,
-        target.slug,
-        target.display_name,
-        target.calendar_id,
-        target.ownership_mode,
-        target.is_system,
-        target.is_active,
-        timestamp,
-        timestamp
-      ).run();
+      statements.push(
+        this.db.prepare(
+          `INSERT INTO output_targets (
+            id, target_type, slug, display_name, calendar_id, ownership_mode, is_system, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(slug) DO UPDATE SET
+            target_type = excluded.target_type,
+            display_name = excluded.display_name,
+            is_system = excluded.is_system,
+            updated_at = excluded.updated_at`
+        ).bind(
+          target.id,
+          target.target_type,
+          target.slug,
+          target.display_name,
+          target.calendar_id,
+          target.ownership_mode,
+          target.is_system,
+          target.is_active,
+          timestamp,
+          timestamp
+        )
+      );
     }
 
-    const linksResult = await this.db.prepare(
-      `SELECT id, target_key, target_type
-       FROM source_target_links
-       WHERE target_id IS NULL`
-    ).all();
-    for (const row of linksResult.results || []) {
-      const target = await this.getOutputTargetBySlug(row.target_key);
-      if (!target) continue;
-      await this.db.prepare(`UPDATE source_target_links SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
-    }
+    statements.push(
+      this.db.prepare(
+        `UPDATE source_target_links
+         SET target_id = (
+           SELECT output_targets.id
+           FROM output_targets
+           WHERE output_targets.slug = source_target_links.target_key
+         )
+         WHERE target_id IS NULL`
+      ),
+      this.db.prepare(
+        `UPDATE output_rules
+         SET target_id = (
+           SELECT output_targets.id
+           FROM output_targets
+           WHERE output_targets.slug = output_rules.target_key
+         )
+         WHERE target_id IS NULL`
+      ),
+      this.db.prepare(
+        `UPDATE google_event_links
+         SET target_id = (
+           SELECT output_targets.id
+           FROM output_targets
+           WHERE output_targets.slug = google_event_links.target_key
+         )
+         WHERE target_id IS NULL`
+      )
+    );
 
-    const rulesResult = await this.db.prepare(
-      `SELECT id, target_key
-       FROM output_rules
-       WHERE target_id IS NULL`
-    ).all();
-    for (const row of rulesResult.results || []) {
-      const target = await this.getOutputTargetBySlug(row.target_key);
-      if (!target) continue;
-      await this.db.prepare(`UPDATE output_rules SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
-    }
-
-    const googleLinksResult = await this.db.prepare(
-      `SELECT id, target_key
-       FROM google_event_links
-       WHERE target_id IS NULL`
-    ).all();
-    for (const row of googleLinksResult.results || []) {
-      const target = await this.getOutputTargetBySlug(row.target_key);
-      if (!target) continue;
-      await this.db.prepare(`UPDATE google_event_links SET target_id = ? WHERE id = ?`).bind(target.id, row.id).run();
-    }
+    await this.db.batch(statements);
   }
 
   async listSources() {
@@ -863,8 +879,14 @@ export class D1Repository {
     `;
     const binds = [];
     const conditions = [];
-    if (future) conditions.push('event_instances.occurrence_start_at >= ?') && binds.push(now);
-    if (sourceId) conditions.push('canonical_events.source_id = ?') && binds.push(sourceId);
+    if (future) {
+      conditions.push('event_instances.occurrence_start_at >= ?');
+      binds.push(now);
+    }
+    if (sourceId) {
+      conditions.push('canonical_events.source_id = ?');
+      binds.push(sourceId);
+    }
     if (outputKey) {
       sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.include_state = 'included'
                LEFT JOIN output_targets output_filter_target
@@ -999,8 +1021,134 @@ export class D1Repository {
     };
   }
 
+  async listActiveOverridesForCanonicalEvent(canonicalEventId) {
+    const result = await this.db.prepare(
+      `SELECT *
+       FROM event_overrides
+       WHERE canonical_event_id = ? AND cleared_at IS NULL
+       ORDER BY created_at DESC`
+    ).bind(canonicalEventId).all();
+    return (result.results || []).map((row) => ({
+      ...row,
+      payload: parseOverridePayload(row.payload_json),
+    }));
+  }
+
+  overrideExcludesTarget(override, target) {
+    if (!override) return false;
+    if (override.override_type === 'skip') return true;
+    if (override.override_type !== 'hidden') return false;
+    const payload = parseOverridePayload(override.payload_json ?? override.payload);
+    if (payload.target_id && target.target_id) {
+      return payload.target_id === target.target_id;
+    }
+    if (payload.target_key) {
+      return payload.target_key === target.target_key;
+    }
+    return false;
+  }
+
+  async reconcileOverrideScope(canonicalEventId, { eventInstanceId = null } = {}) {
+    const eventRow = await this.db.prepare(
+      `SELECT canonical_events.id, canonical_events.source_id
+       FROM canonical_events
+       WHERE canonical_events.id = ?`
+    ).bind(canonicalEventId).first();
+    if (!eventRow) return null;
+
+    const source = await this.getSourceById(eventRow.source_id);
+    if (!source) return null;
+
+    const instancesResult = await this.db.prepare(
+      `SELECT id
+       FROM event_instances
+       WHERE canonical_event_id = ?
+         ${eventInstanceId ? 'AND id = ?' : ''}
+       ORDER BY occurrence_start_at ASC`
+    ).bind(...(eventInstanceId ? [canonicalEventId, eventInstanceId] : [canonicalEventId])).all();
+    const instances = instancesResult.results || [];
+    if (!instances.length) {
+      return {
+        source_id: source.id,
+        canonical_event_id: canonicalEventId,
+        event_instance_ids: [],
+        queued_targets: 0,
+      };
+    }
+
+    const targets = await this.resolveTargetsForSource(source);
+    const activeOverrides = await this.listActiveOverridesForCanonicalEvent(canonicalEventId);
+    const timestamp = nowIso();
+    const statements = [];
+
+    for (const instance of instances) {
+      for (const target of targets) {
+        const matchingOverride = activeOverrides.find((override) => {
+          if (override.event_instance_id && override.event_instance_id !== instance.id) return false;
+          return this.overrideExcludesTarget(override, target);
+        });
+        const includeState = matchingOverride ? 'excluded' : 'included';
+        const derivedReason = matchingOverride
+          ? `override:${matchingOverride.override_type}`
+          : 'derived from source configuration';
+
+        statements.push(
+          this.db.prepare(
+            `INSERT INTO output_rules (
+              id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              target_id = excluded.target_id,
+              target_key = excluded.target_key,
+              include_state = excluded.include_state,
+              derived_reason = excluded.derived_reason,
+              updated_at = excluded.updated_at`
+          ).bind(
+            stableId('out', `${instance.id}:${target.target_id || target.target_key}`),
+            canonicalEventId,
+            instance.id,
+            target.target_id || null,
+            target.target_key,
+            includeState,
+            derivedReason,
+            timestamp,
+            timestamp
+          )
+        );
+      }
+    }
+
+    if (statements.length) {
+      await this.db.batch(statements);
+    }
+
+    const googleTargets = targets.filter((target) => target.target_type === 'google' && target.target_id);
+    for (const target of googleTargets) {
+      await this.enqueueJob({
+        jobType: 'sync_google_target',
+        scopeType: 'source_target',
+        scopeId: buildSourceTargetScopeId(source.id, target.target_id, 'sync'),
+        payload: {
+          sourceId: source.id,
+          targetId: target.target_id,
+          mode: 'sync',
+        },
+      });
+    }
+
+    return {
+      source_id: source.id,
+      canonical_event_id: canonicalEventId,
+      event_instance_ids: instances.map((instance) => instance.id),
+      queued_targets: googleTargets.length,
+    };
+  }
+
   async listDesiredGoogleSyncRows(sourceId, targetId = null) {
-    const binds = [sourceId];
+    const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
+    const lookbackCutoff = new Date();
+    lookbackCutoff.setUTCDate(lookbackCutoff.getUTCDate() - lookbackDays);
+    const binds = [sourceId, lookbackCutoff.toISOString()];
     let sql =
       `SELECT
          output_rules.id AS output_rule_id,
@@ -1035,6 +1183,7 @@ export class D1Repository {
          AND output_rules.include_state = 'included'
          AND canonical_events.source_deleted = 0
          AND event_instances.source_deleted = 0
+         AND event_instances.occurrence_end_at >= ?
          AND COALESCE(output_targets.target_type, output_rules.target_key) IS NOT NULL
          AND output_targets.target_type = 'google'`;
     if (targetId) {
@@ -1419,18 +1568,20 @@ export class D1Repository {
        WHERE id = ?`
     ).bind(timestamp, eventId).run();
 
+    await this.reconcileOverrideScope(eventId, { eventInstanceId });
     return this.getEvent(eventId);
   }
 
   async clearOverride(overrideId) {
     const timestamp = nowIso();
     const override = await this.db.prepare(
-      `SELECT canonical_event_id FROM event_overrides WHERE id = ?`
+      `SELECT canonical_event_id, event_instance_id FROM event_overrides WHERE id = ?`
     ).bind(overrideId).first();
     if (!override) return null;
     await this.db.prepare(
       `UPDATE event_overrides SET cleared_at = ?, updated_at = ? WHERE id = ?`
     ).bind(timestamp, timestamp, overrideId).run();
+    await this.reconcileOverrideScope(override.canonical_event_id, { eventInstanceId: override.event_instance_id || null });
     return this.getEvent(override.canonical_event_id);
   }
 
@@ -1741,7 +1892,7 @@ export class D1Repository {
        ORDER BY source_target_links.sort_order ASC, target_key ASC`
     ).bind(id).all();
     const targetLinks = (links.results || []).map((row) => ({
-      target_id: row.target_id || null,
+      target_id: normalizeTargetIdentity(row.target_id, row.target_key),
       target_key: row.target_key,
       target_type: row.target_type,
       display_name: row.display_name || row.target_key,
@@ -1963,7 +2114,7 @@ export class D1Repository {
        ORDER BY sort_order ASC, target_key ASC`
     ).bind(source.id).all();
     const targetLinks = (links.results || []).map((row) => ({
-      target_id: row.target_id || null,
+      target_id: normalizeTargetIdentity(row.target_id, row.target_key),
       target_key: row.target_key,
       target_type: row.target_type || (TARGETS.includes(row.target_key) ? 'ics' : 'google'),
       display_name: row.display_name || row.target_key,
@@ -2270,7 +2421,22 @@ export async function createRepository(env) {
     throw new Error('APP_DB binding is required for repository access');
   }
   const repo = new D1Repository(env.APP_DB, env);
-  await repo.ensureSupportTables();
+  if (!supportTablesReadyByDb.has(env.APP_DB)) {
+    let initPromise = supportTablesInitByDb.get(env.APP_DB);
+    if (!initPromise) {
+      initPromise = repo.ensureSupportTables()
+        .then(() => {
+          supportTablesReadyByDb.add(env.APP_DB);
+          supportTablesInitByDb.delete(env.APP_DB);
+        })
+        .catch((error) => {
+          supportTablesInitByDb.delete(env.APP_DB);
+          throw error;
+        });
+      supportTablesInitByDb.set(env.APP_DB, initPromise);
+    }
+    await initPromise;
+  }
   await repo.bootstrapLegacySources();
   if (String(env.SEED_SAMPLE_DATA || '').toLowerCase() === 'true') {
     await repo.seedSampleData();

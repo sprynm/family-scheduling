@@ -1,117 +1,49 @@
 # Todo
 
-Prioritized work items. Update this file as items are completed or reprioritized.
+Prioritized work items. Completed work stays below as historical reference; only active work remains in the backlog.
 
 ---
 
-## Remaining
+## Active Tickets
 
-### Enter sources from legacy `cals.txt`
+### Ticket: Import missing legacy sources from `cals.txt`
 **Why:** The legacy system's source list in `cals.txt` may not be fully migrated to the new system. Any missing sources mean those calendars are not being ingested.
 
-**Fix:** Read `C:\Dev\ics-merge\cals.txt`, cross-reference against existing sources in the admin UI, and add any missing ones (Configure Sources → Add Source). Assign outputs and queue a rebuild for each.
+**Work:**
+1. Read `C:\Dev\ics-merge\cals.txt`.
+2. Cross-reference against existing sources in the admin UI.
+3. Add any missing sources in Configure Sources.
+4. Assign outputs and queue a rebuild for each imported source.
 
-### Limit Google sync to the same lookback window as ICS feeds
-**Why:** `listDesiredGoogleSyncRows` has no date filter — it writes every `event_instances` row that has an output rule, regardless of age. The ingest window is controlled by `DEFAULT_LOOKBACK_DAYS` (default 7), but past that window old event instances can accumulate in D1 and get written to Google unnecessarily on each rebuild.
+**Done when:** The active source inventory in the new system matches the legacy source list that still matters operationally.
 
-**Fix:** Add a `WHERE event_instances.occurrence_end_at >= ?` filter to `listDesiredGoogleSyncRows`, bound to `now - DEFAULT_LOOKBACK_DAYS`. This keeps Google sync consistent with what ICS feeds already expose and reduces subrequest pressure on large sources.
+### Ticket: Validate prune against real D1 and R2
+**Work:**
+1. Run prune against real D1 + R2 with representative stale snapshots and stale event rows.
+2. Record before/after counts for D1 rows and R2 objects.
+3. Confirm stale data is removed and active data remains intact.
+4. Document the exact validation steps and observed counts.
 
-**Note:** Events older than the lookback that already exist in Google Calendar will be treated as orphans and deleted on the next sync run. That is the correct behavior — they are outside the managed window.
+**Done when:** Real prune behavior is validated, measured, and documented.
 
-### Prune validation against real D1 + R2
-Prune logic passes FakeDb tests but hasn't been verified against real infrastructure at scale.
+### Ticket: Write the production migration runbook
+**Work:**
+1. Document exact migration order and deploy order for production.
+2. Include rollback and failure notes for the `google_targets` cutover and `0005` schema repair.
+3. Verify the runbook against current `wrangler.jsonc` bindings and current migration files.
 
-### Production migration runbook
-Run the D1 migrations through production and confirm the `google_targets` cutover migration completes before deploying code that no longer reads the legacy table.
+**Done when:** A current operator can execute the migration/deploy sequence from the document without filling in missing steps.
 
-### Google sync follow-up: subrequest-safe batching for large backfills
-**Why:** Live testing confirmed that the next real blocker is no longer only Google quota. Large source rebuilds can still fail with `Too many subrequests.`, which is a Worker execution limit. Current mitigation handles Google rate limits better, but it still performs too much Google reconciliation in one source run.
+### Ticket: Add richer operator sync drill-down
+**Why:** Inline source status is materially better now, but operators still have to infer too much from a compact summary.
 
-**Execution plan:**
-1. **Separate ingest from Google reconciliation**
-   - Keep ICS fetch/parse/materialize in the existing source job
-   - Stop doing full Google reconciliation inline at the end of `ingestSource()`
-2. **Add queued Google sync jobs**
-   - enqueue **per-source+target** Google sync jobs after ingest
-   - this isolates one Google calendar's quota/failure state from another and keeps chunk sizing predictable
-   - include cursor/offset state so work can continue across multiple runs
-3. **Process Google sync in bounded chunks**
-   - each job handles a fixed number of Google writes/deletes
-   - persist progress and enqueue the next chunk until drained
-   - treat Google delete `404` as success so queue retries do not fail on already-removed remote events
-4. **Keep status counters source-centric**
-   - continue showing `Events`, `Sync'd`, `Deferred`, `Errors`
-   - add “job still running” / “continuing sync” messaging while chunks are draining
-5. **Add tests for chunk continuation**
-   - verify partial chunk completion
-   - verify follow-up job enqueue
-   - verify no duplicate event creation across retries
-   - verify mid-chunk failure + re-enqueue resumes safely
-   - verify repeated delete chunk retries treat remote `404` as success
+**Work:**
+1. Add a source-centric history or detail drawer.
+2. Show latest queued/running/completed job timestamps.
+3. Show Google sync counts (`synced`, `deferred`, `errors`).
+4. Show latest source fetch error and latest Google sync error.
 
-**Acceptance:** A large source rebuild no longer ends with `Too many subrequests.` and can catch up over multiple queue runs.
-
-### Operator visibility: richer job timeline / source sync drill-down
-**Why:** Inline source status is now materially better, but operators still have to infer progress from a compact summary. For longer rebuilds and partial failures, deeper visibility would reduce confusion.
-
-**Fix:** Add a source-centric job history or detail drawer showing:
-- latest queued/running/completed job timestamps
-- Google sync counts (`synced`, `updated`, `skipped`, `failed`, `deferred`)
-- latest source fetch error
-- latest Google sync error
-
----
-
-## Completed Refactor Work
-
-The split model has been replaced in code by a unified `output_targets` table using immutable IDs. Google Calendar outbound sync now runs against that model.
-
-**Sequence matters — do in order:**
-
-### 1. Add `output_targets` table and seed system records (migration)
-New table columns:
-- `id TEXT PRIMARY KEY` — UUID, immutable relational key
-- `target_type TEXT NOT NULL` — `ics` or `google`
-- `slug TEXT NOT NULL UNIQUE` — human handle / URL segment (e.g. `family`, `grayson-clubs`)
-- `display_name TEXT NOT NULL` — shown in UI (e.g. `Family Feed`, `Grayson Clubs`)
-- `calendar_id TEXT` — Google Calendar ID, null for ICS outputs
-- `ownership_mode TEXT` — `managed_output` for Google; null for ICS
-- `is_system INTEGER NOT NULL DEFAULT 0` — 1 for the three built-in ICS outputs
-- `is_active INTEGER NOT NULL DEFAULT 1`
-- `created_at TEXT`, `updated_at TEXT`
-
-Seed system rows for `family`, `grayson`, `naomi` ICS outputs with `is_system = 1`.
-
-### 2. Migrate link and rule tables from `target_key` to `target_id` (migration)
-Add `target_id TEXT REFERENCES output_targets(id)` to:
-- `source_target_links`
-- `output_rules`
-- `google_event_links`
-
-Backfill `target_id` from system ICS rows (by slug match) and from `google_targets` rows. Update unique constraints. Remove `target_key` columns after cutover.
-
-### 3. Fold `google_targets` into `output_targets` (migration + repository)
-Completed in code and migration. Repository now reads/writes `output_targets` only. Legacy `google_targets` rows are migrated forward in `0004_output_targets_cutover.sql`.
-
-### 4. Refactor repository to use explicit target records (code)
-- Replace `TARGETS.includes(targetKey) ? 'ics' : 'google'` inference with explicit `target_type` from `output_targets`
-- Source API responses: `target_links` carry `target_id`, `target_type`, `display_name`, `icon`, `prefix`
-- Feed generation and output rule computation join by `target_id`
-- Collapse `listTargets()` into a single read from `output_targets`
-- Fix `getSourceById` to return link data (currently omits it — code-review issue 4)
-
-### 5. Update admin UI to select outputs by label (code)
-- `/api/targets` returns unified list: `id`, `target_type`, `display_name`, `slug`, `is_system`
-- Configure Sources uses `target_id` values for selections
-- Grouped selector: **ICS Feeds** / **Google Calendars**
-- Display human labels only — no slugs or IDs visible to users
-
-### 6. Add tests for unified target identity (tests)
-- Source links stored and retrieved by `target_id`
-- Mixed ICS + Google targets on one source
-- System outputs and user-created outputs coexisting
-- Create/delete/list target API round-trips
-- Legacy `target_key` backfill correctness
+**Done when:** Operators can inspect sync progress and failure state without leaving the admin or inferring from abbreviated summary text.
 
 ---
 
@@ -131,34 +63,60 @@ Completed. Ingest/source sync now reconciles linked Google outputs using `GOOGLE
 ### Google sync schema repair + live diagnostics
 Completed. Added `0005_google_event_links_nullable.sql`, runtime compatibility repair, actionable source status messaging, auto-refresh while jobs are active, and rate-limit mitigation for Google writes.
 
+### Make Google sync subrequest-safe for large backfills
+Completed. Google reconciliation now runs as queued `sync_google_target` jobs with per-source+target fan-out, chunked processing (`GOOGLE_SYNC_JOB_CHUNK_SIZE`), `has_more` re-enqueue, and delete-idempotency handling via the queue-driven path.
+
 ### Fix timezone handling for floating-time ICS events
 Completed. `parseICS` now reads calendar-level `X-WR-TIMEZONE`, floating local datetimes no longer get coerced to UTC with a fake trailing `Z`, and Google sync preserves wall-clock `dateTime` plus `timeZone` for those events.
 
----
+### Unescape RFC5545 text fields from upstream ICS feeds
+Completed. `parseICS` now unescapes escaped text in `SUMMARY`, `DESCRIPTION`, and `LOCATION`, so feeds that encode line breaks as `\\n` and punctuation as `\\,` / `\\;` display correctly in admin, generated ICS, and Google output sync.
+
+### Limit Google sync to the same lookback window as ICS feeds
+Completed. `listDesiredGoogleSyncRows` now filters by `DEFAULT_LOOKBACK_DAYS`, so Google reconciliation only manages the same recent event window that ICS feeds expose. This reduces unnecessary writes and lowers subrequest pressure during rebuilds.
+
+### Split admin into configuration and mobile-first event pages
+Completed. `/admin` remains the configuration console, and `/admin/events` is now a focused event-modification page optimized for phone use. The event page uses the existing instance/override APIs with a mobile-first layout and direct navigation from the main admin.
+
+### Fix static asset binding for authenticated admin pages
+Completed. `wrangler.jsonc` now binds static assets as `ASSETS`, which is required for `/admin` and `/admin/events` to load through `serveAdminAsset()`.
+
+### Make single-instance overrides visible immediately
+Completed. Override create/delete now recomputes the affected instance scope immediately, updates `output_rules` without a rebuild, reflects in ICS output on the next feed request, and queues Google reconciliation on the existing sync path. Covered by regression tests for immediate remove/restore behavior.
+
+### Tighten `/admin/events` mobile interaction
+Completed. The event page now deduplicates instance rows, toggles drawers in place instead of rerendering the full list, removes the dead outer `.catch()`, and simplifies source labels to user-facing names.
+
+### Reduce repository bootstrap overhead after cutover
+Completed. Repository bootstrap now uses an isolate-level success guard, legacy target backfill is set-based instead of N+1, and `listInstances` no longer uses the `&&` side-effect pattern.
 
 ---
 
 ## Done
 
-- [x] `deleteSource()` cascade made atomic with `db.batch()` — 2026-03-06
-- [x] `/admin` route auth guard added (`requireRole`) — 2026-03-06
-- [x] Source status `parse_status` display fixed (`parsed`/`parsed_no_blob` recognized as ok) — 2026-03-06
-- [x] Feed subscription URLs exposed in admin UI — 2026-03-06
-- [x] Per-source status columns (event count, last fetch, error) — 2026-03-06
-- [x] Modify Events redesigned as instance-first UI — 2026-03-06
-- [x] `getFeedContract` host derived from request origin / `PUBLIC_HOST` env var — 2026-03-06
-- [x] `runInTransaction()` non-atomicity documented in `TECH_DEBT.md` — 2026-03-06
-- [x] Admin UI migrated to static assets behind `/admin` auth gate — 2026-03-07
-- [x] Unified `output_targets` model implemented in repository/admin UI/tests — 2026-03-07
-- [x] `poll_interval_minutes` enforced in scheduler source selection — 2026-03-07
-- [x] `RECURRENCE-ID` remap updates existing series instances instead of creating duplicates — 2026-03-07
-- [x] FakeDb feed filtering now respects `source_deleted` and scheduler timing — 2026-03-07
-- [x] Google Calendar outbound sync implemented for linked Google outputs — 2026-03-07
-- [x] Repository cut over from `google_targets` to `output_targets` with legacy migration — 2026-03-07
-- [x] `google_event_links.google_event_id` made nullable so failed Google sync attempts persist real errors — 2026-03-08
-- [x] Admin source status now shows latest job / Google sync detail inline and auto-refreshes while jobs are active — 2026-03-08
-- [x] Google write loop now retries quota errors briefly and defers remaining work after persistent rate-limit failures — 2026-03-08
-- [x] Floating-time ICS events now respect `X-WR-TIMEZONE` and preserve local wall-clock times into Google sync — 2026-03-08
-- [x] Clipboard copy flow now handles denied permissions and resets button state correctly — 2026-03-08
-- [x] Top-level `loadDashboard()` call is now guarded with `.catch(...)` — 2026-03-08
-- [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired — 2026-03-08
+- [x] `deleteSource()` cascade made atomic with `db.batch()` - 2026-03-06
+- [x] `/admin` route auth guard added (`requireRole`) - 2026-03-06
+- [x] Source status `parse_status` display fixed (`parsed`/`parsed_no_blob` recognized as ok) - 2026-03-06
+- [x] Feed subscription URLs exposed in admin UI - 2026-03-06
+- [x] Per-source status columns (event count, last fetch, error) - 2026-03-06
+- [x] Modify Events redesigned as instance-first UI - 2026-03-06
+- [x] `getFeedContract` host derived from request origin / `PUBLIC_HOST` env var - 2026-03-06
+- [x] `runInTransaction()` non-atomicity documented in `TECH_DEBT.md` - 2026-03-06
+- [x] Admin UI migrated to static assets behind `/admin` auth gate - 2026-03-07
+- [x] Unified `output_targets` model implemented in repository/admin UI/tests - 2026-03-07
+- [x] `poll_interval_minutes` enforced in scheduler source selection - 2026-03-07
+- [x] `RECURRENCE-ID` remap updates existing series instances instead of creating duplicates - 2026-03-07
+- [x] FakeDb feed filtering now respects `source_deleted` and scheduler timing - 2026-03-07
+- [x] Google Calendar outbound sync implemented for linked Google outputs - 2026-03-07
+- [x] Repository cut over from `google_targets` to `output_targets` with legacy migration - 2026-03-07
+- [x] `google_event_links.google_event_id` made nullable so failed Google sync attempts persist real errors - 2026-03-08
+- [x] Admin source status now shows latest job / Google sync detail inline and auto-refreshes while jobs are active - 2026-03-08
+- [x] Google write loop now retries quota errors briefly and defers remaining work after persistent rate-limit failures - 2026-03-08
+- [x] Floating-time ICS events now respect `X-WR-TIMEZONE` and preserve local wall-clock times into Google sync - 2026-03-08
+- [x] RFC5545 escaped text now unescapes correctly on ingest (`\\n`, `\\,`, `\\;`) - 2026-03-08
+- [x] Google sync now respects the same lookback window as ICS feeds - 2026-03-08
+- [x] `/admin/events` added as a focused mobile-first event modification page - 2026-03-08
+- [x] Static asset binding added as `ASSETS` so `/admin` and `/admin/events` load in production - 2026-03-08
+- [x] Clipboard copy flow now handles denied permissions and resets button state correctly - 2026-03-08
+- [x] Top-level `loadDashboard()` call is now guarded with `.catch(...)` - 2026-03-08
+- [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired - 2026-03-08

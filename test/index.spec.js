@@ -324,6 +324,30 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE source_target_links') && sql.includes('SET target_id = (')) {
+      for (const row of this.sourceTargetLinks.filter((entry) => !entry.target_id)) {
+        const target = this.outputTargets.find((entry) => entry.slug === row.target_key);
+        if (target) row.target_id = target.id;
+      }
+      return;
+    }
+
+    if (sql.includes('UPDATE output_rules') && sql.includes('SET target_id = (')) {
+      for (const row of this.outputRules.filter((entry) => !entry.target_id)) {
+        const target = this.outputTargets.find((entry) => entry.slug === row.target_key);
+        if (target) row.target_id = target.id;
+      }
+      return;
+    }
+
+    if (sql.includes('UPDATE google_event_links') && sql.includes('SET target_id = (')) {
+      for (const row of this.googleEventLinks.filter((entry) => !entry.target_id)) {
+        const target = this.outputTargets.find((entry) => entry.slug === row.target_key);
+        if (target) row.target_id = target.id;
+      }
+      return;
+    }
+
     if (sql.includes('INSERT INTO source_snapshots')) {
       const [id, sourceId, fetchedAt, httpStatus, etag, lastModified, payloadBlobRef, parseStatus, parseErrorSummary] = values;
       this.sourceSnapshots.push({
@@ -529,13 +553,18 @@ class FakeDb {
 
     if (sql.includes('INSERT INTO output_rules')) {
       if (sql.includes('ON CONFLICT(id) DO UPDATE')) {
-        const [id, canonicalEventId, eventInstanceId, targetId, targetKey, derivedReason, createdAt, updatedAt] = values;
+        const hasExplicitIncludeState = values.length === 9;
+        const [id, canonicalEventId, eventInstanceId, targetId, targetKey] = values;
+        const includeState = hasExplicitIncludeState ? values[5] : 'included';
+        const derivedReason = hasExplicitIncludeState ? values[6] : values[5];
+        const createdAt = hasExplicitIncludeState ? values[7] : values[6];
+        const updatedAt = hasExplicitIncludeState ? values[8] : values[7];
         const existing = this.outputRules.find((row) => row.id === id);
         if (existing) {
           Object.assign(existing, {
             target_id: targetId,
             target_key: targetKey,
-            include_state: 'included',
+            include_state: includeState,
             derived_reason: derivedReason,
             updated_at: updatedAt,
           });
@@ -546,7 +575,7 @@ class FakeDb {
             event_instance_id: eventInstanceId,
             target_id: targetId,
             target_key: targetKey,
-            include_state: 'included',
+            include_state: includeState,
             derived_reason: derivedReason,
             created_at: createdAt,
             updated_at: updatedAt,
@@ -928,8 +957,8 @@ class FakeDb {
         });
       return rows.slice(0, values.at(-1) || 200);
     }
-    if (sql.includes('FROM event_instances WHERE canonical_event_id')) {
-      return this.eventInstances.filter((row) => row.canonical_event_id === values[0]);
+    if (sql.includes('FROM event_instances') && sql.includes('canonical_event_id = ?')) {
+      return this.eventInstances.filter((row) => row.canonical_event_id === values[0] && (!values[1] || row.id === values[1]));
     }
     if (sql.includes('FROM event_overrides')) {
       return this.eventOverrides.filter((row) => row.canonical_event_id === values[0] && !row.cleared_at);
@@ -1025,7 +1054,18 @@ class FakeDb {
             const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
             const instance = this.eventInstances.find((row) => row.id === rule.event_instance_id);
             const target = this.outputTargets.find((entry) => entry.id === rule.target_id);
-            return event && instance && target && target.target_type === 'google' && event.source_id === values[0] && !event.source_deleted && !instance.source_deleted && rule.include_state === 'included' && (!values[1] || rule.target_id === values[1]);
+            const cutoff = values[1];
+            const targetId = values.length > 2 ? values[2] : null;
+            return event &&
+              instance &&
+              target &&
+              target.target_type === 'google' &&
+              event.source_id === values[0] &&
+              !event.source_deleted &&
+              !instance.source_deleted &&
+              rule.include_state === 'included' &&
+              (!cutoff || String(instance.occurrence_end_at || '') >= String(cutoff)) &&
+              (!targetId || rule.target_id === targetId);
           })
           .map((rule) => {
             const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
@@ -1091,6 +1131,10 @@ class FakeDb {
     if (sql.includes('SELECT COUNT(*) AS count FROM sources')) {
       return { count: this.sources.length };
     }
+    if (sql.includes('SELECT canonical_events.id, canonical_events.source_id')) {
+      const event = this.canonicalEvents.find((row) => row.id === values[0]);
+      return event ? { id: event.id, source_id: event.source_id } : null;
+    }
     if (sql.includes('FROM canonical_events') && sql.includes('JOIN sources')) {
       const event = this.canonicalEvents.find((row) => row.id === values[0]);
       if (!event) return null;
@@ -1100,6 +1144,10 @@ class FakeDb {
         source_name: source?.name || '',
         owner_type: source?.owner_type || '',
       };
+    }
+    if (sql.includes('SELECT canonical_event_id, event_instance_id FROM event_overrides')) {
+      const override = this.eventOverrides.find((row) => row.id === values[0]);
+      return override ? { canonical_event_id: override.canonical_event_id, event_instance_id: override.event_instance_id } : null;
     }
     if (sql.includes('SELECT canonical_event_id FROM event_overrides')) {
       const override = this.eventOverrides.find((row) => row.id === values[0]);
@@ -1133,6 +1181,11 @@ beforeEach(() => {
       const url = new URL(request.url);
       if (url.pathname === '/admin.html') {
         return new Response('<!doctype html><html><body><h1>Admin Console</h1></body></html>', {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.pathname === '/admin-events.html') {
+        return new Response('<!doctype html><html><body><h1>Modify Events</h1></body></html>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
@@ -1338,6 +1391,17 @@ describe('family-scheduling worker', () => {
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(body).toContain('Admin Console');
     expect(env.ASSETS.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves the focused event admin shell on /admin/events', async () => {
+    const request = new Request('http://example.com/admin/events', { headers: { 'x-user-role': 'editor' } });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(body).toContain('Modify Events');
   });
 
   it('redirects the root path to /admin', async () => {
@@ -2268,6 +2332,145 @@ describe('family-scheduling worker', () => {
     );
   });
 
+  it('applies skip overrides immediately to feeds and queued google sync', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_override',
+      target_type: 'google',
+      slug: 'grayson_clubs',
+      display_name: 'Grayson Clubs',
+      calendar_id: 'grayson-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_override_sync',
+      name: 'grayson-override',
+      display_name: 'Grayson Override',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-override.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push(
+      {
+        id: 'stl_override_family',
+        source_id: 'src_override_sync',
+        target_id: null,
+        target_key: 'family',
+        target_type: 'ics',
+        icon: '🏒',
+        prefix: 'G:',
+        sort_order: 0,
+        is_enabled: 1,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'stl_override_google',
+        source_id: 'src_override_sync',
+        target_id: 'outt_google_override',
+        target_key: 'grayson_clubs',
+        target_type: 'google',
+        icon: '🏒',
+        prefix: '',
+        sort_order: 1,
+        is_enabled: 1,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+
+    let createdCount = 0;
+    const fetchMock = vi.fn(async (url, options = {}) => {
+      if (String(url) === 'https://example.com/grayson-override.ics') {
+        return new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:grayson-override-1',
+            'SUMMARY:Hockey Practice',
+            'DTSTART:20260310T010000Z',
+            'DTEND:20260310T023000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        );
+      }
+      if (String(url) === 'https://oauth2.googleapis.com/token') {
+        return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events' && options.method === 'POST') {
+        createdCount += 1;
+        return new Response(JSON.stringify({ id: `google-event-${createdCount}`, etag: `etag-${createdCount}` }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/google-event-1' && options.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_override_sync');
+    await drainQueue(env);
+
+    const eventId = db.canonicalEvents[0].id;
+    const instanceId = db.eventInstances[0].id;
+    let familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    expect(familyFeed).toContain('SUMMARY:G: 🏒 Hockey Practice');
+    expect(db.googleEventLinks).toHaveLength(1);
+
+    await repo.createOverride({
+      eventId,
+      eventInstanceId: instanceId,
+      overrideType: 'skip',
+      payload: { reason: 'Travel conflict' },
+      actorRole: 'editor',
+    });
+
+    expect(db.outputRules.find((rule) => rule.event_instance_id === instanceId && rule.target_key === 'family')?.include_state).toBe('excluded');
+    familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    expect(familyFeed).not.toContain('SUMMARY:G: 🏒 Hockey Practice');
+
+    await drainQueue(env);
+    expect(db.googleEventLinks).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/google-event-1',
+      expect.objectContaining({ method: 'DELETE' })
+    );
+
+    const overrideId = db.eventOverrides[0].id;
+    await repo.clearOverride(overrideId);
+
+    expect(db.outputRules.find((rule) => rule.event_instance_id === instanceId && rule.target_key === 'family')?.include_state).toBe('included');
+    familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    expect(familyFeed).toContain('SUMMARY:G: 🏒 Hockey Practice');
+
+    await drainQueue(env);
+    expect(db.googleEventLinks).toHaveLength(1);
+    expect(db.googleEventLinks[0].google_event_id).toBe('google-event-2');
+  });
+
   it('deletes stale google output events when a source is disabled', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
@@ -2477,6 +2680,166 @@ describe('family-scheduling worker', () => {
     expect(db.googleEventLinks).toHaveLength(1);
     expect(db.googleEventLinks[0].sync_status).toBe('error');
     expect(db.googleEventLinks[0].last_error).toContain('calendar write failed');
+  });
+
+  it('limits desired Google sync rows to the configured lookback window', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '7';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_lookback',
+      target_type: 'google',
+      slug: 'family_output',
+      display_name: 'Family Output',
+      calendar_id: 'family-output@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_google_lookback',
+      name: 'family-source',
+      display_name: 'Family Source',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-source.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_google_lookback',
+      source_id: 'src_google_lookback',
+      target_id: 'outt_google_lookback',
+      target_key: 'family_output',
+      target_type: 'google',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push(
+      {
+        id: 'ce_old',
+        source_id: 'src_google_lookback',
+        identity_key: 'old',
+        event_kind: 'single',
+        title: 'Old Event',
+        source_icon: '',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2025-01-01T10:00:00.000Z',
+        end_at: '2025-01-01T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2025-01-01T09:00:00.000Z',
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'ce_new',
+        source_id: 'src_google_lookback',
+        identity_key: 'new',
+        event_kind: 'single',
+        title: 'Upcoming Event',
+        source_icon: '',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2099-01-01T10:00:00.000Z',
+        end_at: '2099-01-01T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2099-01-01T09:00:00.000Z',
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      }
+    );
+    db.eventInstances.push(
+      {
+        id: 'ei_old',
+        canonical_event_id: 'ce_old',
+        occurrence_start_at: '2025-01-01T10:00:00.000Z',
+        occurrence_end_at: '2025-01-01T11:00:00.000Z',
+        recurrence_instance_key: '2025-01-01T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'ei_new',
+        canonical_event_id: 'ce_new',
+        occurrence_start_at: '2099-01-01T10:00:00.000Z',
+        occurrence_end_at: '2099-01-01T11:00:00.000Z',
+        recurrence_instance_key: '2099-01-01T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      }
+    );
+    db.outputRules.push(
+      {
+        id: 'out_old',
+        canonical_event_id: 'ce_old',
+        event_instance_id: 'ei_old',
+        target_id: 'outt_google_lookback',
+        target_key: 'family_output',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'out_new',
+        canonical_event_id: 'ce_new',
+        event_instance_id: 'ei_new',
+        target_id: 'outt_google_lookback',
+        target_key: 'family_output',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      }
+    );
+
+    const repo = new D1Repository(db, env);
+    const rows = await repo.listDesiredGoogleSyncRows('src_google_lookback');
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].canonical_event_id).toBe('ce_new');
+    expect(rows[0].event_instance_id).toBe('ei_new');
   });
 
   it('sends floating-time events to Google using the calendar timezone without forcing UTC', async () => {

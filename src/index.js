@@ -25,7 +25,12 @@ function requireFeedToken(request, env) {
   return null;
 }
 
-const ADMIN_ASSET_PATH = '/admin.html';
+function getAdminAssetPath(pathname) {
+  if (pathname === '/admin/events' || pathname === '/admin/events/') {
+    return '/admin-events.html';
+  }
+  return '/admin.html';
+}
 
 function getFeedCacheMaxAge(env) {
   const value = Number.parseInt(String(env.FEED_CACHE_MAX_AGE || FEED_CACHE_MAX_AGE_DEFAULT), 10);
@@ -34,7 +39,7 @@ function getFeedCacheMaxAge(env) {
 
 function buildAdminAssetRequest(request) {
   const url = new URL(request.url);
-  url.pathname = ADMIN_ASSET_PATH;
+  url.pathname = getAdminAssetPath(url.pathname);
   url.search = '';
   return new Request(url.toString(), request);
 }
@@ -67,7 +72,7 @@ export default {
         return Response.redirect(`${url.origin}/admin`, 302);
       }
 
-      if (pathname === '/admin' || pathname === '/admin/') {
+      if (pathname === '/admin' || pathname === '/admin/' || pathname === '/admin/events' || pathname === '/admin/events/') {
         const authError = await requireRole(request, env, ADMIN_ROLES);
         if (authError) return authError;
         return serveAdminAsset(request, env);
