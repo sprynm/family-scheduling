@@ -1,5 +1,19 @@
 const COPY_RESET_MS = 1500;
 const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
+const ICON_OPTIONS = [
+  { value: '', label: 'None' },
+  { value: '🏒', label: '🏒 Hockey' },
+  { value: '🏀', label: '🏀 Basketball' },
+  { value: '🏐', label: '🏐 Volleyball' },
+  { value: '⚾', label: '⚾ Baseball' },
+  { value: '🥍', label: '🥍 Lacrosse' },
+  { value: '𝄞', label: '𝄞 Music' },
+  { value: '🎭', label: '🎭 Theatre' },
+  { value: '🎓', label: '🎓 School' },
+  { value: '🎉', label: '🎉 Party' },
+  { value: '✈️', label: '✈️ Travel' },
+  { value: '🩺', label: '🩺 Medical' },
+];
 
 const statusEl = document.getElementById('status');
     const refreshBtn = document.getElementById('refresh');
@@ -49,6 +63,26 @@ const statusEl = document.getElementById('status');
 
     function renderRows(body, rowsHtml, colCount) {
       body.innerHTML = rowsHtml || '<tr><td colspan="' + (colCount || 4) + '" style="color:#aaa;font-style:italic">None</td></tr>';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function buildIconOptions(currentIcon) {
+      const normalizedCurrent = String(currentIcon || '').trim();
+      const options = [...ICON_OPTIONS];
+      if (normalizedCurrent && !options.some((option) => option.value === normalizedCurrent)) {
+        options.splice(1, 0, { value: normalizedCurrent, label: normalizedCurrent + ' Custom' });
+      }
+      return options
+        .map((option) => '<option value="' + escapeHtml(option.value) + '"' + (option.value === normalizedCurrent ? ' selected' : '') + '>' + escapeHtml(option.label) + '</option>')
+        .join('');
     }
 
     function getCheckboxTargets(containerEl) {
@@ -102,14 +136,15 @@ const statusEl = document.getElementById('status');
             const state = sourceRuleState.get(target.id) || { icon: '', prefix: '' };
             const label = (target.type === 'ics' ? 'ICS: ' : 'Google: ') + target.label;
             return '<div class="target-rule"><strong>' + label + '</strong>' +
-              '<label>Icon<input type="text" data-rule-target="' + target.id + '" data-rule-field="icon" value="' + (state.icon || '').replace(/"/g, '&quot;') + '" placeholder="optional emoji" /></label>' +
+              '<label>Icon<select data-rule-target="' + target.id + '" data-rule-field="icon">' + buildIconOptions(state.icon) + '</select></label>' +
               '<label>Prefix<input type="text" data-rule-target="' + target.id + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (target.type === 'ics' && target.slug === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
               '</div>';
           }).join('')
         : '';
 
-      sourceTargetRulesEl.querySelectorAll('input[data-rule-target]').forEach((input) => {
-        input.addEventListener('input', () => {
+      sourceTargetRulesEl.querySelectorAll('[data-rule-target]').forEach((input) => {
+        const eventName = input.tagName === 'SELECT' ? 'change' : 'input';
+        input.addEventListener(eventName, () => {
           const key = input.getAttribute('data-rule-target');
           const field = input.getAttribute('data-rule-field');
           if (!key || !field) return;
@@ -139,15 +174,6 @@ const statusEl = document.getElementById('status');
       const links = Array.isArray(source.target_links) ? source.target_links : [];
       const icons = [...new Set(links.map((l) => l.icon).filter(Boolean))];
       return icons.join(' ') || (source.icon || '');
-    }
-
-    function escapeHtml(value) {
-      return String(value || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
     }
 
     function extractJobErrorMessage(job) {

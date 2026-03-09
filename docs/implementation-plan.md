@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-09 (session 11)_
+_Updated: 2026-03-09_
 
 ## Vocabulary
 
@@ -44,6 +44,9 @@ The codebase is now centered on the unified `output_targets` model. Legacy `targ
 25. Single-instance overrides now recompute the affected output scope immediately and queue follow-up Google reconciliation without a source rebuild.
 26. `/admin/events` now deduplicates instance rows and toggles drawers in place without full-list rerender.
 27. Repository bootstrap work is isolate-cached, legacy target backfill is set-based, and `listInstances` no longer uses side-effect chaining.
+28. Source-to-output icon selection in admin uses a dropdown of common options instead of a free-text emoji field.
+29. Custom Google outputs now include configured icons in synced event summaries.
+30. `/api/instances` excludes stale `source_deleted` rows so corrected timezone rebuilds do not show duplicate pre-fix instances in admin.
 
 ---
 
@@ -147,117 +150,18 @@ Do not implement new features there.
 
 ---
 
-## Changelog
+## Recent Learnings
 
-### 2026-03-06 — Session 3
-
-**Features**
-- Modify Events UI redesigned as instance-first model: source picker auto-loads, flat dated instance list, inline drawer below clicked row, override form inside drawer, and a future-overrides table below.
-- ICS feed subscription URLs shown in admin Feeds table with full URL and copy-to-clipboard support.
-- Per-source status columns in admin Sources table: active event count, last fetch timestamp, and HTTP/parse status with error tooltip on hover.
-- New API routes: `GET /api/instances` and `GET /api/overrides`.
-
-**Bug fixes**
-- `deleteSource()` crashed with `no such column: event_id`; the actual column is `canonical_event_id`.
-- `/admin` HTML route was served without authentication; fixed with `requireRole`.
-- Future overrides table was filtering by override `created_at` instead of instance `occurrence_start_at`.
-- Admin JS syntax error caused by escaped quotes inside template literals.
-- Wrong column names in `listActiveOverrides`: `payload` -> `payload_json`, `actor_role` -> `created_by`.
-- Removed duplicate drawer-load call on row click.
-
-### 2026-03-07 — Session 4
-
-**Bug fixes**
-- Source status showed `error` for all sources because `parse_status` handling was too narrow.
-- `deleteSource()` cascade converted from sequential `.run()` calls to a single `db.batch()`.
-- Feed contract URLs now derive from request origin or `PUBLIC_HOST` instead of a hardcoded production hostname.
-
-**Decisions**
-- Confirmed direction: unified `output_targets` table replaces `google_targets` plus hardcoded ICS constants.
-- Admin UI template-literal shell was retired in favor of static assets.
-
-### 2026-03-07 — Session 5
-
-**Features**
-- Scheduler now respects `poll_interval_minutes` when selecting active sources for cron-driven ingest.
-- Google Calendar outbound sync added for linked Google outputs using `GOOGLE_SERVICE_ACCOUNT_JSON`.
-- Recurrence exception handling now remaps `RECURRENCE-ID` updates onto the existing series instance.
-
-**Refactor**
-- Repository cut over to `output_targets` as the live target model.
-- Legacy `google_targets` migration added in `0004_output_targets_cutover.sql`.
-
-### 2026-03-08 — Session 6
-
-**Operational findings**
-- The Worker could reach Google successfully, but writes initially failed because the Google Calendar API was not enabled on project `famcal-489417`.
-- Once the API was enabled, live sync confirmed a second production issue: large rebuilds hit Google `Rate Limit Exceeded`.
-- A generic `error` label in `/admin` hid actionable details; the data existed in D1, but the UI was not surfacing it.
-
-**Bug fixes**
-- Added `0005_google_event_links_nullable.sql` because the live schema still had `google_event_links.google_event_id NOT NULL`, which prevented failed sync attempts from being recorded.
-- Added runtime schema repair in `ensureSupportTables()` so older environments self-heal even before migrations are applied.
-- Fixed browser-side admin bug `TARGETS is not defined` after the target API cleanup.
-
-**Behavior changes**
-- Admin source rows now show the latest source job state and error detail inline.
-- Dashboard auto-refreshes while jobs are queued or running.
-- Google Calendar writes now retry brief rate-limit responses and defer the remainder of a source run after the first persistent quota failure.
-
-**Learnings**
-- Persisted job state is not enough if the UI collapses it into a generic `error`; operators need the exact failing subsystem and message in the primary table.
-- Google output sync is operationally distinct from ICS ingest. A source can ingest successfully and still partially fail on outbound Google writes.
-- Schema compatibility for error-state tables matters as much as success-path schema.
-
-### 2026-03-08 — Session 7
-
-**Bug fixes**
-- Floating-time ICS datetimes no longer have a fake trailing `Z` appended during ingest.
-- `parseICS` now reads `X-WR-TIMEZONE` from the VCALENDAR header and uses it as the fallback timezone when an event-level `TZID` is absent.
-- Google sync now sends floating local events to Google as wall-clock `dateTime` values paired with the parsed `timeZone`.
-
-**Operational follow-up**
-- Existing D1 rows produced before this fix need a rebuild to correct stored offsets and resync Google output events at the proper local time.
-
-**Learnings**
-- Calendar-level timezone metadata is not optional.
-- Time handling needs end-to-end tests, not only parser assertions.
-
-### 2026-03-08 — Session 8
-
-**Bug fixes**
-- RFC5545 escaped text is now unescaped on ingest for `SUMMARY`, `DESCRIPTION`, and `LOCATION`.
-- Google reconciliation now filters desired rows by `DEFAULT_LOOKBACK_DAYS`, preventing old instances outside the managed feed window from being re-written to Google on every rebuild.
-
-**Learnings**
-- Text normalization belongs at ingest, not in scattered renderers.
-- Escaping is symmetric work: if the system emits escaped ICS text, it also has to unescape the same format when reading upstream feeds.
-- Google sync scope should match the public feed contract.
-
-### 2026-03-08 — Session 9
-
-**Features**
-- Added `/admin/events` as a dedicated event-modification surface for mobile use.
-- Main `/admin` now links directly to the focused event page instead of forcing all work through the configuration-heavy console.
-
-**Learnings**
-- Event correction is the dominant mobile workflow, not source configuration.
-- A split admin is cleaner than trying to force one dense desktop page to become fully mobile-friendly for every task.
-
-### 2026-03-08 — Session 10
-
-**Operational fix**
-- Added `assets.binding = "ASSETS"` to `wrangler.jsonc` so the Worker can actually serve `/admin` and `/admin/events` through the authenticated asset path.
-
-**Review findings**
-- The mobile event page is the right architectural direction, but the first pass still needs polish:
-  - deduplicate event rows when one instance belongs to multiple outputs
-  - fix drawer behavior so toggling one card does not rerender the full list
-  - remove a small amount of avoidable code/UI noise from the page
-
-**Learnings**
-- Worker-side auth plus static assets requires an explicit asset binding; a directory alone is not enough.
-- Splitting the mobile workflow into its own page solved the larger usability problem, but it also made the next set of UI defects much easier to isolate and fix.
+1. Persisted job state is only useful if the primary admin table surfaces the failing subsystem and message directly.
+2. Google output sync is operationally distinct from ICS ingest. A source can ingest cleanly and still fail partially on outbound Google writes.
+3. Calendar-level timezone metadata is required. `X-WR-TIMEZONE` plus floating local datetimes must be preserved as wall-clock times, not coerced to UTC.
+4. Parser normalization belongs at ingest. RFC5545 escaped text and other wire-format concerns should be corrected once, not patched in multiple renderers.
+5. Event correction is the dominant mobile workflow. A split admin with a focused `/admin/events` surface is more workable than forcing one dense desktop page to do everything.
+6. Worker-side auth plus static assets requires an explicit `ASSETS` binding; the directory setting alone is insufficient.
+7. Immediate admin actions need immediate derived-state updates. Event overrides are not complete until their output scope is recomputed.
+8. Built-in system outputs must canonicalize to one stable identity. Mixing slug-based and ID-based references creates duplicate derived rows.
+9. Custom outputs should follow the same visual-decoration rules as system outputs unless there is a deliberate product reason not to.
+10. Timezone-correction rebuilds can leave stale deleted instance rows behind; admin queries must filter `source_deleted` state consistently.
 
 ### 2026-03-09 — Session 11
 

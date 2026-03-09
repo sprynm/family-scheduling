@@ -90,6 +90,12 @@ Completed. The event page now deduplicates instance rows, toggles drawers in pla
 ### Reduce repository bootstrap overhead after cutover
 Completed. Repository bootstrap now uses an isolate-level success guard, legacy target backfill is set-based instead of N+1, and `listInstances` no longer uses the `&&` side-effect pattern.
 
+### Improve icon selection and custom-output icon rendering
+Completed. Source-to-output icon selection now uses a dropdown of common icons in the admin UI, and custom Google output titles now include the configured icon in synced event summaries.
+
+### Hide stale timezone-migration instance rows from `/admin/events`
+Completed. `listInstances` now excludes `source_deleted` canonical events and `source_deleted` event instances, so the mobile/admin event list does not show stale pre-fix rows alongside corrected instances.
+
 ---
 
 ## Done

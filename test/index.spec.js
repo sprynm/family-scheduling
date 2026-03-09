@@ -917,6 +917,46 @@ class FakeDb {
       if (sql.includes('WHERE slug = ?')) rows = rows.filter((row) => row.slug === values[0]);
       return rows;
     }
+    if (sql.includes('SELECT\n        event_instances.id,') && sql.includes('sources.name AS source_name')) {
+      let rows = this.eventInstances
+        .map((instance) => {
+          const event = this.canonicalEvents.find((row) => row.id === instance.canonical_event_id);
+          const source = event ? this.sources.find((row) => row.id === event.source_id) : null;
+          if (!event || !source) return null;
+          return {
+            id: instance.id,
+            occurrence_start_at: instance.occurrence_start_at,
+            occurrence_end_at: instance.occurrence_end_at,
+            canonical_event_id: event.id,
+            title: event.title,
+            source_name: source.name,
+            owner_type: source.owner_type,
+            event_source_id: event.source_id,
+            event_source_deleted: event.source_deleted,
+            instance_source_deleted: instance.source_deleted,
+          };
+        })
+        .filter(Boolean);
+
+      if (sql.includes('event_instances.occurrence_start_at >= ?')) {
+        const now = String(values[0] || '');
+        rows = rows.filter((row) => String(row.occurrence_start_at || '') >= now);
+      }
+      if (sql.includes('canonical_events.source_id = ?')) {
+        const sourceId = values[sql.includes('event_instances.occurrence_start_at >= ?') ? 1 : 0];
+        rows = rows.filter((row) => row.event_source_id === sourceId);
+      }
+      if (sql.includes('canonical_events.source_deleted = 0')) {
+        rows = rows.filter((row) => !row.event_source_deleted);
+      }
+      if (sql.includes('event_instances.source_deleted = 0')) {
+        rows = rows.filter((row) => !row.instance_source_deleted);
+      }
+      return rows
+        .sort((a, b) => String(a.occurrence_start_at).localeCompare(String(b.occurrence_start_at)))
+        .slice(0, values.at(-1) || 200)
+        .map(({ event_source_id, event_source_deleted, instance_source_deleted, ...row }) => row);
+    }
     if (sql.includes('FROM event_instances') && sql.includes('JOIN canonical_events ON canonical_events.id = event_instances.canonical_event_id')) {
       return this.eventInstances
         .filter((instance) => {
@@ -1434,6 +1474,93 @@ describe('family-scheduling worker', () => {
     const body = await response.json();
     expect(response.status).toBe(200);
     expect(body.events.length).toBeGreaterThan(0);
+  });
+
+  it('omits source_deleted instance rows from /api/instances', async () => {
+    const db = env.APP_DB;
+    db.sources.push({
+      id: 'src_instances_filter',
+      name: 'instances-filter',
+      display_name: 'Instances Filter',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/filter.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push({
+      id: 'evt_instances_filter',
+      source_id: 'src_instances_filter',
+      identity_key: 'instances-filter',
+      event_kind: 'single',
+      title: 'Filter Me Once',
+      source_icon: '🏒',
+      source_prefix: 'G:',
+      description: '',
+      location: '',
+      start_at: '2099-01-01T18:00:00.000Z',
+      end_at: '2099-01-01T19:00:00.000Z',
+      timezone: 'UTC',
+      status: 'confirmed',
+      rrule: null,
+      series_until: null,
+      source_deleted: 0,
+      needs_review: 0,
+      source_changed_since_overlay: 0,
+      last_source_change_at: '2026-03-03T00:00:00.000Z',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    const source = db.sources.find((row) => row.id === 'src_instances_filter');
+    const event = db.canonicalEvents.find((row) => row.id === 'evt_instances_filter');
+    const activeInstance = {
+      id: 'inst_instances_filter_active',
+      canonical_event_id: event.id,
+      occurrence_start_at: '2099-01-01T18:00:00.000Z',
+      occurrence_end_at: '2099-01-01T19:00:00.000Z',
+      recurrence_instance_key: '2099-01-01T18:00:00.000Z',
+      provider_recurrence_id: null,
+      status: 'confirmed',
+      source_deleted: 0,
+      needs_review: 0,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    };
+    db.eventInstances.push(activeInstance);
+    db.eventInstances.push({
+      id: `${activeInstance.id}_stale`,
+      canonical_event_id: event.id,
+      occurrence_start_at: activeInstance.occurrence_start_at,
+      occurrence_end_at: activeInstance.occurrence_end_at,
+      recurrence_instance_key: `${activeInstance.recurrence_instance_key}_stale`,
+      provider_recurrence_id: null,
+      status: activeInstance.status,
+      source_deleted: 1,
+      needs_review: 0,
+      created_at: activeInstance.created_at,
+      updated_at: activeInstance.updated_at,
+    });
+
+    const request = new Request(`http://example.com/api/instances?source=${encodeURIComponent(source.id)}&future=1&limit=200`, {
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.instances.filter((row) => row.canonical_event_id === event.id)).toHaveLength(1);
   });
 
   it('rejects role header auth when dev header support is disabled', async () => {
@@ -2320,6 +2447,13 @@ describe('family-scheduling worker', () => {
     await drainQueue(env);
     expect(db.googleEventLinks).toHaveLength(1);
     expect(db.googleEventLinks[0].google_event_id).toBe('google-event-1');
+    const createCall = fetchMock.mock.calls.find(
+      ([url, options]) =>
+        String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events' &&
+        options?.method === 'POST'
+    );
+    expect(createCall).toBeTruthy();
+    expect(JSON.parse(createCall[1].body).summary).toBe('🏒 Hockey Practice');
 
     icsSummary = 'Hockey Practice Updated';
     const secondSync = await repo.ingestSource('src_google_sync');

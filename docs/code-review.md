@@ -1,76 +1,10 @@
 # Code Review
 
-_Updated: 2026-03-09 (session 11 — override immediacy and mobile cleanup)_
-
-## Change Log
-
-### 2026-03-07 — Session 5 review pass
-
-Full read of `src/index.js`, `src/lib/repository.js`, `src/lib/google-calendar.js`, `src/lib/constants.js`, `migrations/0003_output_targets.sql`, `migrations/0004_output_targets_cutover.sql`, `test/index.spec.js`.
-
-Verified: `npm test -- --run` — 25/25 passing.
-
-### 2026-03-08 — Session 6 live-ops review pass
-
-Reviewed live D1 job history and Google sync state after real rebuilds.
-
-Verified:
-- `npm test -- --run` — 30/30 passing
-- Remote D1 job records now persist real Google errors in `google_event_links.last_error`
-- Migration `0005_google_event_links_nullable.sql` applied remotely
-
-### 2026-03-08 — Session 7 timezone fix
-
-Fixed floating-time ICS event timezone handling. `X-WR-TIMEZONE` is now read from the VCALENDAR header and used as the fallback timezone for events with no `TZID` param. Floating local datetimes no longer have `Z` appended, so Google Calendar receives `dateTime` without a UTC marker and interprets it correctly in the given `timeZone`.
-
-Verified:
-- `npm test -- --run` — 35/35 passing
-- Added end-to-end regression coverage for floating-time Google sync payloads
-
-**After deploying:** queue a rebuild for all sources — existing D1 rows store the wrong UTC offset for floating-time events and must be re-ingested.
-
-### 2026-03-08 — Session 8 parser normalization
-
-Fixed RFC5545 text unescaping on ingest. `parseICS` now unescapes escaped text in `SUMMARY`, `DESCRIPTION`, and `LOCATION`, so upstream feeds that encode line breaks as `\\n` and punctuation as `\\,` / `\\;` display correctly throughout the system.
-
-Verified:
-- `npm test -- --run` — 36/36 passing
-- Added regression coverage for RFC5545 text unescaping
-
-### 2026-03-08 — Session 9 mobile event workflow
-
-Added a dedicated `/admin/events` page served from static assets behind the existing auth gate. This gives event modification a focused mobile-first surface instead of forcing phone users through the full configuration console.
-
-Verified:
-- `npm test -- --run` — 38/38 passing
-- Added route coverage for `/admin/events`
-
-### 2026-03-08 — Session 10 mobile events UI review
-
-Reviewed `public/admin-events.html`, `public/admin-events.js`, and `public/admin.css` against the live behavior. The main actionable issues are duplicate instance rows and full-list rerender on drawer toggle. Several other findings from the first pass were reclassified as lower-value UX follow-up rather than bugs.
-
-### 2026-03-08 — Session 10 asset binding fix
-
-Fixed the runtime issue where `/admin` and `/admin/events` returned `Admin assets binding is required`. `wrangler.jsonc` now binds static assets explicitly as `ASSETS`.
-
-### 2026-03-09 — Session 11 immediate override and mobile cleanup
-
-Fixed the session-10 mobile defects and the follow-on repository issues:
-- single-instance overrides now update derived output state immediately and queue Google reconciliation without waiting for cron or rebuild
-- `/admin/events` deduplicates multi-output instance rows and toggles drawers in place
-- repository bootstrap now short-circuits after first success in an isolate
-- legacy target backfill now uses set-based updates
-- `listInstances` no longer relies on `conditions.push(...) && binds.push(...)`
-- normalized system target identity so output-rule upserts do not create duplicate rows when legacy key-based rows meet ID-based reconciles
-
-Verified:
-- `npm test -- --run` — 39/39 passing
-
----
+_Updated: 2026-03-09_
 
 ## Review Result
 
-The previous correctness blockers and the session-10 mobile defects are fixed. Remaining work is operational follow-through, not an identified application bug.
+Current code review status is clean. The earlier correctness blockers are fixed, and the remaining work is operational follow-through rather than an identified application bug.
 
 ---
 
@@ -105,6 +39,8 @@ The previous correctness blockers and the session-10 mobile defects are fixed. R
 - **Single-instance override effects are immediate.** Override create/delete now recomputes the affected instance scope immediately and queues Google reconciliation on the existing sync path, so the admin no longer waits for a rebuild to see the result.
 - **The mobile event page no longer duplicates or flashes rows.** `/admin/events` now deduplicates multi-output instances and toggles drawers in place.
 - **Repository bootstrap overhead is reduced.** Support-table/bootstrap work is skipped after first success within an isolate, and the legacy backfill path is set-based rather than N+1.
+- **Custom Google outputs now honor configured icons.** Synced event summaries for managed Google outputs now include the configured icon instead of dropping decoration for non-system targets.
+- **Admin instance queries now hide stale migration rows.** `/api/instances` filters out `source_deleted` events and instances, so timezone-correction rebuilds do not present stale and corrected rows side by side.
 
 ---
 
@@ -146,5 +82,5 @@ No active code defects were identified in this pass after the session-11 fixes. 
 ## Verification
 
 1. `npm test -- --run`
-2. 39/39 passing
+2. 40/40 passing
 3. Full read: `src/index.js`, `src/lib/ics.js`, `src/lib/repository.js`, `public/admin.html`, `public/admin-events.html`, `public/admin-events.js`, `public/admin.css`, `wrangler.jsonc`, `test/index.spec.js`

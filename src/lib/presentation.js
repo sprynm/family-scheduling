@@ -26,14 +26,15 @@ function detectFallbackIcon(title) {
 
 export function decorateEventSummary({ target, title, sourceIcon = '', sourcePrefix = '' }) {
   const resolvedIcon = String(sourceIcon || '').trim() || detectFallbackIcon(title);
+  const resolvedPrefix = String(sourcePrefix || '').trim();
 
   if (target === 'family') {
-    return joinParts([sourcePrefix, resolvedIcon, title]);
+    return joinParts([resolvedPrefix, resolvedIcon, title]);
   }
 
   if (target === 'grayson' || target === 'naomi') {
     return joinParts([resolvedIcon, title]);
   }
 
-  return String(title || '').trim();
+  return joinParts([resolvedIcon, title]);
 }

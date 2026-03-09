@@ -887,6 +887,8 @@ export class D1Repository {
       conditions.push('canonical_events.source_id = ?');
       binds.push(sourceId);
     }
+    conditions.push('canonical_events.source_deleted = 0');
+    conditions.push('event_instances.source_deleted = 0');
     if (outputKey) {
       sql += ` JOIN output_rules ON output_rules.canonical_event_id = canonical_events.id AND output_rules.include_state = 'included'
                LEFT JOIN output_targets output_filter_target
