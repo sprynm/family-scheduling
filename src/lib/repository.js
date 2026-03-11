@@ -541,14 +541,19 @@ export class D1Repository {
         });
       }
     }
+    const googleLookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
+    const googleLookbackCutoff = new Date();
+    googleLookbackCutoff.setUTCDate(googleLookbackCutoff.getUTCDate() - googleLookbackDays);
     const googleCountsResult = await this.db.prepare(
       `SELECT
          canonical_events.source_id,
-         COUNT(output_rules.id) AS desired_count,
+         COUNT(output_rules.id) AS in_scope_count,
          SUM(CASE WHEN google_event_links.sync_status = 'synced' AND google_event_links.google_event_id IS NOT NULL THEN 1 ELSE 0 END) AS synced_count,
+         SUM(CASE WHEN google_event_links.sync_status = 'error' AND google_event_links.last_error LIKE 'Deferred after rate limit:%' THEN 1 ELSE 0 END) AS deferred_count,
          SUM(CASE WHEN google_event_links.sync_status = 'error' AND (google_event_links.last_error IS NULL OR google_event_links.last_error NOT LIKE 'Deferred after rate limit:%') THEN 1 ELSE 0 END) AS error_count
        FROM output_rules
        JOIN canonical_events ON canonical_events.id = output_rules.canonical_event_id
+       JOIN event_instances ON event_instances.id = output_rules.event_instance_id
        JOIN output_targets ON output_targets.id = output_rules.target_id AND output_targets.target_type = 'google'
        LEFT JOIN google_event_links
          ON google_event_links.canonical_event_id = output_rules.canonical_event_id
@@ -559,14 +564,16 @@ export class D1Repository {
         )
        WHERE output_rules.include_state = 'included'
          AND canonical_events.source_deleted = 0
+         AND event_instances.source_deleted = 0
+         AND event_instances.occurrence_end_at >= ?
        GROUP BY canonical_events.source_id`
-    ).all();
+    ).bind(googleLookbackCutoff.toISOString()).all();
     const googleCountsBySource = new Map(
       (googleCountsResult.results || []).map((row) => [
         row.source_id,
         {
           synced: Number(row.synced_count || 0),
-          deferred: Math.max(Number(row.desired_count || 0) - Number(row.synced_count || 0) - Number(row.error_count || 0), 0),
+          deferred: Number(row.deferred_count || 0),
           errors: Number(row.error_count || 0),
         },
       ])

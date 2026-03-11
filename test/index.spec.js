@@ -1044,26 +1044,34 @@ class FakeDb {
       return Array.from(grouped.values());
     }
     if (
-      sql.includes('COUNT(output_rules.id) AS desired_count') &&
+      sql.includes('COUNT(output_rules.id) AS in_scope_count') &&
       sql.includes("google_event_links.sync_status = 'synced'") &&
+      sql.includes('JOIN event_instances ON event_instances.id = output_rules.event_instance_id') &&
       sql.includes('FROM output_rules')
     ) {
+      const lookbackCutoff = String(values[0] || '');
       const grouped = new Map();
       for (const rule of this.outputRules) {
         const event = this.canonicalEvents.find((candidate) => candidate.id === rule.canonical_event_id);
+        const instance = this.eventInstances.find((candidate) => candidate.id === rule.event_instance_id);
         if (!event) continue;
         const target = this.outputTargets.find((entry) => entry.id === rule.target_id);
-        if (!target || target.target_type !== 'google' || rule.include_state !== 'included' || event.source_deleted) continue;
+        if (!instance) continue;
+        if (!target || target.target_type !== 'google' || rule.include_state !== 'included' || event.source_deleted || instance.source_deleted) continue;
+        if (lookbackCutoff && String(instance.occurrence_end_at || '') < lookbackCutoff) continue;
         const current = grouped.get(event.source_id) || {
           source_id: event.source_id,
-          desired_count: 0,
+          in_scope_count: 0,
           synced_count: 0,
+          deferred_count: 0,
           error_count: 0,
         };
-        current.desired_count += 1;
+        current.in_scope_count += 1;
         const link = this.googleEventLinks.find((entry) => entry.canonical_event_id === rule.canonical_event_id && entry.event_instance_id === rule.event_instance_id && ((entry.target_id && entry.target_id === rule.target_id) || entry.target_key === rule.target_key));
         if (link?.sync_status === 'synced' && link.google_event_id) {
           current.synced_count += 1;
+        } else if (link?.sync_status === 'error' && String(link.last_error || '').startsWith('Deferred after rate limit:')) {
+          current.deferred_count += 1;
         } else if (link?.sync_status === 'error' && !String(link.last_error || '').startsWith('Deferred after rate limit:')) {
           current.error_count += 1;
         }
@@ -1398,6 +1406,304 @@ describe('family-scheduling worker', () => {
     expect(source.latest_google_sync_error?.message).toContain('disabled');
     expect(source.latest_google_sync_error?.error_count).toBe(1);
     expect(source.google_sync_counts).toEqual({ synced: 0, deferred: 0, errors: 1 });
+  });
+
+  it('counts only in-scope rate-limited rows as deferred google sync work', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '7';
+    const db = new FakeDb();
+    env.APP_DB = db;
+
+    db.sources.push({
+      id: 'src_sync_counts',
+      name: 'grayson-hockey',
+      display_name: 'Grayson Hockey',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-hockey.ics',
+      icon: '🏒',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.outputTargets.push({
+      id: 'outt_sync_counts',
+      target_type: 'google',
+      slug: 'grayson_clubs',
+      display_name: 'Grayson Clubs',
+      calendar_id: 'grayson-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    db.canonicalEvents.push(
+      {
+        id: 'ce_synced',
+        source_id: 'src_sync_counts',
+        identity_key: 'synced',
+        event_kind: 'single',
+        title: 'Upcoming Synced',
+        source_icon: '🏒',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2099-01-01T10:00:00.000Z',
+        end_at: '2099-01-01T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2099-01-01T09:00:00.000Z',
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'ce_deferred',
+        source_id: 'src_sync_counts',
+        identity_key: 'deferred',
+        event_kind: 'single',
+        title: 'Upcoming Deferred',
+        source_icon: '🏒',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2099-01-02T10:00:00.000Z',
+        end_at: '2099-01-02T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2099-01-02T09:00:00.000Z',
+        created_at: '2099-01-02T09:00:00.000Z',
+        updated_at: '2099-01-02T09:00:00.000Z',
+      },
+      {
+        id: 'ce_error',
+        source_id: 'src_sync_counts',
+        identity_key: 'error',
+        event_kind: 'single',
+        title: 'Upcoming Error',
+        source_icon: '🏒',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2099-01-03T10:00:00.000Z',
+        end_at: '2099-01-03T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2099-01-03T09:00:00.000Z',
+        created_at: '2099-01-03T09:00:00.000Z',
+        updated_at: '2099-01-03T09:00:00.000Z',
+      },
+      {
+        id: 'ce_old',
+        source_id: 'src_sync_counts',
+        identity_key: 'old',
+        event_kind: 'single',
+        title: 'Old Past Event',
+        source_icon: '🏒',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: '2025-01-01T10:00:00.000Z',
+        end_at: '2025-01-01T11:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2025-01-01T09:00:00.000Z',
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      }
+    );
+
+    db.eventInstances.push(
+      {
+        id: 'ei_synced',
+        canonical_event_id: 'ce_synced',
+        occurrence_start_at: '2099-01-01T10:00:00.000Z',
+        occurrence_end_at: '2099-01-01T11:00:00.000Z',
+        recurrence_instance_key: '2099-01-01T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'ei_deferred',
+        canonical_event_id: 'ce_deferred',
+        occurrence_start_at: '2099-01-02T10:00:00.000Z',
+        occurrence_end_at: '2099-01-02T11:00:00.000Z',
+        recurrence_instance_key: '2099-01-02T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2099-01-02T09:00:00.000Z',
+        updated_at: '2099-01-02T09:00:00.000Z',
+      },
+      {
+        id: 'ei_error',
+        canonical_event_id: 'ce_error',
+        occurrence_start_at: '2099-01-03T10:00:00.000Z',
+        occurrence_end_at: '2099-01-03T11:00:00.000Z',
+        recurrence_instance_key: '2099-01-03T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2099-01-03T09:00:00.000Z',
+        updated_at: '2099-01-03T09:00:00.000Z',
+      },
+      {
+        id: 'ei_old',
+        canonical_event_id: 'ce_old',
+        occurrence_start_at: '2025-01-01T10:00:00.000Z',
+        occurrence_end_at: '2025-01-01T11:00:00.000Z',
+        recurrence_instance_key: '2025-01-01T10:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      }
+    );
+
+    db.outputRules.push(
+      {
+        id: 'out_synced',
+        canonical_event_id: 'ce_synced',
+        event_instance_id: 'ei_synced',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2099-01-01T09:00:00.000Z',
+        updated_at: '2099-01-01T09:00:00.000Z',
+      },
+      {
+        id: 'out_deferred',
+        canonical_event_id: 'ce_deferred',
+        event_instance_id: 'ei_deferred',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2099-01-02T09:00:00.000Z',
+        updated_at: '2099-01-02T09:00:00.000Z',
+      },
+      {
+        id: 'out_error',
+        canonical_event_id: 'ce_error',
+        event_instance_id: 'ei_error',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2099-01-03T09:00:00.000Z',
+        updated_at: '2099-01-03T09:00:00.000Z',
+      },
+      {
+        id: 'out_old',
+        canonical_event_id: 'ce_old',
+        event_instance_id: 'ei_old',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        include_state: 'included',
+        derived_reason: 'seed',
+        created_at: '2025-01-01T09:00:00.000Z',
+        updated_at: '2025-01-01T09:00:00.000Z',
+      }
+    );
+
+    db.googleEventLinks.push(
+      {
+        id: 'gel_synced',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        canonical_event_id: 'ce_synced',
+        event_instance_id: 'ei_synced',
+        google_event_id: 'google-synced',
+        google_etag: '"etag-1"',
+        last_synced_hash: 'hash-1',
+        last_synced_at: '2099-01-01T12:00:00.000Z',
+        sync_status: 'synced',
+        last_error: null,
+      },
+      {
+        id: 'gel_deferred',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        canonical_event_id: 'ce_deferred',
+        event_instance_id: 'ei_deferred',
+        google_event_id: null,
+        google_etag: null,
+        last_synced_hash: null,
+        last_synced_at: '2099-01-02T12:00:00.000Z',
+        sync_status: 'error',
+        last_error: 'Deferred after rate limit: Rate Limit Exceeded',
+      },
+      {
+        id: 'gel_error',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        canonical_event_id: 'ce_error',
+        event_instance_id: 'ei_error',
+        google_event_id: null,
+        google_etag: null,
+        last_synced_hash: null,
+        last_synced_at: '2099-01-03T12:00:00.000Z',
+        sync_status: 'error',
+        last_error: 'Google Calendar API is disabled.',
+      },
+      {
+        id: 'gel_old',
+        target_id: 'outt_sync_counts',
+        target_key: 'grayson_clubs',
+        canonical_event_id: 'ce_old',
+        event_instance_id: 'ei_old',
+        google_event_id: null,
+        google_etag: null,
+        last_synced_hash: null,
+        last_synced_at: '2025-01-01T12:00:00.000Z',
+        sync_status: 'error',
+        last_error: 'Deferred after rate limit: old row should not count',
+      }
+    );
+
+    const repo = new D1Repository(db, env);
+    const [source] = await repo.listSources();
+
+    expect(source.google_sync_counts).toEqual({ synced: 1, deferred: 1, errors: 1 });
   });
 
   it('rejects missing feed token', async () => {
