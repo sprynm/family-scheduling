@@ -86,7 +86,7 @@ flowchart LR
 | Output type | How it works | Status |
 |---|---|---|
 | ICS feed | Generated on-demand from `output_rules` when a consumer requests the URL | Live |
-| Google Calendar | Written to via Google Calendar API on each sync cycle | Not yet implemented |
+| Google Calendar | Written to via Google Calendar API on each sync cycle | Live |
 
 ### ICS Output Configuration (Planned)
 

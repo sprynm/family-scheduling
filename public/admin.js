@@ -1,4 +1,19 @@
 const COPY_RESET_MS = 1500;
+const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
+const ICON_OPTIONS = [
+  { value: '', label: 'None' },
+  { value: '🏒', label: '🏒 Hockey' },
+  { value: '🏀', label: '🏀 Basketball' },
+  { value: '🏐', label: '🏐 Volleyball' },
+  { value: '⚾', label: '⚾ Baseball' },
+  { value: '🥍', label: '🥍 Lacrosse' },
+  { value: '𝄞', label: '𝄞 Music' },
+  { value: '🎭', label: '🎭 Theatre' },
+  { value: '🎓', label: '🎓 School' },
+  { value: '🎉', label: '🎉 Party' },
+  { value: '✈️', label: '✈️ Travel' },
+  { value: '🩺', label: '🩺 Medical' },
+];
 
 const statusEl = document.getElementById('status');
     const refreshBtn = document.getElementById('refresh');
@@ -39,6 +54,7 @@ const statusEl = document.getElementById('status');
     const sourceRuleState = new Map();
     let openDrawerInstId = null;
     let allInstances = [];
+    let autoRefreshTimer = null;
 
     function setStatus(message, isError) {
       statusEl.textContent = message;
@@ -47,6 +63,26 @@ const statusEl = document.getElementById('status');
 
     function renderRows(body, rowsHtml, colCount) {
       body.innerHTML = rowsHtml || '<tr><td colspan="' + (colCount || 4) + '" style="color:#aaa;font-style:italic">None</td></tr>';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function buildIconOptions(currentIcon) {
+      const normalizedCurrent = String(currentIcon || '').trim();
+      const options = [...ICON_OPTIONS];
+      if (normalizedCurrent && !options.some((option) => option.value === normalizedCurrent)) {
+        options.splice(1, 0, { value: normalizedCurrent, label: normalizedCurrent + ' Custom' });
+      }
+      return options
+        .map((option) => '<option value="' + escapeHtml(option.value) + '"' + (option.value === normalizedCurrent ? ' selected' : '') + '>' + escapeHtml(option.label) + '</option>')
+        .join('');
     }
 
     function getCheckboxTargets(containerEl) {
@@ -100,14 +136,15 @@ const statusEl = document.getElementById('status');
             const state = sourceRuleState.get(target.id) || { icon: '', prefix: '' };
             const label = (target.type === 'ics' ? 'ICS: ' : 'Google: ') + target.label;
             return '<div class="target-rule"><strong>' + label + '</strong>' +
-              '<label>Icon<input type="text" data-rule-target="' + target.id + '" data-rule-field="icon" value="' + (state.icon || '').replace(/"/g, '&quot;') + '" placeholder="optional emoji" /></label>' +
+              '<label>Icon<select data-rule-target="' + target.id + '" data-rule-field="icon">' + buildIconOptions(state.icon) + '</select></label>' +
               '<label>Prefix<input type="text" data-rule-target="' + target.id + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (target.type === 'ics' && target.slug === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
               '</div>';
           }).join('')
         : '';
 
-      sourceTargetRulesEl.querySelectorAll('input[data-rule-target]').forEach((input) => {
-        input.addEventListener('input', () => {
+      sourceTargetRulesEl.querySelectorAll('[data-rule-target]').forEach((input) => {
+        const eventName = input.tagName === 'SELECT' ? 'change' : 'input';
+        input.addEventListener(eventName, () => {
           const key = input.getAttribute('data-rule-target');
           const field = input.getAttribute('data-rule-field');
           if (!key || !field) return;
@@ -139,6 +176,90 @@ const statusEl = document.getElementById('status');
       return icons.join(' ') || (source.icon || '');
     }
 
+    function extractJobErrorMessage(job) {
+      return job && job.error && typeof job.error.message === 'string' ? job.error.message : '';
+    }
+
+    function extractGoogleSyncFailure(source) {
+      const job = source.latest_job || null;
+      const failedCount = Number(job && job.summary && job.summary.googleSync ? job.summary.googleSync.failed || 0 : 0);
+      const googleError = source.latest_google_sync_error || null;
+      if (!failedCount && !googleError) return null;
+      return {
+        count: failedCount || Number(googleError?.error_count || 0),
+        message: googleError && googleError.message ? googleError.message : 'Google output sync failed.',
+      };
+    }
+
+    function buildGoogleSyncMetrics(source) {
+      const counts = source.google_sync_counts || {};
+      return [
+        'Events: ' + Number(source.event_count || 0),
+        "Sync'd: " + Number(counts.synced || 0),
+        'Deferred: ' + Number(counts.deferred || 0),
+        'Errors: ' + Number(counts.errors || 0),
+      ];
+    }
+
+    function buildSourceStatus(source) {
+      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob'].includes(source.last_parse_status);
+      const latestJob = source.latest_job || null;
+      const latestJobError = extractJobErrorMessage(latestJob);
+      const googleFailure = extractGoogleSyncFailure(source);
+      const metrics = buildGoogleSyncMetrics(source);
+
+      if (!source.last_parse_status && !latestJob) {
+        return { tone: 'hint', label: 'never', detail: '', metrics };
+      }
+
+      if (latestJob && latestJob.status === 'queued') {
+        return {
+          tone: 'pending',
+          label: 'queued',
+          detail: 'Rebuild is queued and waiting to run.',
+          metrics,
+        };
+      }
+
+      if (latestJob && latestJob.status === 'running') {
+        return {
+          tone: 'pending',
+          label: 'running',
+          detail: 'Rebuild is currently in progress.',
+          metrics,
+        };
+      }
+
+      if (latestJob && latestJob.status === 'failed') {
+        return {
+          tone: 'error',
+          label: 'error',
+          detail: latestJobError || 'Latest rebuild failed.',
+          metrics,
+        };
+      }
+
+      if (googleFailure) {
+        return {
+          tone: 'warn',
+          label: 'partial',
+          detail: (googleFailure.count > 0 ? googleFailure.count + ' Google sync failures. ' : '') + googleFailure.message,
+          metrics,
+        };
+      }
+
+      if (parseOk) {
+        return { tone: 'ok', label: 'ok', detail: '', metrics };
+      }
+
+      return {
+        tone: 'error',
+        label: 'error',
+        detail: source.last_parse_error || 'Latest fetch or parse failed.',
+        metrics,
+      };
+    }
+
     async function fetchJson(url, options) {
       const response = await fetch(url, options);
       if (!response.ok) {
@@ -157,6 +278,10 @@ const statusEl = document.getElementById('status');
     async function loadDashboard() {
       refreshBtn.disabled = true;
       rebuildBtn.disabled = true;
+      if (autoRefreshTimer) {
+        clearTimeout(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
       setStatus('Loading...', false);
       try {
         const [sourcesPayload, eventsPayload, jobsPayload, targetsPayload, contractsPayload] = await Promise.all([
@@ -173,6 +298,7 @@ const statusEl = document.getElementById('status');
         const outputs = targetsPayload.targets || [];
         const icsTargets = outputs.filter((target) => target.target_type === 'ics' && Number(target.is_system));
         const googleTargets = outputs.filter((target) => target.target_type === 'google');
+        const activeJobs = jobs.filter((job) => job.status === 'queued' || job.status === 'running');
         metricSources.textContent = String(sources.length);
         metricEvents.textContent = String(events.length);
         metricJobs.textContent = String(jobs.length);
@@ -227,16 +353,43 @@ const statusEl = document.getElementById('status');
           sourcesBody,
           sortedSources.slice(0, 30).map((s) => {
             const lastFetch = s.last_fetched_at ? new Date(s.last_fetched_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
-            const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob'].includes(s.last_parse_status);
-            const statusCell = !s.last_parse_status ? '<span class="hint">never</span>'
-              : parseOk ? '<span style="color:#1a7f37">ok</span>'
-              : '<span style="color:#a00" title="' + (s.last_parse_error || '').replace(/"/g, '&quot;') + '">error</span>';
+            const status = buildSourceStatus(s);
+            const syncCounts = s.google_sync_counts || {};
+            const statusStyle = status.tone === 'ok'
+              ? 'color:#1a7f37'
+              : status.tone === 'hint'
+                ? 'color:#6b7280'
+                : status.tone === 'pending'
+                  ? 'color:#9a6700'
+                  : status.tone === 'warn'
+                    ? 'color:#9a6700'
+                    : 'color:#a00';
+            const detailStyle = status.tone === 'pending' || status.tone === 'warn' ? 'color:#9a6700' : 'color:#7a1c1c';
+            const sourceCell = '<div>' +
+              '<div style="font-weight:600">' + escapeHtml(s.display_name || s.name || '') + '</div>' +
+              '<div class="hint" style="margin-top:0.15rem">' + escapeHtml(s.owner_type || '') + '</div>' +
+              '<div class="hint" style="margin-top:0.25rem; max-width:22rem; white-space:normal">' + escapeHtml(buildOutputLabels(s) || 'No outputs') + '</div>' +
+              '</div>';
+            const eventsCell = '<div>' +
+              '<div style="font-weight:600">' + Number(s.event_count || 0) + '</div>' +
+              '<div class="hint">from feed</div>' +
+              '</div>';
+            const syncDefCell = '<div>' +
+              '<div>Sync\'d: ' + Number(syncCounts.synced || 0) + '</div>' +
+              '<div>Deferred: ' + Number(syncCounts.deferred || 0) + '</div>' +
+              '</div>';
+            const statusCell = '<div>' +
+              '<span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span>' +
+              '<div class="hint" style="max-width:28rem; white-space:normal; color:#4b5563; margin-top:0.15rem">' +
+                '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
+                '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+              '</div>' +
+              (status.detail ? '<div class="hint" style="max-width:28rem; white-space:normal; ' + detailStyle + '; margin-top:0.15rem" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '') +
+              '</div>';
             return '<tr>' +
-            '<td>' + (s.display_name || s.name || '') + '</td>' +
-            '<td>' + (s.owner_type || '') + '</td>' +
-            '<td>' + buildOutputLabels(s) + '</td>' +
-            '<td>' + (s.event_count || 0) + '</td>' +
-            '<td style="white-space:nowrap;font-size:0.8rem">' + lastFetch + '</td>' +
+            '<td>' + sourceCell + '</td>' +
+            '<td>' + eventsCell + '</td>' +
+            '<td>' + syncDefCell + '</td>' +
             '<td>' + statusCell + '</td>' +
             '<td><div class="actions">' +
             '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
@@ -245,7 +398,7 @@ const statusEl = document.getElementById('status');
             '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
             '</div></td></tr>';
           }).join(''),
-          6
+          5
         );
 
         document.querySelectorAll('.rebuild-source').forEach((btn) => {
@@ -387,12 +540,19 @@ const statusEl = document.getElementById('status');
         renderRows(
           jobsBody,
           jobs.slice(0, 20).map((j) =>
-            '<tr><td>' + (j.job_type || '') + '</td><td>' + (j.scope_type || 'system') + '</td><td>' + (j.status || '') + '</td></tr>'
+            '<tr><td>' + (j.job_type || '') + '</td><td>' + (j.scope_type || 'system') + '</td><td>' + (j.status || '') + (j.error_json ? '<div class="hint" style="max-width:24rem; white-space:normal; color:#7a1c1c">' + escapeHtml((() => { try { return JSON.parse(j.error_json || '{}').message || ''; } catch { return ''; } })()) + '</div>' : '') + '</td></tr>'
           ).join(''),
           3
         );
 
-        setStatus('Loaded.', false);
+        if (activeJobs.length) {
+          setStatus('Loaded. ' + activeJobs.length + ' job' + (activeJobs.length === 1 ? '' : 's') + ' still running.', false);
+          autoRefreshTimer = setTimeout(() => {
+            loadDashboard();
+          }, 4000);
+        } else {
+          setStatus('Loaded.', false);
+        }
       } catch (err) {
         setStatus('Load failed: ' + (err.message || String(err)), true);
       } finally {
@@ -677,7 +837,7 @@ const statusEl = document.getElementById('status');
         const displayName = String(targetKeyInput.value || '').trim();
         const targetKey = displayName.trim().toLowerCase();
         const calendarId = String(targetCalendarInput.value || '').trim();
-        if ([...TARGETS].includes(targetKey)) {
+        if (SYSTEM_TARGET_SLUGS.has(targetKey)) {
           throw new Error('Google output keys cannot be family, grayson, or naomi. Use a distinct key such as ' + targetKey + '_clubs.');
         }
         if (!calendarId.includes('@')) {

@@ -1,5 +1,5 @@
 import { getRoleFromRequest, requireRole } from './lib/auth.js';
-import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT, TARGETS } from './lib/constants.js';
+import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
 import { json, text } from './lib/responses.js';
 
@@ -25,7 +25,12 @@ function requireFeedToken(request, env) {
   return null;
 }
 
-const ADMIN_ASSET_PATH = '/admin.html';
+function getAdminAssetPath(pathname) {
+  if (pathname === '/admin/events' || pathname === '/admin/events/') {
+    return '/admin-events.html';
+  }
+  return '/admin.html';
+}
 
 function getFeedCacheMaxAge(env) {
   const value = Number.parseInt(String(env.FEED_CACHE_MAX_AGE || FEED_CACHE_MAX_AGE_DEFAULT), 10);
@@ -34,7 +39,7 @@ function getFeedCacheMaxAge(env) {
 
 function buildAdminAssetRequest(request) {
   const url = new URL(request.url);
-  url.pathname = ADMIN_ASSET_PATH;
+  url.pathname = getAdminAssetPath(url.pathname);
   url.search = '';
   return new Request(url.toString(), request);
 }
@@ -67,7 +72,7 @@ export default {
         return Response.redirect(`${url.origin}/admin`, 302);
       }
 
-      if (pathname === '/admin' || pathname === '/admin/') {
+      if (pathname === '/admin' || pathname === '/admin/' || pathname === '/admin/events' || pathname === '/admin/events/') {
         const authError = await requireRole(request, env, ADMIN_ROLES);
         if (authError) return authError;
         return serveAdminAsset(request, env);
@@ -126,10 +131,7 @@ export default {
         const authError = await requireRole(request, env, ADMIN_ROLES);
         if (authError) return authError;
         const repo = await createRepository(env);
-        return json({
-          targets: await repo.listTargets(),
-          logicalTargets: TARGETS,
-        });
+        return json({ targets: await repo.listTargets() });
       }
 
       if (pathname === '/api/targets' && request.method === 'POST') {
@@ -147,11 +149,15 @@ export default {
       if (pathname.startsWith('/api/targets/') && request.method === 'DELETE') {
         const authError = await requireRole(request, env, ['admin']);
         if (authError) return authError;
-        const targetKey = decodeURIComponent(pathname.split('/').filter(Boolean)[2] || '');
-        const repo = await createRepository(env);
-        const removed = await repo.deleteTarget(targetKey);
-        if (!removed) return json({ error: 'Not found' }, { status: 404 });
-        return json({ deleted: removed });
+        try {
+          const targetKey = decodeURIComponent(pathname.split('/').filter(Boolean)[2] || '');
+          const repo = await createRepository(env);
+          const removed = await repo.deleteTarget(targetKey);
+          if (!removed) return json({ error: 'Not found' }, { status: 404 });
+          return json({ deleted: removed });
+        } catch (error) {
+          return asBadRequest(error);
+        }
       }
 
       if (pathname === '/api/instances' && request.method === 'GET') {
@@ -306,6 +312,22 @@ export default {
         let summary = { status: 'noop' };
         if (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source') {
           summary = await repo.ingestSource(job.scopeId);
+        } else if (job.jobType === 'sync_google_target') {
+          summary = await repo.syncGoogleOutputsForTargetChunk(job.sourceId, job.targetId, {
+            mode: job.mode || 'sync',
+          });
+          if (summary.has_more) {
+            await repo.enqueueJob({
+              jobType: 'sync_google_target',
+              scopeType: 'source_target',
+              scopeId: job.scopeId,
+              payload: {
+                sourceId: job.sourceId,
+                targetId: job.targetId,
+                mode: job.mode || 'sync',
+              },
+            });
+          }
         } else if (job.jobType === 'rebuild_system') {
           const sources = await repo.listActiveSources();
           const results = [];

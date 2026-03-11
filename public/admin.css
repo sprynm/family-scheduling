@@ -102,6 +102,32 @@
       gap: 8px;
       margin-top: 14px;
     }
+    .page-nav {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 10px 0 14px;
+    }
+    .page-nav-link,
+    .button-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      background: #f5f8ff;
+      color: var(--ink);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .page-nav-link.active {
+      background: linear-gradient(135deg, var(--accent-2), #0d8bdb);
+      color: #fff;
+      border-color: transparent;
+    }
     /* forms */
     .inline-form {
       display: flex;
@@ -233,3 +259,161 @@
     .inst-drawer .override-item-info { flex: 1; }
     .inst-drawer .override-item-meta { font-size: 0.78rem; color: var(--muted); }
     .hidden { display: none !important; }
+
+    .event-main {
+      max-width: 760px;
+    }
+    .hero-card {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .mobile-focus-card {
+      padding-bottom: 14px;
+    }
+    .event-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .event-search-group input {
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+    .mobile-inst-results {
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .inst-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      padding: 12px;
+      display: grid;
+      gap: 6px;
+      box-shadow: 0 3px 10px rgba(21,40,70,0.04);
+      cursor: pointer;
+    }
+    .inst-card.open {
+      border-color: var(--accent-2);
+      background: #f7faff;
+    }
+    .inst-card-date {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .inst-card-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .inst-card-meta {
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .mobile-drawer {
+      margin-top: 8px;
+      border-top: 1px solid var(--line);
+      padding: 12px 0 0;
+      background: transparent;
+      border-left: none;
+      border-right: none;
+      border-bottom: none;
+      border-radius: 0;
+    }
+    .mobile-override-form {
+      display: grid !important;
+      gap: 10px !important;
+      align-items: stretch !important;
+    }
+    .mobile-override-form input,
+    .mobile-override-form select,
+    .mobile-override-form button {
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+    .modified-events-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .modified-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+      display: grid;
+      gap: 4px;
+    }
+    .modified-item-date,
+    .modified-item-meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .modified-item-title {
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .modified-item-note {
+      font-size: 0.85rem;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+
+    @media (max-width: 820px) {
+      .event-filter-grid {
+        grid-template-columns: 1fr;
+      }
+      .hero-card {
+        position: static;
+      }
+    }
+
+    @media (max-width: 640px) {
+      main {
+        padding: 14px 12px 28px;
+      }
+      .card {
+        padding: 14px;
+        border-radius: 12px;
+      }
+      .toolbar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .toolbar button,
+      .button-link,
+      .page-nav-link {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .inst-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+      .inst-row-meta,
+      .inst-row-date {
+        white-space: normal;
+      }
+      .inst-drawer .override-form {
+        display: grid;
+        gap: 8px;
+      }
+      .inst-drawer .override-form input,
+      .inst-drawer .override-form select,
+      .inst-drawer .override-form button {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+      }
+      .inst-drawer .override-item {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }

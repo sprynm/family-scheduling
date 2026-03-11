@@ -1,4 +1,7 @@
 
+const GOOGLE_RATE_LIMIT_MESSAGE = /rate limit|quota/i;
+const GOOGLE_RETRYABLE_STATUS = new Set([403, 429]);
+
 function base64UrlEncode(value) {
   return Buffer.from(value)
     .toString('base64')
@@ -88,47 +91,84 @@ async function parseGoogleResponse(response) {
     }
   }
   if (!response.ok) {
-    throw new Error(parsed?.error?.message || parsed?.error_description || `Google Calendar API failed: HTTP ${response.status}`);
+    const message = parsed?.error?.message || parsed?.error_description || `Google Calendar API failed: HTTP ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.retryAfterSeconds = Number.parseInt(response.headers.get('retry-after') || '', 10) || 0;
+    error.googleRateLimited = GOOGLE_RETRYABLE_STATUS.has(response.status) && GOOGLE_RATE_LIMIT_MESSAGE.test(message);
+    throw error;
   }
   return parsed;
 }
 
+export function isGoogleRateLimitError(error) {
+  return Boolean(error && typeof error === 'object' && error.googleRateLimited);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchGoogleCalendarWithRetry(url, options, { allowDeleteMissing = false } = {}) {
+  const maxAttempts = 3;
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    const response = await fetch(url, options);
+    if (allowDeleteMissing && response.status === 404) {
+      return { deleted: true, missing: true };
+    }
+    try {
+      return await parseGoogleResponse(response);
+    } catch (error) {
+      if (!isGoogleRateLimitError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const retryAfterMs = Math.max(0, Number(error.retryAfterSeconds || 0) * 1000);
+      const backoffMs = retryAfterMs || 500 * 2 ** (attempt - 1);
+      await sleep(backoffMs);
+    }
+  }
+}
+
 export async function createGoogleCalendarEvent({ accessToken, calendarId, event }) {
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(event),
-  });
-  return parseGoogleResponse(response);
+  return fetchGoogleCalendarWithRetry(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(event),
+    }
+  );
 }
 
 export async function updateGoogleCalendarEvent({ accessToken, calendarId, eventId, event }) {
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, {
-    method: 'PUT',
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(event),
-  });
-  return parseGoogleResponse(response);
+  return fetchGoogleCalendarWithRetry(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(event),
+    }
+  );
 }
 
 export async function deleteGoogleCalendarEvent({ accessToken, calendarId, eventId }) {
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, {
-    method: 'DELETE',
-    headers: {
-      authorization: `Bearer ${accessToken}`,
+  const result = await fetchGoogleCalendarWithRetry(
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+      },
     },
-  });
-  if (response.status === 404) {
-    return { deleted: true, missing: true };
-  }
-  if (!response.ok) {
-    throw new Error(`Google Calendar delete failed: HTTP ${response.status}`);
-  }
-  return { deleted: true, missing: false };
+    { allowDeleteMissing: true }
+  );
+  return result?.deleted ? result : { deleted: true, missing: false };
 }
