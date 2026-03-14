@@ -2013,6 +2013,45 @@ describe('family-scheduling worker', () => {
     expect(body.overrides[0].created_by).toBe('editor');
   });
 
+  it('rejects duplicate active overrides for the same item', async () => {
+    const firstRequest = new Request('http://example.com/api/events/evt_grayson_hockey/overrides', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-user-role': 'editor',
+      },
+      body: JSON.stringify({
+        overrideType: 'note',
+        eventInstanceId: 'inst_grayson_hockey_1',
+        payload: { note: 'Need to leave early' },
+      }),
+    });
+    const firstCtx = createExecutionContext();
+    const firstResponse = await worker.fetch(firstRequest, env, firstCtx);
+    await waitOnExecutionContext(firstCtx);
+    expect(firstResponse.status).toBe(201);
+
+    const duplicateRequest = new Request('http://example.com/api/events/evt_grayson_hockey/overrides', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-user-role': 'editor',
+      },
+      body: JSON.stringify({
+        overrideType: 'note',
+        eventInstanceId: 'inst_grayson_hockey_1',
+        payload: { note: 'Need to leave early' },
+      }),
+    });
+    const duplicateCtx = createExecutionContext();
+    const duplicateResponse = await worker.fetch(duplicateRequest, env, duplicateCtx);
+    await waitOnExecutionContext(duplicateCtx);
+    const duplicateBody = await duplicateResponse.json();
+
+    expect(duplicateResponse.status).toBe(400);
+    expect(duplicateBody.message).toContain('already active');
+  });
+
   it('creates and updates sources through the admin API with per-target rules', async () => {
     env.APP_DB.outputTargets.push({
       id: 'outt_naomi_clubs',
@@ -2531,6 +2570,66 @@ describe('family-scheduling worker', () => {
     expect(db.canonicalEvents).toHaveLength(1);
     expect(db.eventInstances).toHaveLength(2);
     expect(db.eventInstances.some((instance) => instance.recurrence_instance_key === '2026-03-11T01:00:00.000Z' && instance.occurrence_start_at === '2026-03-11T03:00:00.000Z')).toBe(true);
+  });
+
+  it('skips ingesting single events older than the past retention window', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.INGEST_PAST_RETENTION_DAYS = '30';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_old_history',
+      name: 'family-history',
+      display_name: 'Family History',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-history.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const toIcsUtc = (date) => date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+    const oldStart = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    const oldEnd = new Date(oldStart.getTime() + 60 * 60 * 1000);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:family-history-1',
+            'SUMMARY:Old Family Event',
+            `DTSTART:${toIcsUtc(oldStart)}`,
+            `DTEND:${toIcsUtc(oldEnd)}`,
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    const result = await repo.ingestSource('src_old_history');
+
+    expect(result.eventsParsed).toBe(1);
+    expect(result.instancesMaterialized).toBe(0);
+    expect(db.canonicalEvents).toHaveLength(0);
+    expect(db.eventInstances).toHaveLength(0);
+    expect(db.outputRules).toHaveLength(0);
   });
 
   it('omits disabled source events from generated feeds', async () => {

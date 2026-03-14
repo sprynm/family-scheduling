@@ -74,6 +74,23 @@ const statusEl = document.getElementById('status');
         .replace(/'/g, '&#39;');
     }
 
+    function padDatePart(value) {
+      return String(value).padStart(2, '0');
+    }
+
+    function formatUiDate(value, { includeTime = false } = {}) {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      const stamp = [
+        date.getFullYear(),
+        padDatePart(date.getMonth() + 1),
+        padDatePart(date.getDate()),
+      ].join('.');
+      if (!includeTime) return stamp;
+      return stamp + ' ' + padDatePart(date.getHours()) + ':' + padDatePart(date.getMinutes());
+    }
+
     function buildIconOptions(currentIcon) {
       const normalizedCurrent = String(currentIcon || '').trim();
       const options = [...ICON_OPTIONS];
@@ -192,11 +209,12 @@ const statusEl = document.getElementById('status');
     }
 
     function buildGoogleSyncMetrics(source) {
+      const hasGoogleTarget = Array.isArray(source.target_links) && source.target_links.some((link) => link.target_type === 'google');
       const counts = source.google_sync_counts || {};
       return [
         'Events: ' + Number(source.event_count || 0),
-        "Sync'd: " + Number(counts.synced || 0),
-        'Deferred: ' + Number(counts.deferred || 0),
+        hasGoogleTarget ? "Google sync'd: " + Number(counts.synced || 0) : 'Google sync: n/a',
+        hasGoogleTarget ? 'Deferred: ' + Number(counts.deferred || 0) : 'Deferred: n/a',
         'Errors: ' + Number(counts.errors || 0),
       ];
     }
@@ -352,9 +370,10 @@ const statusEl = document.getElementById('status');
         renderRows(
           sourcesBody,
           sortedSources.slice(0, 30).map((s) => {
-            const lastFetch = s.last_fetched_at ? new Date(s.last_fetched_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+            const lastFetch = formatUiDate(s.last_fetched_at, { includeTime: true });
             const status = buildSourceStatus(s);
             const syncCounts = s.google_sync_counts || {};
+            const hasGoogleTarget = Array.isArray(s.target_links) && s.target_links.some((link) => link.target_type === 'google');
             const statusStyle = status.tone === 'ok'
               ? 'color:#1a7f37'
               : status.tone === 'hint'
@@ -375,8 +394,8 @@ const statusEl = document.getElementById('status');
               '<div class="hint">from feed</div>' +
               '</div>';
             const syncDefCell = '<div>' +
-              '<div>Sync\'d: ' + Number(syncCounts.synced || 0) + '</div>' +
-              '<div>Deferred: ' + Number(syncCounts.deferred || 0) + '</div>' +
+              '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
+              '<div>' + (hasGoogleTarget ? 'Deferred: ' + Number(syncCounts.deferred || 0) : 'Deferred: n/a') + '</div>' +
               '</div>';
             const statusCell = '<div>' +
               '<span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span>' +
@@ -594,7 +613,7 @@ const statusEl = document.getElementById('status');
         return;
       }
       instResultsEl.innerHTML = rows.slice(0, 100).map((inst) => {
-        const dt = inst.occurrence_start_at ? new Date(inst.occurrence_start_at).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+        const dt = formatUiDate(inst.occurrence_start_at, { includeTime: true });
         const meta = (inst.owner_type || '') + ' · ' + (inst.source_name || '');
         return '<div class="inst-row' + (inst.id === openDrawerInstId ? ' open' : '') + '" data-inst-id="' + (inst.id || '') + '" data-canonical-id="' + (inst.canonical_event_id || '') + '" data-title="' + (inst.title || '').replace(/"/g, '&quot;') + '" data-date="' + dt.replace(/"/g, '&quot;') + '" data-meta="' + meta.replace(/"/g, '&quot;') + '">' +
           '<span class="inst-row-date">' + dt + '</span>' +
@@ -714,7 +733,7 @@ const statusEl = document.getElementById('status');
           return;
         }
         modifiedEventsBody.innerHTML = overrides.map((ov) => {
-          const eventDt = ov.event_date ? new Date(ov.event_date).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+          const eventDt = formatUiDate(ov.event_date, { includeTime: true });
           return '<tr>' +
             '<td style="white-space:nowrap">' + eventDt + '</td>' +
             '<td>' + (ov.title || '') + '</td>' +

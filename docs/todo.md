@@ -121,6 +121,7 @@ Completed. `listInstances` now excludes `source_deleted` canonical events and `s
 - [x] Floating-time ICS events now respect `X-WR-TIMEZONE` and preserve local wall-clock times into Google sync - 2026-03-08
 - [x] RFC5545 escaped text now unescapes correctly on ingest (`\\n`, `\\,`, `\\;`) - 2026-03-08
 - [x] Google sync now respects the same lookback window as ICS feeds - 2026-03-08
+- [x] Ingest now skips single events older than 30 days past and the admin labels Google-only sync metrics explicitly - 2026-03-11
 - [x] `/admin/events` added as a focused mobile-first event modification page - 2026-03-08
 - [x] Static asset binding added as `ASSETS` so `/admin` and `/admin/events` load in production - 2026-03-08
 - [x] Clipboard copy flow now handles denied permissions and resets button state correctly - 2026-03-08

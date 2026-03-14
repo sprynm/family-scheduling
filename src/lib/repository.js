@@ -81,6 +81,13 @@ function parsePositiveInt(value, fallback) {
   return Number.isFinite(num) && num > 0 ? num : fallback;
 }
 
+function isIsoOnOrAfter(value, cutoffIso) {
+  const time = Date.parse(String(value || ''));
+  const cutoff = Date.parse(String(cutoffIso || ''));
+  if (!Number.isFinite(time) || !Number.isFinite(cutoff)) return true;
+  return time >= cutoff;
+}
+
 function normalizeTargetKeys(values) {
   if (!Array.isArray(values)) return [];
   return [...new Set(values.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean))];
@@ -222,6 +229,43 @@ function tryParseJson(value, fallback = null) {
 
 function parseOverridePayload(value) {
   return typeof value === 'string' ? tryParseJson(value, {}) || {} : (value || {});
+}
+
+function normalizeOverrideType(value) {
+  const overrideType = String(value || '').trim().toLowerCase();
+  if (!['skip', 'hidden', 'maybe', 'note'].includes(overrideType)) {
+    throw new Error(`Unsupported override type: ${value}`);
+  }
+  return overrideType;
+}
+
+function normalizeOverridePayloadValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(normalizeOverridePayloadValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce((acc, key) => {
+        const nextValue = normalizeOverridePayloadValue(value[key]);
+        if (nextValue === undefined) return acc;
+        if (typeof nextValue === 'string' && nextValue === '') return acc;
+        acc[key] = nextValue;
+        return acc;
+      }, {});
+  }
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  return value;
+}
+
+function normalizeOverridePayload(payload) {
+  return normalizeOverridePayloadValue(payload || {});
+}
+
+function stableJsonStringify(value) {
+  return JSON.stringify(normalizeOverridePayloadValue(value));
 }
 
 export class D1Repository {
@@ -1553,6 +1597,20 @@ export class D1Repository {
 
   async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
     const timestamp = nowIso();
+    const normalizedOverrideType = normalizeOverrideType(overrideType);
+    const normalizedPayload = normalizeOverridePayload(payload);
+    const payloadJson = stableJsonStringify(normalizedPayload);
+    const existingOverrides = await this.listActiveOverridesForCanonicalEvent(eventId);
+    const hasDuplicate = existingOverrides.some((override) => {
+      return (
+        String(override.event_instance_id || '') === String(eventInstanceId || '') &&
+        override.override_type === normalizedOverrideType &&
+        stableJsonStringify(override.payload) === payloadJson
+      );
+    });
+    if (hasDuplicate) {
+      throw new Error('That override is already active for this item.');
+    }
     const overrideId = makeOpaqueId('ovr', `${eventId}:${overrideType}`);
     await this.db.prepare(
       `INSERT INTO event_overrides (
@@ -1564,8 +1622,8 @@ export class D1Repository {
       eventInstanceId ? 'instance' : 'event',
       eventId,
       eventInstanceId,
-      overrideType,
-      JSON.stringify(payload || {}),
+      normalizedOverrideType,
+      payloadJson,
       actorRole,
       timestamp,
       timestamp
@@ -2151,6 +2209,8 @@ export class D1Repository {
     const fetchedAt = nowIso();
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
+    const pastRetentionDays = parsePositiveInt(this.env.INGEST_PAST_RETENTION_DAYS, parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30));
+    const pastCutoffIso = new Date(Date.now() - pastRetentionDays * 24 * 60 * 60 * 1000).toISOString();
 
     const stagedEvents = [];
     let totalEvents = 0;
@@ -2235,6 +2295,9 @@ export class D1Repository {
     const events = parseICS(body).sort(compareEventsForIngest);
     for (const event of events) {
       totalEvents += 1;
+      if (event.rrule == null && !isIsoOnOrAfter(event.endAt, pastCutoffIso)) {
+        continue;
+      }
       const canonicalProviderKey = `${sourceId}:${event.uid}:`;
       const providerKey = `${sourceId}:${event.uid}:${event.recurrenceId || ''}`;
       const fallbackKey = `${sourceId}:${event.summary}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
@@ -2252,6 +2315,9 @@ export class D1Repository {
           ...instance,
         };
       });
+      if (!instances.length) {
+        continue;
+      }
 
       stagedEvents.push({
         event,

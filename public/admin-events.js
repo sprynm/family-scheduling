@@ -7,6 +7,7 @@ const modifiedEventsListEl = document.getElementById('modified-events-list');
 
 let allInstances = [];
 let openDrawerInstId = null;
+let activeOverrides = [];
 
 function setStatus(message, isError) {
   statusEl.textContent = message;
@@ -37,14 +38,61 @@ async function fetchJson(url, options) {
   return response.json();
 }
 
-function formatInstanceDate(value) {
+function padDatePart(value) {
+  return String(value).padStart(2, '0');
+}
+
+function formatInstanceDate(value, { includeTime = false } = {}) {
   if (!value) return '—';
-  return new Date(value).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const stamp = [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate()),
+  ].join('.');
+  if (!includeTime) return stamp;
+  return stamp + ' ' + padDatePart(date.getHours()) + ':' + padDatePart(date.getMinutes());
+}
+
+function normalizeNote(value) {
+  return String(value || '').trim();
+}
+
+function getMatchingOverrides(instance) {
+  return activeOverrides.filter((override) => {
+    if (override.event_instance_id) {
+      return override.event_instance_id === instance.id;
+    }
+    return override.canonical_event_id === instance.canonical_event_id;
+  });
+}
+
+function getInstanceStatusBadges(instance) {
+  const matching = getMatchingOverrides(instance);
+  const uniqueTypes = [...new Set(matching.map((override) => String(override.override_type || '').trim()).filter(Boolean))];
+  return uniqueTypes;
+}
+
+function renderStatusBadges(types) {
+  if (!types.length) return '';
+  return (
+    '<div class="inst-card-statuses">' +
+    types
+      .map((type) => '<span class="status-pill status-pill-' + escapeHtml(type) + '">' + escapeHtml(type) + '</span>')
+      .join('') +
+    '</div>'
+  );
+}
+
+function hasMatchingOverride(overrides, overrideType, note) {
+  const normalizedNote = normalizeNote(note);
+  return overrides.some((override) => {
+    const payload =
+      typeof override.payload_json === 'string'
+        ? JSON.parse(override.payload_json || '{}')
+        : override.payload || override.payload_json || {};
+    return String(override.override_type || '') === overrideType && normalizeNote(payload.note) === normalizedNote;
   });
 }
 
@@ -161,7 +209,9 @@ function renderInstances() {
     .slice(0, 100)
     .map((instance) => {
       const dateLabel = formatInstanceDate(instance.occurrence_start_at);
-      const meta = instance.source_name || '';
+      const timeLabel = formatInstanceDate(instance.occurrence_start_at, { includeTime: true }).split(' ')[1] || '';
+      const meta = [timeLabel, instance.source_name || ''].filter(Boolean).join(' · ');
+      const statusBadges = renderStatusBadges(getInstanceStatusBadges(instance));
       return (
         '<div class="inst-card' +
         (instance.id === openDrawerInstId ? ' open' : '') +
@@ -175,8 +225,11 @@ function renderInstances() {
         '<div class="inst-card-date">' +
         escapeHtml(dateLabel) +
         '</div>' +
+        '<div class="inst-card-main">' +
         '<div class="inst-card-title">' +
         escapeHtml(instance.title || '') +
+        '</div>' +
+        statusBadges +
         '</div>' +
         '<div class="inst-card-meta">' +
         escapeHtml(meta) +
@@ -231,7 +284,7 @@ async function loadDrawerContent(instanceId, drawerEl) {
       escapeHtml(instance.title || 'Event') +
       '</h4>' +
       '<p class="hint" style="margin-bottom:10px">' +
-      escapeHtml(formatInstanceDate(instance.occurrence_start_at)) +
+      escapeHtml(formatInstanceDate(instance.occurrence_start_at, { includeTime: true })) +
       '</p>' +
       '<form class="override-form mobile-override-form" data-canonical-id="' +
       escapeHtml(instance.canonical_event_id || '') +
@@ -277,20 +330,28 @@ async function loadDrawerContent(instanceId, drawerEl) {
       const button = form.querySelector('button[type="submit"]');
       button.disabled = true;
       try {
+        const overrideType = form.querySelector('[name="override-type"]').value;
+        const note = normalizeNote(form.querySelector('[name="override-note"]').value);
+        if (hasMatchingOverride(overrides, overrideType, note)) {
+          setStatus('That override is already active for this item.', true);
+          button.disabled = false;
+          return;
+        }
         await fetchJson('/api/events/' + encodeURIComponent(instance.canonical_event_id) + '/overrides', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            overrideType: form.querySelector('[name="override-type"]').value,
+            overrideType,
             eventInstanceId: instanceId,
-            payload: form.querySelector('[name="override-note"]').value
-              ? { note: form.querySelector('[name="override-note"]').value }
+            payload: note
+              ? { note }
               : {},
           }),
         });
         setStatus('Override applied.', false);
         await loadDrawerContent(instanceId, drawerEl);
         await loadModifiedEvents();
+        renderInstances();
       } catch (error) {
         setStatus('Override failed: ' + (error.message || String(error)), true);
         button.disabled = false;
@@ -307,6 +368,7 @@ async function loadDrawerContent(instanceId, drawerEl) {
           setStatus('Override removed.', false);
           await loadDrawerContent(instanceId, drawerEl);
           await loadModifiedEvents();
+          renderInstances();
         } catch (error) {
           setStatus('Remove failed: ' + (error.message || String(error)), true);
           button.disabled = false;
@@ -321,38 +383,43 @@ async function loadDrawerContent(instanceId, drawerEl) {
 async function loadModifiedEvents() {
   try {
     const payload = await fetchJson('/api/overrides');
-    const overrides = payload.overrides || [];
-    if (!overrides.length) {
+    activeOverrides = payload.overrides || [];
+    if (!activeOverrides.length) {
       modifiedEventsListEl.innerHTML = '<p class="hint" style="padding:8px 0">No future events with modifications.</p>';
+      renderInstances();
       return;
     }
 
-    modifiedEventsListEl.innerHTML = overrides
+    modifiedEventsListEl.innerHTML = activeOverrides
       .map((override) => {
         const metaParts = [override.source_name || ''].filter(Boolean);
+        const note = normalizeNote(override.payload?.note);
         return (
           '<div class="modified-item">' +
+          '<div class="modified-item-main">' +
           '<div class="modified-item-date">' +
           escapeHtml(formatInstanceDate(override.event_date)) +
           '</div>' +
           '<div class="modified-item-title">' +
           escapeHtml(override.title || '') +
           '</div>' +
-          '<div class="modified-item-meta">' +
-          escapeHtml(metaParts.join(' · ')) +
-          '</div>' +
-          '<div class="modified-item-note"><strong>' +
+          '<span class="status-pill status-pill-' +
           escapeHtml(override.override_type || '') +
-          '</strong>' +
-          (override.payload?.note ? ' — ' + escapeHtml(override.payload.note) : '') +
-          '</div>' +
+          '">' +
+          escapeHtml(override.override_type || '') +
+          '</span>' +
           '<button class="danger remove-modified" data-override-id="' +
           escapeHtml(override.id || '') +
           '">Remove</button>' +
+          '</div>' +
+          '<div class="modified-item-meta">' +
+          escapeHtml([...metaParts, note].filter(Boolean).join(' · ')) +
+          '</div>' +
           '</div>'
         );
       })
       .join('');
+    renderInstances();
 
     modifiedEventsListEl.querySelectorAll('.remove-modified').forEach((button) => {
       button.addEventListener('click', async () => {

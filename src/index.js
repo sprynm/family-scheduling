@@ -213,18 +213,22 @@ export default {
       if (pathname.startsWith('/api/events/') && pathname.endsWith('/overrides') && request.method === 'POST') {
         const authError = await requireRole(request, env, ['admin', 'editor']);
         if (authError) return authError;
-        const segments = pathname.split('/').filter(Boolean);
-        const eventId = segments[2];
-        const payload = await request.json();
-        const repo = await createRepository(env);
-        const event = await repo.createOverride({
-          eventId,
-          eventInstanceId: payload.eventInstanceId || null,
-          overrideType: payload.overrideType,
-          payload: payload.payload || {},
-          actorRole: (await getRoleFromRequest(request, env)) || 'editor',
-        });
-        return json(event, { status: 201 });
+        try {
+          const segments = pathname.split('/').filter(Boolean);
+          const eventId = segments[2];
+          const payload = await request.json();
+          const repo = await createRepository(env);
+          const event = await repo.createOverride({
+            eventId,
+            eventInstanceId: payload.eventInstanceId || null,
+            overrideType: payload.overrideType,
+            payload: payload.payload || {},
+            actorRole: (await getRoleFromRequest(request, env)) || 'editor',
+          });
+          return json(event, { status: 201 });
+        } catch (error) {
+          return asBadRequest(error);
+        }
       }
 
       if (pathname.startsWith('/api/overrides/') && request.method === 'DELETE') {
