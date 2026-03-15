@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-09_
+_Updated: 2026-03-15_
 
 ## Vocabulary
 
@@ -47,6 +47,8 @@ The codebase is now centered on the unified `output_targets` model. Legacy `targ
 28. Source-to-output icon selection in admin uses a dropdown of common options instead of a free-text emoji field.
 29. Custom Google outputs now include configured icons in synced event summaries.
 30. `/api/instances` excludes stale `source_deleted` rows so corrected timezone rebuilds do not show duplicate pre-fix instances in admin.
+31. Source title rewrite rules reject unsafe regex patterns and preserve `source_title_raw` so title changes can be backfilled and reverted safely.
+32. Source config title backfills are set-based, and modified-event drawers on both admin pages now toggle client-side without refetching `/api/overrides`.
 
 ---
 
@@ -62,6 +64,7 @@ One row per upstream calendar feed.
 | `owner_type` | `grayson`, `naomi`, or `family` |
 | `source_category` | `sports`, `personal`, `shared`, `general` |
 | `icon`, `prefix` | Fallback decoration if no per-link rule overrides |
+| `title_rewrite_rules_json` | Per-source regex rewrite rules, validated conservatively before save |
 | `is_active` | Whether the source is polled and its events included |
 | `poll_interval_minutes` | Poll frequency for cron-driven source selection; enforced by `listActiveSources()` |
 
@@ -162,6 +165,7 @@ Do not implement new features there.
 8. Built-in system outputs must canonicalize to one stable identity. Mixing slug-based and ID-based references creates duplicate derived rows.
 9. Custom outputs should follow the same visual-decoration rules as system outputs unless there is a deliberate product reason not to.
 10. Timezone-correction rebuilds can leave stale deleted instance rows behind; admin queries must filter `source_deleted` state consistently.
+11. Operator-supplied regex is a feature, not a trust boundary. Title rewrite rules need conservative safety checks because Worker regex execution has no practical timeout control.
 
 ### 2026-03-09 — Session 11
 

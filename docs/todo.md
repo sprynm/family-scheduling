@@ -96,6 +96,9 @@ Completed. Source-to-output icon selection now uses a dropdown of common icons i
 ### Hide stale timezone-migration instance rows from `/admin/events`
 Completed. `listInstances` now excludes `source_deleted` canonical events and `source_deleted` event instances, so the mobile/admin event list does not show stale pre-fix rows alongside corrected instances.
 
+### Harden title rewrite rules and admin override drawers
+Completed. Source title rewrite rules now reject unsafe regex patterns, source-config title backfills run set-based instead of N+1 updates, the orphaned `0006` migration file was removed, and both admin surfaces now toggle modified-event drawers client-side using the same context shape.
+
 ---
 
 ## Done
@@ -127,3 +130,4 @@ Completed. `listInstances` now excludes `source_deleted` canonical events and `s
 - [x] Clipboard copy flow now handles denied permissions and resets button state correctly - 2026-03-08
 - [x] Top-level `loadDashboard()` call is now guarded with `.catch(...)` - 2026-03-08
 - [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired - 2026-03-08
+- [x] Title rewrite rules hardened and modified-event drawers refactored to client-side toggle - 2026-03-15

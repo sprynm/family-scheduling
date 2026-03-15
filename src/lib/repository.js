@@ -268,6 +268,113 @@ function stableJsonStringify(value) {
   return JSON.stringify(normalizeOverridePayloadValue(value));
 }
 
+function normalizeRegexFlags(value) {
+  const unique = [...new Set(String(value || '').split('').filter((flag) => ['g', 'i', 'm', 's', 'u', 'y'].includes(flag)))];
+  return unique.join('');
+}
+
+function hasUnsafeRegexPattern(pattern) {
+  const source = String(pattern || '');
+  if (!source) return true;
+  if (source.length > 120) return true;
+  if (/\\[1-9]/.test(source)) return true;
+  if (/\(\?<([=!])/.test(source)) return true;
+  // Reject common catastrophic-backtracking shapes before they reach the Worker runtime.
+  if (/\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/.test(source)) return true;
+  if (/\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+(?:,\d*)?\})/.test(source)) return true;
+  if (/(?:^|[^\\])(?:\+\+|\*\+|\+\*|\*\*|\}\+|\}\*)/.test(source)) return true;
+  return false;
+}
+
+function normalizeTitleRewriteRule(rule, index) {
+  if (!rule || typeof rule !== 'object') {
+    throw new Error(`Invalid title rewrite rule at position ${index + 1}`);
+  }
+  const pattern = String(rule.pattern || '').trim();
+  if (!pattern) {
+    throw new Error(`Missing regex pattern for title rewrite rule ${index + 1}`);
+  }
+  const flags = normalizeRegexFlags(rule.flags || '');
+  if (hasUnsafeRegexPattern(pattern)) {
+    throw new Error(`Unsafe regex for title rewrite rule ${index + 1}. Avoid nested or ambiguous repeated groups.`);
+  }
+  try {
+    new RegExp(pattern, flags);
+  } catch (error) {
+    throw new Error(`Invalid regex for title rewrite rule ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const replacement = String(rule.replacement ?? '');
+  if (replacement.length > 160) {
+    throw new Error(`Replacement text is too long for title rewrite rule ${index + 1}`);
+  }
+  return {
+    pattern,
+    flags,
+    replacement,
+  };
+}
+
+function parseTitleRewriteRuleLine(line, index) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^\/(.+)\/([gimsuy]*)\s*=>\s*(.*)$/);
+  if (match) {
+    return normalizeTitleRewriteRule(
+      { pattern: match[1], flags: match[2], replacement: match[3] },
+      index
+    );
+  }
+  const plainParts = trimmed.split(/\s*=>\s*/);
+  if (plainParts.length < 2) {
+    throw new Error(`Invalid title rewrite rule ${index + 1}. Use /pattern/flags => replacement`);
+  }
+  const [pattern, ...replacementParts] = plainParts;
+  return normalizeTitleRewriteRule(
+    { pattern, flags: 'i', replacement: replacementParts.join(' => ') },
+    index
+  );
+}
+
+function normalizeTitleRewriteRules(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map((rule, index) => normalizeTitleRewriteRule(rule, index));
+  }
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      return normalizeTitleRewriteRules(tryParseJson(trimmed, []));
+    }
+    return trimmed
+      .split(/\r?\n/)
+      .map((line, index) => parseTitleRewriteRuleLine(line, index))
+      .filter(Boolean);
+  }
+  if (typeof input === 'object') {
+    return [normalizeTitleRewriteRule(input, 0)];
+  }
+  throw new Error('Unsupported title rewrite rule format');
+}
+
+function titleRewriteRulesToText(rules) {
+  return normalizeTitleRewriteRules(rules)
+    .map((rule) => `/${rule.pattern}/${rule.flags} => ${rule.replacement}`)
+    .join('\n');
+}
+
+function applyTitleRewriteRules(title, rules) {
+  let nextTitle = String(title || '');
+  for (const rule of normalizeTitleRewriteRules(rules)) {
+    try {
+      nextTitle = nextTitle.replace(new RegExp(rule.pattern, rule.flags), rule.replacement);
+    } catch {
+      return String(title || '');
+    }
+  }
+  return nextTitle.trim() || String(title || '');
+}
+
 export class D1Repository {
   constructor(db, env) {
     this.db = db;
@@ -322,6 +429,18 @@ export class D1Repository {
     await ensureColumn('prefix', "TEXT NOT NULL DEFAULT ''");
     await ensureColumn('sort_order', 'INTEGER NOT NULL DEFAULT 0');
     await ensureColumn('target_id', 'TEXT REFERENCES output_targets(id)');
+    try {
+      await this.db.prepare(`ALTER TABLE sources ADD COLUMN title_rewrite_rules_json TEXT NOT NULL DEFAULT '[]'`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    try {
+      await this.db.prepare(`ALTER TABLE canonical_events ADD COLUMN source_title_raw TEXT`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
 
     const ensureOutputRuleTargetId = async () => {
       try {
@@ -637,6 +756,8 @@ export class D1Repository {
     }
     return sources.map((source) => ({
       ...source,
+      title_rewrite_rules: normalizeTitleRewriteRules(source.title_rewrite_rules_json || []),
+      title_rewrite_rules_text: titleRewriteRulesToText(source.title_rewrite_rules_json || []),
       latest_job: latestJobsBySource.get(source.id) || null,
       latest_google_sync_error: latestGoogleErrorBySource.get(source.id) || null,
       google_sync_counts: googleCountsBySource.get(source.id) || { synced: 0, deferred: 0, errors: 0 },
@@ -654,13 +775,14 @@ export class D1Repository {
     const sourceCategory = String(input.source_category || deriveSourceCategory(url, ownerType)).trim().toLowerCase();
     const displayName = String(input.display_name || input.name || buildLegacyDisplayName(ownerType, url, 0)).trim();
     const name = String(input.name || displayName).trim();
+    const titleRewriteRules = normalizeTitleRewriteRules(input.title_rewrite_rules ?? input.title_rewrite_rules_text ?? []);
     const sourceId = stableId('src', `${ownerType}:${url}`);
     await this.db.prepare(
       `INSERT INTO sources (
         id, name, display_name, provider_type, owner_type, source_category, url, icon, prefix, fetch_url_secret_ref,
-        include_in_child_ics, include_in_family_ics, include_in_child_google_output,
+        include_in_child_ics, include_in_family_ics, include_in_child_google_output, title_rewrite_rules_json,
         is_active, sort_order, poll_interval_minutes, quality_profile, created_at, updated_at
-      ) VALUES (?, ?, ?, 'ics', ?, ?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, 'ics', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`
     ).bind(
       sourceId,
       name,
@@ -673,6 +795,7 @@ export class D1Repository {
       toBoolInt(input.include_in_child_ics, 1),
       toBoolInt(input.include_in_family_ics, 1),
       toBoolInt(input.include_in_child_google_output, deriveDefaultGoogleInclusion(sourceCategory, ownerType)),
+      JSON.stringify(titleRewriteRules),
       Number(input.sort_order || 0),
       Number(input.poll_interval_minutes || 30),
       input.quality_profile || 'standard',
@@ -707,6 +830,11 @@ export class D1Repository {
       include_in_child_ics: toBoolInt(input.include_in_child_ics, existing.include_in_child_ics),
       include_in_family_ics: toBoolInt(input.include_in_family_ics, existing.include_in_family_ics),
       include_in_child_google_output: toBoolInt(input.include_in_child_google_output, existing.include_in_child_google_output),
+      title_rewrite_rules_json: JSON.stringify(
+        normalizeTitleRewriteRules(
+          input.title_rewrite_rules ?? input.title_rewrite_rules_text ?? existing.title_rewrite_rules_json ?? []
+        )
+      ),
       is_active: toBoolInt(input.is_active, existing.is_active),
       sort_order: Number(input.sort_order ?? existing.sort_order ?? 0),
       poll_interval_minutes: Number(input.poll_interval_minutes ?? existing.poll_interval_minutes ?? 30),
@@ -715,7 +843,7 @@ export class D1Repository {
     await this.db.prepare(
       `UPDATE sources
        SET name = ?, display_name = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
-           include_in_child_ics = ?, include_in_family_ics = ?, include_in_child_google_output = ?,
+           include_in_child_ics = ?, include_in_family_ics = ?, include_in_child_google_output = ?, title_rewrite_rules_json = ?,
            is_active = ?, sort_order = ?, poll_interval_minutes = ?, quality_profile = ?, updated_at = ?
        WHERE id = ?`
     ).bind(
@@ -729,6 +857,7 @@ export class D1Repository {
       updated.include_in_child_ics,
       updated.include_in_family_ics,
       updated.include_in_child_google_output,
+      updated.title_rewrite_rules_json,
       updated.is_active,
       updated.sort_order,
       updated.poll_interval_minutes,
@@ -1087,6 +1216,24 @@ export class D1Repository {
     }));
   }
 
+  async listActiveOverrideCanonicalEventIdsForSource(sourceId) {
+    const result = await this.db.prepare(
+      `SELECT DISTINCT event_overrides.canonical_event_id
+       FROM event_overrides
+       JOIN canonical_events ON canonical_events.id = event_overrides.canonical_event_id
+       WHERE canonical_events.source_id = ? AND event_overrides.cleared_at IS NULL`
+    ).bind(sourceId).all();
+    return (result.results || []).map((row) => row.canonical_event_id).filter(Boolean);
+  }
+
+  async reapplyActiveOverridesForSource(sourceId) {
+    const canonicalEventIds = await this.listActiveOverrideCanonicalEventIdsForSource(sourceId);
+    for (const canonicalEventId of canonicalEventIds) {
+      await this.reconcileOverrideScope(canonicalEventId);
+    }
+    return canonicalEventIds.length;
+  }
+
   overrideExcludesTarget(override, target) {
     if (!override) return false;
     if (override.override_type === 'skip') return true;
@@ -1103,7 +1250,7 @@ export class D1Repository {
 
   async reconcileOverrideScope(canonicalEventId, { eventInstanceId = null } = {}) {
     const eventRow = await this.db.prepare(
-      `SELECT canonical_events.id, canonical_events.source_id
+      `SELECT canonical_events.id, canonical_events.source_id, canonical_events.event_kind
        FROM canonical_events
        WHERE canonical_events.id = ?`
     ).bind(canonicalEventId).first();
@@ -1116,6 +1263,7 @@ export class D1Repository {
       `SELECT id
        FROM event_instances
        WHERE canonical_event_id = ?
+         AND source_deleted = 0
          ${eventInstanceId ? 'AND id = ?' : ''}
        ORDER BY occurrence_start_at ASC`
     ).bind(...(eventInstanceId ? [canonicalEventId, eventInstanceId] : [canonicalEventId])).all();
@@ -1130,9 +1278,33 @@ export class D1Repository {
     }
 
     const targets = await this.resolveTargetsForSource(source);
-    const activeOverrides = await this.listActiveOverridesForCanonicalEvent(canonicalEventId);
+    let activeOverrides = await this.listActiveOverridesForCanonicalEvent(canonicalEventId);
     const timestamp = nowIso();
     const statements = [];
+
+    if (eventRow.event_kind === 'single' && instances.length === 1) {
+      const currentInstanceId = instances[0].id;
+      const remapStatements = [];
+      activeOverrides = activeOverrides.map((override) => {
+        if (!override.event_instance_id || override.event_instance_id === currentInstanceId) {
+          return override;
+        }
+        remapStatements.push(
+          this.db.prepare(
+            `UPDATE event_overrides
+             SET event_instance_id = ?, scope_type = 'instance', updated_at = ?
+             WHERE id = ?`
+          ).bind(currentInstanceId, timestamp, override.id)
+        );
+        return {
+          ...override,
+          event_instance_id: currentInstanceId,
+        };
+      });
+      if (remapStatements.length) {
+        await this.db.batch(remapStatements);
+      }
+    }
 
     for (const instance of instances) {
       for (const target of targets) {
@@ -1905,14 +2077,15 @@ export class D1Repository {
       await this.db.batch([
         this.db.prepare(
           `INSERT INTO canonical_events (
-            id, source_id, identity_key, event_kind, title, source_icon, source_prefix, description, location, start_at, end_at, timezone,
+            id, source_id, identity_key, event_kind, title, source_title_raw, source_icon, source_prefix, description, location, start_at, end_at, timezone,
             status, rrule, series_until, source_deleted, needs_review, source_changed_since_overlay,
             last_source_change_at, created_at, updated_at
-          ) VALUES (?, ?, ?, 'single', ?, ?, ?, '', '', ?, ?, 'UTC', 'confirmed', NULL, NULL, 0, 0, 0, ?, ?, ?)`
+          ) VALUES (?, ?, ?, 'single', ?, ?, ?, ?, '', '', ?, ?, 'UTC', 'confirmed', NULL, NULL, 0, 0, 0, ?, ?, ?)`
         ).bind(
           sample.id,
           sample.sourceId,
           identityKey,
+          sample.title,
           sample.title,
           sample.icon,
           sample.prefix,
@@ -1969,6 +2142,8 @@ export class D1Repository {
     }));
     return {
       ...mapRow(source),
+      title_rewrite_rules: normalizeTitleRewriteRules(source.title_rewrite_rules_json || []),
+      title_rewrite_rules_text: titleRewriteRulesToText(source.title_rewrite_rules_json || []),
       target_links: targetLinks,
       target_keys: targetLinks.map((link) => link.target_key),
     };
@@ -1987,16 +2162,57 @@ export class D1Repository {
   async syncSourceConfig(source) {
     if (!source) return;
     const timestamp = nowIso();
-    const statements = [
-      this.db.prepare(
-        `UPDATE canonical_events
-         SET source_icon = ?, source_prefix = ?, updated_at = ?
-         WHERE source_id = ?`
-      ).bind(source.icon || '', source.prefix || '', timestamp, source.id),
+    const rules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
+    const existingEventsResult = await this.db.prepare(
+      `SELECT id, title, source_title_raw
+       FROM canonical_events
+       WHERE source_id = ?`
+    ).bind(source.id).all();
+    const existingEvents = existingEventsResult.results || [];
+    const statements = [];
+
+    if (existingEvents.length) {
+      // Keep source config edits set-based so title-rule backfills do not become N+1 updates.
+      const titleCaseParts = [];
+      const titleCaseValues = [];
+      const rawTitleCaseParts = [];
+      const rawTitleCaseValues = [];
+      const eventIds = [];
+
+      for (const event of existingEvents) {
+        const rawTitle = String(event.source_title_raw || event.title || '');
+        titleCaseParts.push('WHEN ? THEN ?');
+        titleCaseValues.push(event.id, applyTitleRewriteRules(rawTitle, rules));
+        rawTitleCaseParts.push('WHEN ? THEN ?');
+        rawTitleCaseValues.push(event.id, rawTitle);
+        eventIds.push(event.id);
+      }
+
+      statements.push(
+        this.db.prepare(
+          `UPDATE canonical_events
+           SET title = CASE id ${titleCaseParts.join(' ')} ELSE title END,
+               source_title_raw = CASE id ${rawTitleCaseParts.join(' ')} ELSE source_title_raw END,
+               source_icon = ?,
+               source_prefix = ?,
+               updated_at = ?
+           WHERE id IN (${eventIds.map(() => '?').join(', ')})`
+        ).bind(
+          ...titleCaseValues,
+          ...rawTitleCaseValues,
+          source.icon || '',
+          source.prefix || '',
+          timestamp,
+          ...eventIds
+        )
+      );
+    }
+
+    statements.push(
       this.db.prepare(
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(source.id),
-    ];
+      ).bind(source.id)
+    );
 
     if (!Number(source.is_active)) {
       statements.push(
@@ -2051,6 +2267,7 @@ export class D1Repository {
     }
 
     await this.db.batch(statements);
+    await this.reapplyActiveOverridesForSource(source.id);
     await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'sync' });
   }
 
@@ -2207,6 +2424,7 @@ export class D1Repository {
     }
     const sourceUrl = ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
+    const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
     const pastRetentionDays = parsePositiveInt(this.env.INGEST_PAST_RETENTION_DAYS, parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30));
@@ -2300,7 +2518,9 @@ export class D1Repository {
       }
       const canonicalProviderKey = `${sourceId}:${event.uid}:`;
       const providerKey = `${sourceId}:${event.uid}:${event.recurrenceId || ''}`;
-      const fallbackKey = `${sourceId}:${event.summary}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
+      const rawTitle = String(event.summary || '(untitled event)');
+      const rewrittenTitle = applyTitleRewriteRules(rawTitle, titleRewriteRules);
+      const fallbackKey = `${sourceId}:${rawTitle}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
       const identityKey = hashValue(event.uid ? (event.recurrenceId ? canonicalProviderKey : providerKey) : fallbackKey);
       const canonicalEventId = stableId('evt', identityKey);
       const sourceEventId = stableId('sev', providerKey || fallbackKey);
@@ -2321,6 +2541,8 @@ export class D1Repository {
 
       stagedEvents.push({
         event,
+        rawTitle,
+        rewrittenTitle,
         sourceIcon: source.icon || '',
         sourcePrefix: source.prefix ?? this.derivePrefix(source.owner_type),
         sourceEventId,
@@ -2349,7 +2571,7 @@ export class D1Repository {
     ];
 
     for (const staged of stagedEvents) {
-      const { event, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
+      const { event, rawTitle, rewrittenTitle, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
 
       statements.push(
         this.db.prepare(
@@ -2373,16 +2595,21 @@ export class D1Repository {
         ),
         this.db.prepare(
           `INSERT INTO canonical_events (
-            id, source_id, identity_key, event_kind, title, source_icon, source_prefix, description, location, start_at, end_at, timezone,
+            id, source_id, identity_key, event_kind, title, source_title_raw, source_icon, source_prefix, description, location, start_at, end_at, timezone,
             status, rrule, series_until, source_deleted, needs_review, source_changed_since_overlay,
             last_source_change_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             ${event.recurrenceId
-              ? `source_deleted = 0,
+              ? `title = excluded.title,
+            source_title_raw = excluded.source_title_raw,
+            source_icon = excluded.source_icon,
+            source_prefix = excluded.source_prefix,
+            source_deleted = 0,
             last_source_change_at = excluded.last_source_change_at,
             updated_at = excluded.updated_at`
               : `title = excluded.title,
+            source_title_raw = excluded.source_title_raw,
             source_icon = excluded.source_icon,
             source_prefix = excluded.source_prefix,
             description = excluded.description,
@@ -2400,7 +2627,8 @@ export class D1Repository {
           sourceId,
           identityKey,
           event.rrule || event.recurrenceId ? 'series' : 'single',
-          event.summary,
+          rewrittenTitle,
+          rawTitle,
           sourceIcon,
           sourcePrefix,
           event.description,
@@ -2477,6 +2705,7 @@ export class D1Repository {
     for (let i = 0; i < statements.length; i += INGEST_BATCH_SIZE) {
       await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));
     }
+    await this.reapplyActiveOverridesForSource(sourceId);
     const googleSync = await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'sync' });
 
     return {

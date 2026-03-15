@@ -7,6 +7,7 @@ const modifiedEventsListEl = document.getElementById('modified-events-list');
 
 let allInstances = [];
 let openDrawerInstId = null;
+let openModifiedOverrideId = null;
 let activeOverrides = [];
 
 function setStatus(message, isError) {
@@ -57,6 +58,14 @@ function formatInstanceDate(value, { includeTime = false } = {}) {
 
 function normalizeNote(value) {
   return String(value || '').trim();
+}
+
+function buildDrawerContext({ instanceId = '', canonicalId = '', title = '', date = '' } = {}) {
+  return { instanceId, canonicalId, title, date };
+}
+
+function getOverridesForContext(overrides, instanceId) {
+  return (overrides || []).filter((override) => (instanceId ? (!override.event_instance_id || override.event_instance_id === instanceId) : !override.event_instance_id));
 }
 
 function getMatchingOverrides(instance) {
@@ -193,7 +202,13 @@ function attachDrawerHandlers(card, instanceId) {
     drawerEl.innerHTML = '<p class="hint">Loading...</p>';
     drawerEl.addEventListener('click', (event) => event.stopPropagation());
     card.appendChild(drawerEl);
-    loadDrawerContent(instanceId, drawerEl);
+    const instance = findInstance(instanceId);
+    loadDrawerContent(buildDrawerContext({
+      instanceId,
+      canonicalId: instance?.canonical_event_id || '',
+      title: instance?.title || '',
+      date: formatInstanceDate(instance?.occurrence_start_at, { includeTime: true }),
+    }), drawerEl);
   });
 }
 
@@ -257,20 +272,36 @@ function renderInstances() {
     drawerEl.innerHTML = '<p class="hint">Loading...</p>';
     drawerEl.addEventListener('click', (event) => event.stopPropagation());
     openCard.appendChild(drawerEl);
-    loadDrawerContent(openDrawerInstId, drawerEl);
+    const instance = findInstance(openDrawerInstId);
+    loadDrawerContent(buildDrawerContext({
+      instanceId: openDrawerInstId,
+      canonicalId: instance?.canonical_event_id || '',
+      title: instance?.title || '',
+      date: formatInstanceDate(instance?.occurrence_start_at, { includeTime: true }),
+    }), drawerEl);
   }
 }
 
-async function loadDrawerContent(instanceId, drawerEl) {
-  const instance = findInstance(instanceId);
-  if (!instance) {
+async function loadDrawerContent(context, drawerEl) {
+  const instanceId = context?.instanceId || '';
+  let canonicalId = context?.canonicalId || '';
+  let title = context?.title || '';
+  let date = context?.date || '';
+  if (!canonicalId && instanceId) {
+    const instance = findInstance(instanceId);
+    if (instance) {
+      canonicalId = instance.canonical_event_id;
+      title = instance.title;
+      date = formatInstanceDate(instance.occurrence_start_at, { includeTime: true });
+    }
+  }
+  if (!canonicalId) {
     drawerEl.innerHTML = '<p class="hint" style="color:#a00">Instance not found.</p>';
     return;
   }
   try {
-    const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(instance.canonical_event_id));
-    const overrides = (eventPayload.overrides || [])
-      .filter((override) => !override.event_instance_id || override.event_instance_id === instanceId)
+    const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(canonicalId));
+    const overrides = getOverridesForContext(eventPayload.overrides || [], instanceId)
       .map((override) => ({
         ...override,
         payload:
@@ -281,13 +312,13 @@ async function loadDrawerContent(instanceId, drawerEl) {
 
     drawerEl.innerHTML =
       '<h4>' +
-      escapeHtml(instance.title || 'Event') +
+      escapeHtml(title || 'Event') +
       '</h4>' +
       '<p class="hint" style="margin-bottom:10px">' +
-      escapeHtml(formatInstanceDate(instance.occurrence_start_at, { includeTime: true })) +
+      escapeHtml(date) +
       '</p>' +
       '<form class="override-form mobile-override-form" data-canonical-id="' +
-      escapeHtml(instance.canonical_event_id || '') +
+      escapeHtml(canonicalId || '') +
       '" data-instance-id="' +
       escapeHtml(instanceId) +
       '">' +
@@ -337,19 +368,19 @@ async function loadDrawerContent(instanceId, drawerEl) {
           button.disabled = false;
           return;
         }
-        await fetchJson('/api/events/' + encodeURIComponent(instance.canonical_event_id) + '/overrides', {
+        await fetchJson('/api/events/' + encodeURIComponent(canonicalId) + '/overrides', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
             overrideType,
-            eventInstanceId: instanceId,
+            eventInstanceId: instanceId || undefined,
             payload: note
               ? { note }
               : {},
           }),
         });
         setStatus('Override applied.', false);
-        await loadDrawerContent(instanceId, drawerEl);
+        await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
         await loadModifiedEvents();
         renderInstances();
       } catch (error) {
@@ -366,7 +397,7 @@ async function loadDrawerContent(instanceId, drawerEl) {
         try {
           await fetchJson('/api/overrides/' + encodeURIComponent(overrideId), { method: 'DELETE' });
           setStatus('Override removed.', false);
-          await loadDrawerContent(instanceId, drawerEl);
+          await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
           await loadModifiedEvents();
           renderInstances();
         } catch (error) {
@@ -380,66 +411,75 @@ async function loadDrawerContent(instanceId, drawerEl) {
   }
 }
 
+function renderModifiedEvents() {
+  if (!activeOverrides.length) {
+    modifiedEventsListEl.innerHTML = '<p class="hint" style="padding:8px 0">No future events with modifications.</p>';
+    renderInstances();
+    return;
+  }
+
+  // Toggling drawers stays client-side; only real override mutations refetch /api/overrides.
+  modifiedEventsListEl.innerHTML = activeOverrides
+    .map((override) => {
+      const metaParts = [override.source_name || ''].filter(Boolean);
+      const note = normalizeNote(override.payload?.note);
+      const isOpen = override.id === openModifiedOverrideId;
+      return (
+        '<div class="modified-item' + (isOpen ? ' open' : '') + '" data-override-id="' + escapeHtml(override.id || '') + '">' +
+        '<div class="modified-item-main">' +
+        '<div class="modified-item-date">' +
+        escapeHtml(formatInstanceDate(override.event_date)) +
+        '</div>' +
+        '<div class="modified-item-title">' +
+        escapeHtml(override.title || '') +
+        '</div>' +
+        '<span class="status-pill status-pill-' +
+        escapeHtml(override.override_type || '') +
+        '">' +
+        escapeHtml(override.override_type || '') +
+        '</span>' +
+        '</div>' +
+        '<div class="modified-item-meta">' +
+        escapeHtml([...metaParts, note].filter(Boolean).join(' · ')) +
+        '</div>' +
+        (isOpen
+          ? '<div class="modified-item-drawer"><div class="inst-drawer mobile-drawer" id="modified-drawer-' + escapeHtml(override.id || '') + '"><p class="hint">Loading...</p></div></div>'
+          : '') +
+        '</div>'
+      );
+    })
+    .join('');
+  renderInstances();
+
+  modifiedEventsListEl.querySelectorAll('.modified-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      const overrideId = item.getAttribute('data-override-id');
+      if (!overrideId) return;
+      openModifiedOverrideId = openModifiedOverrideId === overrideId ? null : overrideId;
+      renderModifiedEvents();
+    });
+  });
+
+  if (openModifiedOverrideId) {
+    const override = activeOverrides.find((item) => item.id === openModifiedOverrideId);
+    const drawerEl = document.getElementById('modified-drawer-' + openModifiedOverrideId);
+    if (override && drawerEl) {
+      drawerEl.addEventListener('click', (event) => event.stopPropagation());
+      loadDrawerContent(buildDrawerContext({
+        instanceId: override.event_instance_id || '',
+        canonicalId: override.canonical_event_id || '',
+        title: override.title || '',
+        date: formatInstanceDate(override.event_date, { includeTime: true }),
+      }), drawerEl);
+    }
+  }
+}
+
 async function loadModifiedEvents() {
   try {
     const payload = await fetchJson('/api/overrides');
     activeOverrides = payload.overrides || [];
-    if (!activeOverrides.length) {
-      modifiedEventsListEl.innerHTML = '<p class="hint" style="padding:8px 0">No future events with modifications.</p>';
-      renderInstances();
-      return;
-    }
-
-    modifiedEventsListEl.innerHTML = activeOverrides
-      .map((override) => {
-        const metaParts = [override.source_name || ''].filter(Boolean);
-        const note = normalizeNote(override.payload?.note);
-        return (
-          '<div class="modified-item">' +
-          '<div class="modified-item-main">' +
-          '<div class="modified-item-date">' +
-          escapeHtml(formatInstanceDate(override.event_date)) +
-          '</div>' +
-          '<div class="modified-item-title">' +
-          escapeHtml(override.title || '') +
-          '</div>' +
-          '<span class="status-pill status-pill-' +
-          escapeHtml(override.override_type || '') +
-          '">' +
-          escapeHtml(override.override_type || '') +
-          '</span>' +
-          '<button class="danger remove-modified" data-override-id="' +
-          escapeHtml(override.id || '') +
-          '">Remove</button>' +
-          '</div>' +
-          '<div class="modified-item-meta">' +
-          escapeHtml([...metaParts, note].filter(Boolean).join(' · ')) +
-          '</div>' +
-          '</div>'
-        );
-      })
-      .join('');
-    renderInstances();
-
-    modifiedEventsListEl.querySelectorAll('.remove-modified').forEach((button) => {
-      button.addEventListener('click', async () => {
-        const overrideId = button.getAttribute('data-override-id');
-        if (!overrideId) return;
-        button.disabled = true;
-        try {
-          await fetchJson('/api/overrides/' + encodeURIComponent(overrideId), { method: 'DELETE' });
-          setStatus('Override removed.', false);
-          await loadModifiedEvents();
-          if (openDrawerInstId) {
-            const drawerEl = document.getElementById('drawer-' + openDrawerInstId);
-            if (drawerEl) await loadDrawerContent(openDrawerInstId, drawerEl);
-          }
-        } catch (error) {
-          setStatus('Remove failed: ' + (error.message || String(error)), true);
-          button.disabled = false;
-        }
-      });
-    });
+    renderModifiedEvents();
   } catch (error) {
     modifiedEventsListEl.innerHTML = '<p class="hint" style="padding:8px 0;color:#a00">Failed to load modifications.</p>';
   }

@@ -1,6 +1,6 @@
 # Code Review
 
-_Updated: 2026-03-09_
+_Updated: 2026-03-15_
 
 ## Review Result
 
@@ -20,6 +20,7 @@ Current code review status is clean. The earlier correctness blockers are fixed,
 - **Bug review and UX review are not the same thing.** Session 10 was useful, but the first pass mixed two real defects with several preference-level UX suggestions. Distinguishing those keeps the backlog focused.
 - **Immediate admin actions need immediate derived-state updates.** For event correction, persisting an override without recomputing its output scope is effectively a broken interaction, even if the row is stored correctly.
 - **System target identity has to be canonicalized.** Mixing slug-based and ID-based identities for built-in outputs created duplicate `output_rules` during override reconciliation. The fix was to normalize system targets to the same stable `output_targets.id` path everywhere.
+- **Admin-authored regex needs resource guardrails.** Letting operators enter raw regex is useful, but Worker CPU is too expensive to trust patterns without conservative safety validation.
 
 ---
 
@@ -41,6 +42,8 @@ Current code review status is clean. The earlier correctness blockers are fixed,
 - **Repository bootstrap overhead is reduced.** Support-table/bootstrap work is skipped after first success within an isolate, and the legacy backfill path is set-based rather than N+1.
 - **Custom Google outputs now honor configured icons.** Synced event summaries for managed Google outputs now include the configured icon instead of dropping decoration for non-system targets.
 - **Admin instance queries now hide stale migration rows.** `/api/instances` filters out `source_deleted` events and instances, so timezone-correction rebuilds do not present stale and corrected rows side by side.
+- **Source title rewrite rules are now guarded and reversible.** Unsafe regex patterns are rejected at write time, title backfills run set-based during source sync, and clearing rules restores titles from `source_title_raw`.
+- **Modified-event drawers no longer refetch on simple toggle.** Both admin surfaces keep the active override list client-side and only hit `/api/overrides` when the underlying data changes.
 
 ---
 

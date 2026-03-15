@@ -123,6 +123,14 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('ALTER TABLE sources ADD COLUMN title_rewrite_rules_json')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE canonical_events ADD COLUMN source_title_raw')) {
+      return;
+    }
+
     if (sql.includes('ALTER TABLE output_rules ADD COLUMN target_id')) {
       return;
     }
@@ -222,6 +230,7 @@ class FakeDb {
         includeInChildIcs,
         includeInFamilyIcs,
         includeInChildGoogleOutput,
+        titleRewriteRulesJson,
         sortOrder,
         pollIntervalMinutes,
         qualityProfile,
@@ -242,6 +251,7 @@ class FakeDb {
         include_in_child_ics: includeInChildIcs,
         include_in_family_ics: includeInFamilyIcs,
         include_in_child_google_output: includeInChildGoogleOutput,
+        title_rewrite_rules_json: titleRewriteRulesJson,
         is_active: 1,
         sort_order: sortOrder,
         poll_interval_minutes: pollIntervalMinutes,
@@ -398,6 +408,7 @@ class FakeDb {
           identityKey,
           eventKind,
           title,
+          sourceTitleRaw,
           sourceIcon,
           sourcePrefix,
           description,
@@ -435,6 +446,7 @@ class FakeDb {
             identity_key: identityKey,
             event_kind: eventKind,
             title,
+            source_title_raw: sourceTitleRaw,
             source_icon: sourceIcon,
             source_prefix: sourcePrefix,
             description: description || '',
@@ -460,6 +472,7 @@ class FakeDb {
           sourceId,
           identityKey,
           title,
+          sourceTitleRaw,
           sourceIcon,
           sourcePrefix,
           maybeDescriptionOrStartAt,
@@ -484,6 +497,7 @@ class FakeDb {
           identity_key: identityKey,
           event_kind: 'single',
           title,
+          source_title_raw: sourceTitleRaw,
           source_icon: sourceIcon,
           source_prefix: sourcePrefix,
           description: description || '',
@@ -615,15 +629,44 @@ class FakeDb {
       return;
     }
 
-    if (sql.includes('UPDATE canonical_events') && sql.includes('SET source_icon = ?')) {
-      const [sourceIcon, sourcePrefix, updatedAt, sourceId] = values;
-      this.canonicalEvents
-        .filter((event) => event.source_id === sourceId)
-        .forEach((event) => {
-          event.source_icon = sourceIcon;
-          event.source_prefix = sourcePrefix;
-          event.updated_at = updatedAt;
-        });
+    if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = CASE id')) {
+      const eventIdCount = (sql.match(/WHERE id IN \(([^)]+)\)/)?.[1].match(/\?/g) || []).length;
+      const titlePairs = values.slice(0, eventIdCount * 2);
+      const rawTitlePairs = values.slice(eventIdCount * 2, eventIdCount * 4);
+      const sourceIcon = values[eventIdCount * 4];
+      const sourcePrefix = values[eventIdCount * 4 + 1];
+      const timestamp = values[eventIdCount * 4 + 2];
+      const eventIds = values.slice(values.length - eventIdCount);
+      const titleMap = new Map();
+      const rawTitleMap = new Map();
+      for (let index = 0; index < titlePairs.length; index += 2) {
+        titleMap.set(titlePairs[index], titlePairs[index + 1]);
+      }
+      for (let index = 0; index < rawTitlePairs.length; index += 2) {
+        rawTitleMap.set(rawTitlePairs[index], rawTitlePairs[index + 1]);
+      }
+      for (const eventId of eventIds) {
+        const event = this.canonicalEvents.find((row) => row.id === eventId);
+        if (!event) continue;
+        if (titleMap.has(eventId)) event.title = titleMap.get(eventId);
+        if (rawTitleMap.has(eventId)) event.source_title_raw = rawTitleMap.get(eventId);
+        event.source_icon = sourceIcon;
+        event.source_prefix = sourcePrefix;
+        event.updated_at = timestamp;
+      }
+      return;
+    }
+
+    if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = ?')) {
+      const [title, sourceTitleRaw, sourceIcon, sourcePrefix, updatedAt, eventId] = values;
+      const event = this.canonicalEvents.find((row) => row.id === eventId);
+      if (event) {
+        event.title = title;
+        event.source_title_raw = sourceTitleRaw;
+        event.source_icon = sourceIcon;
+        event.source_prefix = sourcePrefix;
+        event.updated_at = updatedAt;
+      }
       return;
     }
 
@@ -776,6 +819,17 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE event_overrides') && sql.includes('SET event_instance_id = ?')) {
+      const [eventInstanceId, updatedAt, overrideId] = values;
+      const row = this.eventOverrides.find((override) => override.id === overrideId);
+      if (row) {
+        row.event_instance_id = eventInstanceId;
+        row.scope_type = 'instance';
+        row.updated_at = updatedAt;
+      }
+      return;
+    }
+
     if (sql.includes('INSERT INTO sync_jobs')) {
       const [id, jobType, scopeType, scopeId, startedAt] = values;
       this.syncJobs.push({
@@ -809,7 +863,7 @@ class FakeDb {
     }
 
     if (sql.includes('UPDATE sources') && sql.includes('display_name')) {
-      const [name, displayName, ownerType, sourceCategory, url, icon, prefix, includeInChildIcs, includeInFamilyIcs, includeInChildGoogleOutput, isActive, sortOrder, pollIntervalMinutes, qualityProfile, updatedAt, sourceId] = values;
+      const [name, displayName, ownerType, sourceCategory, url, icon, prefix, includeInChildIcs, includeInFamilyIcs, includeInChildGoogleOutput, titleRewriteRulesJson, isActive, sortOrder, pollIntervalMinutes, qualityProfile, updatedAt, sourceId] = values;
       const source = this.sources.find((row) => row.id === sourceId);
       if (source) {
         Object.assign(source, {
@@ -823,6 +877,7 @@ class FakeDb {
           include_in_child_ics: includeInChildIcs,
           include_in_family_ics: includeInFamilyIcs,
           include_in_child_google_output: includeInChildGoogleOutput,
+          title_rewrite_rules_json: titleRewriteRulesJson,
           is_active: isActive,
           sort_order: sortOrder,
           poll_interval_minutes: pollIntervalMinutes,
@@ -998,7 +1053,27 @@ class FakeDb {
       return rows.slice(0, values.at(-1) || 200);
     }
     if (sql.includes('FROM event_instances') && sql.includes('canonical_event_id = ?')) {
-      return this.eventInstances.filter((row) => row.canonical_event_id === values[0] && (!values[1] || row.id === values[1]));
+      return this.eventInstances.filter((row) =>
+        row.canonical_event_id === values[0] &&
+        (!sql.includes('source_deleted = 0') || !row.source_deleted) &&
+        (!values[1] || row.id === values[1])
+      );
+    }
+    if (sql.includes('SELECT id, title, source_title_raw') && sql.includes('FROM canonical_events')) {
+      return this.canonicalEvents
+        .filter((row) => row.source_id === values[0])
+        .map((row) => ({ id: row.id, title: row.title, source_title_raw: row.source_title_raw || null }));
+    }
+    if (sql.includes('SELECT DISTINCT event_overrides.canonical_event_id')) {
+      return [...new Set(
+        this.eventOverrides
+          .filter((row) => !row.cleared_at)
+          .filter((row) => {
+            const event = this.canonicalEvents.find((candidate) => candidate.id === row.canonical_event_id);
+            return event?.source_id === values[0];
+          })
+          .map((row) => row.canonical_event_id)
+      )].map((canonicalEventId) => ({ canonical_event_id: canonicalEventId }));
     }
     if (sql.includes('FROM event_overrides')) {
       return this.eventOverrides.filter((row) => row.canonical_event_id === values[0] && !row.cleared_at);
@@ -1181,7 +1256,7 @@ class FakeDb {
     }
     if (sql.includes('SELECT canonical_events.id, canonical_events.source_id')) {
       const event = this.canonicalEvents.find((row) => row.id === values[0]);
-      return event ? { id: event.id, source_id: event.source_id } : null;
+      return event ? { id: event.id, source_id: event.source_id, event_kind: event.event_kind } : null;
     }
     if (sql.includes('FROM canonical_events') && sql.includes('JOIN sources')) {
       const event = this.canonicalEvents.find((row) => row.id === values[0]);
@@ -2050,6 +2125,109 @@ describe('family-scheduling worker', () => {
 
     expect(duplicateResponse.status).toBe(400);
     expect(duplicateBody.message).toContain('already active');
+  });
+
+  it('applies source title rewrite rules on ingest and restores original titles when cleared', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_title_rules',
+      name: 'grayson-tigers',
+      display_name: 'Grayson Tigers',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/tigers.ics',
+      icon: '',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: JSON.stringify([{ pattern: 'u11a', flags: 'gi', replacement: 'Tigers' }]),
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:tigers-1',
+            'SUMMARY:U11A Practice',
+            'DTSTART:20990101T180000Z',
+            'DTEND:20990101T190000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ensureSupportTables();
+    await repo.ingestSource('src_title_rules');
+
+    expect(db.canonicalEvents).toHaveLength(1);
+    expect(db.canonicalEvents[0].source_title_raw).toBe('U11A Practice');
+    expect(db.canonicalEvents[0].title).toBe('Tigers Practice');
+
+    await repo.updateSource('src_title_rules', {
+      title_rewrite_rules_text: '/Practice/g => Game'
+    });
+
+    expect(db.canonicalEvents[0].source_title_raw).toBe('U11A Practice');
+    expect(db.canonicalEvents[0].title).toBe('U11A Game');
+
+    await repo.updateSource('src_title_rules', {
+      title_rewrite_rules_text: ''
+    });
+
+    expect(db.canonicalEvents[0].title).toBe('U11A Practice');
+  });
+
+  it('rejects unsafe title rewrite rules', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_unsafe_rules',
+      name: 'unsafe-rules',
+      display_name: 'Unsafe Rules',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/unsafe.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 0,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: '[]',
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const repo = new D1Repository(db, env);
+    await repo.ensureSupportTables();
+
+    await expect(repo.updateSource('src_unsafe_rules', {
+      title_rewrite_rules_text: '/(a+)+$/ => Tigers',
+    })).rejects.toThrow(/unsafe regex/i);
   });
 
   it('creates and updates sources through the admin API with per-target rules', async () => {
@@ -3008,6 +3186,144 @@ describe('family-scheduling worker', () => {
     await drainQueue(env);
     expect(db.googleEventLinks).toHaveLength(1);
     expect(db.googleEventLinks[0].google_event_id).toBe('google-event-2');
+  });
+
+  it('reapplies active skip overrides after ingest rebuilds output rules', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_override_rebuild',
+      name: 'naomi-stormfest',
+      display_name: 'Naomi Stormfest',
+      provider_type: 'ics',
+      owner_type: 'naomi',
+      source_category: 'sports',
+      url: 'https://example.com/stormfest.ics',
+      icon: '',
+      prefix: 'N:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:stormfest-1',
+            'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
+            'DTSTART:20260320T174527',
+            'DTEND:20260320T190027',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ensureSupportTables();
+    await repo.ingestSource('src_override_rebuild');
+
+    const event = db.canonicalEvents[0];
+    const instance = db.eventInstances[0];
+    await repo.createOverride({
+      eventId: event.id,
+      eventInstanceId: instance.id,
+      overrideType: 'skip',
+      payload: {},
+      actorRole: 'editor',
+    });
+
+    expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
+
+    await repo.ingestSource('src_override_rebuild');
+
+    expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
+    expect(db.outputRules.every((rule) => rule.derived_reason === 'override:skip')).toBe(true);
+  });
+
+  it('keeps single-event skip overrides when the upstream time changes', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_override_remap',
+      name: 'naomi-stormfest-remap',
+      display_name: 'Naomi Stormfest Remap',
+      provider_type: 'ics',
+      owner_type: 'naomi',
+      source_category: 'sports',
+      url: 'https://example.com/stormfest-remap.ics',
+      icon: '',
+      prefix: 'N:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let startStamp = '20260320T174527';
+    let endStamp = '20260320T190027';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:stormfest-remap-1',
+            'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
+            `DTSTART:${startStamp}`,
+            `DTEND:${endStamp}`,
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ensureSupportTables();
+    await repo.ingestSource('src_override_remap');
+
+    const event = db.canonicalEvents[0];
+    const originalInstanceId = db.eventInstances[0].id;
+    await repo.createOverride({
+      eventId: event.id,
+      eventInstanceId: originalInstanceId,
+      overrideType: 'skip',
+      payload: {},
+      actorRole: 'editor',
+    });
+
+    startStamp = '20260320T184527';
+    endStamp = '20260320T200027';
+    await repo.ingestSource('src_override_remap');
+
+    const movedInstance = db.eventInstances.find((row) => !row.source_deleted);
+    expect(movedInstance.id).not.toBe(originalInstanceId);
+    expect(db.eventOverrides[0].event_instance_id).toBe(movedInstance.id);
+    expect(db.outputRules.filter((rule) => rule.event_instance_id === movedInstance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
   });
 
   it('deletes stale google output events when a source is disabled', async () => {
