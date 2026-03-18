@@ -9,6 +9,7 @@ async function drainQueue(env) {
   while (env.JOBS_QUEUE.sent.length) {
     const messages = env.JOBS_QUEUE.sent.splice(0).map((body) => ({
       body,
+      attempts: body.attemptCount || 1,
       ack: vi.fn(),
       retry: vi.fn(),
     }));
@@ -128,6 +129,14 @@ class FakeDb {
     }
 
     if (sql.includes('ALTER TABLE canonical_events ADD COLUMN source_title_raw')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE sync_jobs ADD COLUMN attempt_count')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE sync_jobs ADD COLUMN last_error_kind')) {
       return;
     }
 
@@ -842,18 +851,39 @@ class FakeDb {
         finished_at: null,
         summary_json: null,
         error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
       });
       return;
     }
 
+    if (sql.includes("SET status = 'queued', finished_at = NULL, attempt_count = ?")) {
+      const [attemptCount, lastErrorKind, errorJson, jobId] = values;
+      const job = this.syncJobs.find((row) => row.id === jobId);
+      if (job) {
+        job.status = 'queued';
+        job.finished_at = null;
+        job.attempt_count = attemptCount;
+        job.last_error_kind = lastErrorKind;
+        job.error_json = errorJson ?? job.error_json;
+      }
+      return;
+    }
+
     if (sql.includes('UPDATE sync_jobs')) {
-      const [status, finishedAt, summaryJson, errorJson, jobId] = values;
+      const hasRetryMetadata = values.length >= 7;
+      const [status, finishedAt, summaryJson, errorJson] = values;
+      const jobId = hasRetryMetadata ? values[6] : values[4];
       const job = this.syncJobs.find((row) => row.id === jobId);
       if (job) {
         job.status = status;
         job.finished_at = finishedAt;
         job.summary_json = summaryJson ?? job.summary_json;
         job.error_json = errorJson ?? job.error_json;
+        if (hasRetryMetadata) {
+          job.attempt_count = values[4] ?? job.attempt_count;
+          job.last_error_kind = values[5] ?? job.last_error_kind;
+        }
       }
       return;
     }
@@ -977,6 +1007,8 @@ class FakeDb {
         finished_at: job.finished_at,
         summary_json: job.summary_json || null,
         error_json: job.error_json || null,
+        attempt_count: job.attempt_count || 0,
+        last_error_kind: job.last_error_kind || null,
       }));
     }
     if (sql.includes('FROM output_targets')) {
@@ -1299,6 +1331,8 @@ class FakeDb {
           ...row,
           summary_json: row.summary_json || null,
           error_json: row.error_json || null,
+          attempt_count: row.attempt_count || 0,
+          last_error_kind: row.last_error_kind || null,
         }))[0] || null;
     }
     if (sql.includes('FROM output_targets') && sql.includes('WHERE slug = ?')) {
@@ -1473,6 +1507,92 @@ describe('family-scheduling worker', () => {
     expect(second.deduped).toBe(true);
     expect(env.JOBS_QUEUE.send).toHaveBeenCalledTimes(1);
     expect(db.syncJobs).toHaveLength(1);
+  });
+
+  it('schedules delayed retries for retryable queue job failures and records retry metadata', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.JOB_RETRY_JITTER_PCT = '0';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_retryable',
+      name: 'retryable-source',
+      display_name: 'Retryable Source',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/retryable.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down'); }));
+    const repo = await createRepository(env);
+    const job = await repo.enqueueJob({
+      jobType: 'ingest_source',
+      scopeType: 'source',
+      scopeId: 'src_retryable',
+      dedupe: false,
+    });
+    const ack = vi.fn();
+    const retry = vi.fn();
+
+    await worker.queue({
+      messages: [{
+        body: env.JOBS_QUEUE.sent.shift(),
+        attempts: 1,
+        ack,
+        retry,
+      }],
+    }, env);
+
+    expect(retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+    expect(ack).not.toHaveBeenCalled();
+    const storedJob = db.syncJobs.find((row) => row.id === job.id);
+    expect(storedJob?.status).toBe('queued');
+    expect(storedJob?.attempt_count).toBe(1);
+    expect(storedJob?.last_error_kind).toBe('network_error');
+  });
+
+  it('marks non-retryable queue job failures as failed without retrying', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.JOB_RETRY_JITTER_PCT = '0';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    const repo = await createRepository(env);
+    const job = await repo.enqueueJob({
+      jobType: 'ingest_source',
+      scopeType: 'source',
+      scopeId: 'missing_source',
+      dedupe: false,
+    });
+    const ack = vi.fn();
+    const retry = vi.fn();
+
+    await worker.queue({
+      messages: [{
+        body: env.JOBS_QUEUE.sent.shift(),
+        attempts: 1,
+        ack,
+        retry,
+      }],
+    }, env);
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(ack).toHaveBeenCalled();
+    const storedJob = db.syncJobs.find((row) => row.id === job.id);
+    expect(storedJob?.status).toBe('failed');
+    expect(storedJob?.attempt_count).toBe(1);
+    expect(storedJob?.last_error_kind).toBe('source_state_error');
   });
 
   it('repairs legacy google_event_links schema to allow null google_event_id', async () => {

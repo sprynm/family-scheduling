@@ -17,6 +17,71 @@ function logEvent(level, event, fields = {}) {
   logger(JSON.stringify({ event, ...fields }));
 }
 
+function getRetryDelaySchedule(env) {
+  const configured = String(env.JOB_RETRY_DELAYS_SECONDS || '').trim();
+  if (!configured) return [60, 300, 900, 3600, 10800];
+  return configured
+    .split(',')
+    .map((value) => Number.parseInt(value.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+function getMaxRetryAttempts(env) {
+  const schedule = getRetryDelaySchedule(env);
+  const configured = Number.parseInt(String(env.JOB_RETRY_MAX_ATTEMPTS || ''), 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return schedule.length;
+}
+
+function getRetryJitterPct(env) {
+  const configured = Number.parseFloat(String(env.JOB_RETRY_JITTER_PCT || '0.2'));
+  return Number.isFinite(configured) && configured >= 0 ? configured : 0.2;
+}
+
+function addRetryJitter(delaySeconds, jitterPct) {
+  if (!(delaySeconds > 0) || !(jitterPct > 0)) return delaySeconds;
+  const jitterSeconds = Math.floor(Math.random() * Math.max(1, Math.round(delaySeconds * jitterPct)));
+  return delaySeconds + jitterSeconds;
+}
+
+function classifyQueueError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = Number(error?.status || 0);
+  const retryAfterSeconds = Number(error?.retryAfterSeconds || 0) || 0;
+
+  if (error?.googleRateLimited) {
+    return { retryable: true, errorKind: 'google_rate_limit', retryAfterSeconds };
+  }
+  if (/queue send failed: too many requests/i.test(message)) {
+    return { retryable: true, errorKind: 'queue_rate_limit', retryAfterSeconds };
+  }
+  if (/Source fetch failed .* HTTP 5\d\d/i.test(message) || status >= 500) {
+    return { retryable: true, errorKind: 'upstream_5xx', retryAfterSeconds };
+  }
+  if (error instanceof TypeError) {
+    return { retryable: true, errorKind: 'network_error', retryAfterSeconds };
+  }
+  if (/GOOGLE_SERVICE_ACCOUNT_JSON is required/i.test(message) || /missing required/i.test(message)) {
+    return { retryable: false, errorKind: 'config_error', retryAfterSeconds };
+  }
+  if (/Unknown source|Source is inactive|Source URL must use http or https/i.test(message)) {
+    return { retryable: false, errorKind: 'source_state_error', retryAfterSeconds };
+  }
+  if (/Source fetch failed .* HTTP 4\d\d/i.test(message) || (status >= 400 && status < 500)) {
+    return { retryable: false, errorKind: 'upstream_4xx', retryAfterSeconds };
+  }
+  return { retryable: false, errorKind: 'processing_error', retryAfterSeconds };
+}
+
+function computeRetryDelaySeconds(env, attemptCount, retryAfterSeconds = 0) {
+  const schedule = getRetryDelaySchedule(env);
+  const baseDelay = schedule[Math.max(0, Math.min(attemptCount - 1, schedule.length - 1))] || schedule[schedule.length - 1] || 60;
+  const delayed = Math.max(baseDelay, Number(retryAfterSeconds || 0) || 0);
+  return addRetryJitter(delayed, getRetryJitterPct(env));
+}
+
 function getRouteTarget(pathname) {
   const match = pathname.toLowerCase().match(/^\/(family|grayson|naomi)\.(ics|isc)$/);
   return match?.[1] || null;
@@ -359,17 +424,49 @@ export default {
         await repo.markJobStatus(job.jobId, 'completed', { summary });
         message.ack();
       } catch (error) {
+        const attemptCount = Math.max(1, Number(message.attempts || job.attemptCount || 1));
+        const { retryable, errorKind, retryAfterSeconds } = classifyQueueError(error);
+        const maxAttempts = getMaxRetryAttempts(env);
+        const errorPayload = {
+          message: error instanceof Error ? error.message : String(error),
+          kind: errorKind,
+        };
+
+        if (retryable && attemptCount < maxAttempts) {
+          const delaySeconds = computeRetryDelaySeconds(env, attemptCount, retryAfterSeconds);
+          await repo.recordJobRetry(job.jobId, {
+            attemptCount,
+            lastErrorKind: errorKind,
+            error: errorPayload,
+          });
+          logEvent('info', 'queue_job_retry_scheduled', {
+            job_id: job.jobId || null,
+            job_type: job.jobType || null,
+            scope_type: job.scopeType || null,
+            scope_id: job.scopeId || null,
+            attempt_count: attemptCount,
+            delay_seconds: delaySeconds,
+            error_kind: errorKind,
+          });
+          message.retry({ delaySeconds });
+          continue;
+        }
+
         logEvent('error', 'queue_job_failed', {
           job_id: job.jobId || null,
           job_type: job.jobType || null,
           scope_type: job.scopeType || null,
           scope_id: job.scopeId || null,
-          message: error instanceof Error ? error.message : String(error),
+          attempt_count: attemptCount,
+          error_kind: errorKind,
+          message: errorPayload.message,
         });
         await repo.markJobStatus(job.jobId, 'failed', {
-          error: { message: error instanceof Error ? error.message : String(error) },
+          error: errorPayload,
+          attemptCount,
+          lastErrorKind: errorKind,
         });
-        message.retry();
+        message.ack();
       }
     }
   },

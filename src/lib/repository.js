@@ -443,6 +443,18 @@ export class D1Repository {
       const message = error instanceof Error ? error.message : String(error);
       if (!/duplicate column name|already exists/i.test(message)) throw error;
     }
+    try {
+      await this.db.prepare(`ALTER TABLE sync_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    try {
+      await this.db.prepare(`ALTER TABLE sync_jobs ADD COLUMN last_error_kind TEXT`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
 
     const ensureOutputRuleTargetId = async () => {
       try {
@@ -985,7 +997,7 @@ export class D1Repository {
 
   async listJobs(limit = 50) {
     const result = await this.db.prepare(
-      `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json
+      `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json, attempt_count, last_error_kind
        FROM sync_jobs ORDER BY started_at DESC LIMIT ?`
     ).bind(limit).all();
     return result.results || [];
@@ -1834,7 +1846,7 @@ export class D1Repository {
 
   async findActiveJob(jobType, scopeType, scopeId) {
     const row = await this.db.prepare(
-      `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json
+      `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json, attempt_count, last_error_kind
        FROM sync_jobs
        WHERE job_type = ? AND scope_type = ? AND scope_id IS ?
          AND status IN ('queued', 'running')
@@ -1853,7 +1865,7 @@ export class D1Repository {
   async enqueueJob({ jobType, scopeType, scopeId, payload = null, dedupe = DEDUPED_JOB_TYPES.has(jobType) }) {
     if (dedupe) {
       const activeJob = await this.findActiveJob(jobType, scopeType, scopeId || null);
-      if (activeJob) {
+        if (activeJob) {
         return {
           id: activeJob.id,
           job_type: activeJob.job_type,
@@ -1862,6 +1874,8 @@ export class D1Repository {
           status: activeJob.status,
           started_at: activeJob.started_at,
           finished_at: activeJob.finished_at,
+          attempt_count: Number(activeJob.attempt_count || 0),
+          last_error_kind: activeJob.last_error_kind || null,
           summary: activeJob.summary,
           error: activeJob.error,
           deduped: true,
@@ -1891,8 +1905,23 @@ export class D1Repository {
       scope_id: scopeId || null,
       status: 'queued',
       started_at: timestamp,
+      attempt_count: 0,
+      last_error_kind: null,
       deduped: false,
     };
+  }
+
+  async recordJobRetry(jobId, { attemptCount, lastErrorKind, error }) {
+    await this.db.prepare(
+      `UPDATE sync_jobs
+       SET status = 'queued', finished_at = NULL, attempt_count = ?, last_error_kind = ?, error_json = COALESCE(?, error_json)
+       WHERE id = ?`
+    ).bind(
+      Number(attemptCount || 0),
+      lastErrorKind || null,
+      error ? JSON.stringify(error) : null,
+      jobId
+    ).run();
   }
 
   async getFeedContract(requestUrl) {
@@ -2316,17 +2345,20 @@ export class D1Repository {
     await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'sync' });
   }
 
-  async markJobStatus(jobId, status, { summary = null, error = null } = {}) {
+  async markJobStatus(jobId, status, { summary = null, error = null, attemptCount = null, lastErrorKind = null } = {}) {
     const finishedAt = ['completed', 'failed'].includes(status) ? nowIso() : null;
     await this.db.prepare(
       `UPDATE sync_jobs
-       SET status = ?, finished_at = ?, summary_json = COALESCE(?, summary_json), error_json = COALESCE(?, error_json)
+       SET status = ?, finished_at = ?, summary_json = COALESCE(?, summary_json), error_json = COALESCE(?, error_json),
+           attempt_count = COALESCE(?, attempt_count), last_error_kind = COALESCE(?, last_error_kind)
        WHERE id = ?`
     ).bind(
       status,
       finishedAt,
       summary ? JSON.stringify(summary) : null,
       error ? JSON.stringify(error) : null,
+      attemptCount == null ? null : Number(attemptCount),
+      lastErrorKind || null,
       jobId
     ).run();
   }
