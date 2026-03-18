@@ -3,6 +3,20 @@ import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
 import { json, text } from './lib/responses.js';
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseOptionalPositiveInt(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function logEvent(level, event, fields = {}) {
+  const logger = level === 'error' ? console.error : console.log;
+  logger(JSON.stringify({ event, ...fields }));
+}
+
 function getRouteTarget(pathname) {
   const match = pathname.toLowerCase().match(/^\/(family|grayson|naomi)\.(ics|isc)$/);
   return match?.[1] || null;
@@ -345,6 +359,13 @@ export default {
         await repo.markJobStatus(job.jobId, 'completed', { summary });
         message.ack();
       } catch (error) {
+        logEvent('error', 'queue_job_failed', {
+          job_id: job.jobId || null,
+          job_type: job.jobType || null,
+          scope_type: job.scopeType || null,
+          scope_id: job.scopeId || null,
+          message: error instanceof Error ? error.message : String(error),
+        });
         await repo.markJobStatus(job.jobId, 'failed', {
           error: { message: error instanceof Error ? error.message : String(error) },
         });
@@ -355,19 +376,79 @@ export default {
   async scheduled(controller, env) {
     const repo = await createRepository(env);
     const sources = await repo.listActiveSources();
+    const maxEnqueuesPerRun = parseOptionalPositiveInt(env.CRON_MAX_ENQUEUES_PER_RUN);
+    const sendSpacingMs = parseOptionalPositiveInt(env.CRON_QUEUE_SEND_SPACING_MS);
+    const stats = {
+      cron: controller.cron,
+      scheduled_time: controller.scheduledTime,
+      sources_due: sources.length,
+      enqueued: 0,
+      deduped: 0,
+      rate_limited: 0,
+      failed: 0,
+      capped: 0,
+      prune_enqueued: 0,
+      prune_failed: 0,
+    };
     for (const source of sources) {
-      await repo.enqueueJob({
-        jobType: 'ingest_source',
-        scopeType: 'source',
-        scopeId: source.id,
-      });
+      if (maxEnqueuesPerRun > 0 && stats.enqueued >= maxEnqueuesPerRun) {
+        stats.capped += 1;
+        continue;
+      }
+      try {
+        const job = await repo.enqueueJob({
+          jobType: 'ingest_source',
+          scopeType: 'source',
+          scopeId: source.id,
+        });
+        if (job.deduped) {
+          stats.deduped += 1;
+        } else {
+          stats.enqueued += 1;
+          if (sendSpacingMs > 0) {
+            await sleep(sendSpacingMs);
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        stats.failed += 1;
+        if (/too many requests/i.test(message)) {
+          stats.rate_limited += 1;
+        }
+        logEvent('error', 'cron_enqueue_failed', {
+          cron: controller.cron,
+          scheduled_time: controller.scheduledTime,
+          job_type: 'ingest_source',
+          scope_type: 'source',
+          scope_id: source.id,
+          message,
+        });
+      }
     }
     if (controller.cron === '17 3 * * *') {
-      await repo.enqueueJob({
-        jobType: 'prune_stale_data',
-        scopeType: 'system',
-        scopeId: null,
-      });
+      try {
+        const job = await repo.enqueueJob({
+          jobType: 'prune_stale_data',
+          scopeType: 'system',
+          scopeId: null,
+        });
+        if (job.deduped) {
+          stats.deduped += 1;
+        } else {
+          stats.prune_enqueued += 1;
+        }
+      } catch (error) {
+        stats.prune_failed += 1;
+        logEvent('error', 'cron_enqueue_failed', {
+          cron: controller.cron,
+          scheduled_time: controller.scheduledTime,
+          job_type: 'prune_stale_data',
+          scope_type: 'system',
+          scope_id: null,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
+    logEvent('info', 'cron_enqueue_summary', stats);
   },
 };

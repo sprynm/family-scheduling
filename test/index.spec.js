@@ -2,7 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import { clearAuthCachesForTest } from '../src/lib/auth.js';
-import { D1Repository } from '../src/lib/repository.js';
+import { createRepository, D1Repository } from '../src/lib/repository.js';
 import { parseICS } from '../src/lib/ics.js';
 
 async function drainQueue(env) {
@@ -846,6 +846,18 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE sync_jobs')) {
+      const [status, finishedAt, summaryJson, errorJson, jobId] = values;
+      const job = this.syncJobs.find((row) => row.id === jobId);
+      if (job) {
+        job.status = status;
+        job.finished_at = finishedAt;
+        job.summary_json = summaryJson ?? job.summary_json;
+        job.error_json = errorJson ?? job.error_json;
+      }
+      return;
+    }
+
     if (sql.includes('DELETE FROM output_targets WHERE id = ?')) {
       const [targetId] = values;
       this.outputTargets = this.outputTargets.filter((row) => row.id !== targetId);
@@ -1279,6 +1291,16 @@ class FakeDb {
     if (sql.includes('SELECT * FROM sources WHERE id = ?')) {
       return this.sources.find((row) => row.id === values[0]) || null;
     }
+    if (sql.includes('FROM sync_jobs') && sql.includes("status IN ('queued', 'running')")) {
+      return this.syncJobs
+        .filter((row) => row.job_type === values[0] && row.scope_type === values[1] && row.scope_id === values[2] && (row.status === 'queued' || row.status === 'running'))
+        .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))
+        .map((row) => ({
+          ...row,
+          summary_json: row.summary_json || null,
+          error_json: row.error_json || null,
+        }))[0] || null;
+    }
     if (sql.includes('FROM output_targets') && sql.includes('WHERE slug = ?')) {
       return this.outputTargets.find((row) => row.slug === values[0]) || null;
     }
@@ -1329,6 +1351,130 @@ afterEach(() => {
 });
 
 describe('family-scheduling worker', () => {
+  it('continues cron enqueueing after a queue producer rate limit error', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push(
+      {
+        id: 'src_one',
+        name: 'one',
+        display_name: 'One',
+        provider_type: 'ics',
+        owner_type: 'family',
+        source_category: 'shared',
+        url: 'https://example.com/one.ics',
+        icon: '',
+        prefix: '',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 0,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 0,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'src_two',
+        name: 'two',
+        display_name: 'Two',
+        provider_type: 'ics',
+        owner_type: 'family',
+        source_category: 'shared',
+        url: 'https://example.com/two.ics',
+        icon: '',
+        prefix: '',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 0,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 1,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    let sendCount = 0;
+    env.JOBS_QUEUE.send = vi.fn(async (body) => {
+      sendCount += 1;
+      if (sendCount === 1) {
+        throw new Error('Queue send failed: Too Many Requests');
+      }
+      env.JOBS_QUEUE.sent.push(body);
+    });
+
+    await worker.scheduled({ cron: '*/30 * * * *', scheduledTime: 1773869446000 }, env);
+
+    expect(env.JOBS_QUEUE.sent).toHaveLength(1);
+    expect(db.syncJobs).toHaveLength(2);
+    expect(consoleError).toHaveBeenCalled();
+    expect(consoleLog).toHaveBeenCalled();
+  });
+
+  it('dedupes equivalent active source jobs before sending a new queue message', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    const repo = await createRepository(env);
+
+    const first = await repo.enqueueJob({
+      jobType: 'ingest_source',
+      scopeType: 'source',
+      scopeId: 'src_same',
+    });
+    const second = await repo.enqueueJob({
+      jobType: 'ingest_source',
+      scopeType: 'source',
+      scopeId: 'src_same',
+    });
+
+    expect(first.deduped).toBe(false);
+    expect(second.deduped).toBe(true);
+    expect(second.id).toBe(first.id);
+    expect(env.JOBS_QUEUE.send).toHaveBeenCalledTimes(1);
+    expect(db.syncJobs).toHaveLength(1);
+  });
+
+  it('dedupes equivalent active source-target jobs before sending a new queue message', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    const repo = await createRepository(env);
+
+    const first = await repo.enqueueJob({
+      jobType: 'sync_google_target',
+      scopeType: 'source_target',
+      scopeId: 'src_a|target_a|sync',
+      payload: {
+        sourceId: 'src_a',
+        targetId: 'target_a',
+        mode: 'sync',
+      },
+    });
+    const second = await repo.enqueueJob({
+      jobType: 'sync_google_target',
+      scopeType: 'source_target',
+      scopeId: 'src_a|target_a|sync',
+      payload: {
+        sourceId: 'src_a',
+        targetId: 'target_a',
+        mode: 'sync',
+      },
+    });
+
+    expect(first.deduped).toBe(false);
+    expect(second.deduped).toBe(true);
+    expect(env.JOBS_QUEUE.send).toHaveBeenCalledTimes(1);
+    expect(db.syncJobs).toHaveLength(1);
+  });
+
   it('repairs legacy google_event_links schema to allow null google_event_id', async () => {
     const db = new FakeDb();
     db.googleEventLinkGoogleEventIdNotNull = 1;
@@ -1410,8 +1556,8 @@ describe('family-scheduling worker', () => {
       source_prefix: '',
       description: '',
       location: '',
-      start_at: '2026-03-10T01:00:00.000Z',
-      end_at: '2026-03-10T02:00:00.000Z',
+      start_at: '2099-03-10T01:00:00.000Z',
+      end_at: '2099-03-10T02:00:00.000Z',
       timezone: 'UTC',
       status: 'confirmed',
       rrule: null,
@@ -1426,9 +1572,9 @@ describe('family-scheduling worker', () => {
     db.eventInstances.push({
       id: 'ei_1',
       canonical_event_id: 'ce_1',
-      occurrence_start_at: '2026-03-10T01:00:00.000Z',
-      occurrence_end_at: '2026-03-10T02:00:00.000Z',
-      recurrence_instance_key: '2026-03-10T01:00:00.000Z',
+      occurrence_start_at: '2099-03-10T01:00:00.000Z',
+      occurrence_end_at: '2099-03-10T02:00:00.000Z',
+      recurrence_instance_key: '2099-03-10T01:00:00.000Z',
       provider_recurrence_id: null,
       status: 'confirmed',
       source_deleted: 0,
@@ -2504,8 +2650,8 @@ describe('family-scheduling worker', () => {
             'BEGIN:VEVENT',
             'UID:naomi-vball-1',
             'SUMMARY:Volleyball Game',
-            'DTSTART:20260310T010000Z',
-            'DTEND:20260310T023000Z',
+            'DTSTART:20990310T010000Z',
+            'DTEND:20990310T023000Z',
             'END:VEVENT',
             'END:VCALENDAR',
           ].join('\r\n'),
@@ -2724,16 +2870,16 @@ describe('family-scheduling worker', () => {
             'BEGIN:VEVENT',
             'UID:grayson-series-1',
             'SUMMARY:Hockey Practice',
-            'DTSTART:20260310T010000Z',
-            'DTEND:20260310T020000Z',
+            'DTSTART:20260610T010000Z',
+            'DTEND:20260610T020000Z',
             'RRULE:FREQ=DAILY;COUNT=2',
             'END:VEVENT',
             'BEGIN:VEVENT',
             'UID:grayson-series-1',
-            'RECURRENCE-ID:20260311T010000Z',
+            'RECURRENCE-ID:20260611T010000Z',
             'SUMMARY:Hockey Practice - Moved',
-            'DTSTART:20260311T030000Z',
-            'DTEND:20260311T040000Z',
+            'DTSTART:20260611T030000Z',
+            'DTEND:20260611T040000Z',
             'END:VEVENT',
             'END:VCALENDAR',
           ].join('\r\n'),
@@ -2747,7 +2893,7 @@ describe('family-scheduling worker', () => {
 
     expect(db.canonicalEvents).toHaveLength(1);
     expect(db.eventInstances).toHaveLength(2);
-    expect(db.eventInstances.some((instance) => instance.recurrence_instance_key === '2026-03-11T01:00:00.000Z' && instance.occurrence_start_at === '2026-03-11T03:00:00.000Z')).toBe(true);
+    expect(db.eventInstances.some((instance) => instance.recurrence_instance_key === '2026-06-11T01:00:00.000Z' && instance.occurrence_start_at === '2026-06-11T03:00:00.000Z')).toBe(true);
   });
 
   it('skips ingesting single events older than the past retention window', async () => {
@@ -2944,6 +3090,7 @@ describe('family-scheduling worker', () => {
 
   it('syncs linked google output events after ingest and updates them on change', async () => {
     env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
     env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
     const db = new FakeDb();
     env.APP_DB = db;
@@ -3003,8 +3150,8 @@ describe('family-scheduling worker', () => {
             'BEGIN:VEVENT',
             'UID:grayson-google-1',
             `SUMMARY:${icsSummary}`,
-            'DTSTART:20260310T010000Z',
-            'DTEND:20260310T023000Z',
+            'DTSTART:20990310T010000Z',
+            'DTEND:20990310T023000Z',
             'END:VEVENT',
             'END:VCALENDAR',
           ].join('\r\n'),
@@ -3125,8 +3272,8 @@ describe('family-scheduling worker', () => {
             'BEGIN:VEVENT',
             'UID:grayson-override-1',
             'SUMMARY:Hockey Practice',
-            'DTSTART:20260310T010000Z',
-            'DTEND:20260310T023000Z',
+            'DTSTART:20990310T010000Z',
+            'DTEND:20990310T023000Z',
             'END:VEVENT',
             'END:VCALENDAR',
           ].join('\r\n'),
@@ -3387,8 +3534,8 @@ describe('family-scheduling worker', () => {
       source_prefix: '',
       description: '',
       location: '',
-      start_at: '2026-03-10T01:00:00.000Z',
-      end_at: '2026-03-10T02:00:00.000Z',
+      start_at: '2099-03-10T01:00:00.000Z',
+      end_at: '2099-03-10T02:00:00.000Z',
       timezone: 'UTC',
       status: 'confirmed',
       rrule: null,
@@ -3403,9 +3550,9 @@ describe('family-scheduling worker', () => {
     db.eventInstances.push({
       id: 'inst_google_disable',
       canonical_event_id: 'evt_google_disable',
-      occurrence_start_at: '2026-03-10T01:00:00.000Z',
-      occurrence_end_at: '2026-03-10T02:00:00.000Z',
-      recurrence_instance_key: '2026-03-10T01:00:00.000Z',
+      occurrence_start_at: '2099-03-10T01:00:00.000Z',
+      occurrence_end_at: '2099-03-10T02:00:00.000Z',
+      recurrence_instance_key: '2099-03-10T01:00:00.000Z',
       provider_recurrence_id: null,
       status: 'confirmed',
       source_deleted: 0,
@@ -3449,6 +3596,7 @@ describe('family-scheduling worker', () => {
 
   it('records google sync errors without aborting ingest', async () => {
     env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
     env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
     const db = new FakeDb();
     env.APP_DB = db;
@@ -3509,8 +3657,8 @@ describe('family-scheduling worker', () => {
               'BEGIN:VEVENT',
               'UID:naomi-error-1',
               'SUMMARY:Volleyball Practice',
-              'DTSTART:20260310T010000Z',
-              'DTEND:20260310T023000Z',
+              'DTSTART:20990310T010000Z',
+              'DTEND:20990310T023000Z',
               'END:VEVENT',
               'END:VCALENDAR',
             ].join('\r\n'),
@@ -3871,14 +4019,14 @@ describe('family-scheduling worker', () => {
             'BEGIN:VEVENT',
             'UID:grayson-rate-limit-1',
             'SUMMARY:Practice One',
-            'DTSTART:20260310T010000Z',
-            'DTEND:20260310T020000Z',
+            'DTSTART:20990310T010000Z',
+            'DTEND:20990310T020000Z',
             'END:VEVENT',
             'BEGIN:VEVENT',
             'UID:grayson-rate-limit-2',
             'SUMMARY:Practice Two',
-            'DTSTART:20260311T010000Z',
-            'DTEND:20260311T020000Z',
+            'DTSTART:20990311T010000Z',
+            'DTEND:20990311T020000Z',
             'END:VEVENT',
             'END:VCALENDAR',
           ].join('\r\n'),

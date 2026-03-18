@@ -218,6 +218,8 @@ function parseSourceTargetScopeId(scopeId) {
   return { sourceId, targetId, mode };
 }
 
+const DEDUPED_JOB_TYPES = new Set(['ingest_source', 'rebuild_source', 'sync_google_target', 'prune_stale_data']);
+
 function tryParseJson(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
   try {
@@ -1494,8 +1496,9 @@ export class D1Repository {
   async enqueueGoogleSyncJobsForSource(sourceId, { mode = 'sync' } = {}) {
     const targets = await this.listGoogleTargetsForSource(sourceId);
     let queued = 0;
+    let deduped = 0;
     for (const target of targets) {
-      await this.enqueueJob({
+      const job = await this.enqueueJob({
         jobType: 'sync_google_target',
         scopeType: 'source_target',
         scopeId: buildSourceTargetScopeId(sourceId, target.id, mode),
@@ -1505,12 +1508,17 @@ export class D1Repository {
           mode,
         },
       });
-      queued += 1;
+      if (job.deduped) {
+        deduped += 1;
+      } else {
+        queued += 1;
+      }
     }
     return {
       mode,
       queued_jobs: queued,
       queued_targets: queued,
+      deduped_jobs: deduped,
     };
   }
 
@@ -1824,7 +1832,43 @@ export class D1Repository {
     return this.getEvent(override.canonical_event_id);
   }
 
-  async enqueueJob({ jobType, scopeType, scopeId, payload = null }) {
+  async findActiveJob(jobType, scopeType, scopeId) {
+    const row = await this.db.prepare(
+      `SELECT id, job_type, scope_type, scope_id, status, started_at, finished_at, summary_json, error_json
+       FROM sync_jobs
+       WHERE job_type = ? AND scope_type = ? AND scope_id IS ?
+         AND status IN ('queued', 'running')
+       ORDER BY started_at DESC
+       LIMIT 1`
+    ).bind(jobType, scopeType, scopeId || null).first();
+
+    if (!row) return null;
+    return {
+      ...mapRow(row),
+      summary: tryParseJson(row.summary_json, null),
+      error: tryParseJson(row.error_json, null),
+    };
+  }
+
+  async enqueueJob({ jobType, scopeType, scopeId, payload = null, dedupe = DEDUPED_JOB_TYPES.has(jobType) }) {
+    if (dedupe) {
+      const activeJob = await this.findActiveJob(jobType, scopeType, scopeId || null);
+      if (activeJob) {
+        return {
+          id: activeJob.id,
+          job_type: activeJob.job_type,
+          scope_type: activeJob.scope_type,
+          scope_id: activeJob.scope_id,
+          status: activeJob.status,
+          started_at: activeJob.started_at,
+          finished_at: activeJob.finished_at,
+          summary: activeJob.summary,
+          error: activeJob.error,
+          deduped: true,
+        };
+      }
+    }
+
     const timestamp = nowIso();
     const jobId = makeOpaqueId('job', `${jobType}:${scopeType}:${scopeId || ''}`);
     await this.db.prepare(
@@ -1847,6 +1891,7 @@ export class D1Repository {
       scope_id: scopeId || null,
       status: 'queued',
       started_at: timestamp,
+      deduped: false,
     };
   }
 
