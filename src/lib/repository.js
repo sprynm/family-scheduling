@@ -2440,6 +2440,10 @@ export class D1Repository {
   async pruneStaleData() {
     const retainDays = parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30);
     const cutoff = new Date(Date.now() - retainDays * 24 * 60 * 60 * 1000).toISOString();
+    const completedJobRetainDays = parsePositiveInt(this.env.JOB_HISTORY_RETAIN_DAYS_COMPLETED, 7);
+    const completedJobCutoff = new Date(Date.now() - completedJobRetainDays * 24 * 60 * 60 * 1000).toISOString();
+    const failedJobRetainDays = parsePositiveInt(this.env.JOB_HISTORY_RETAIN_DAYS_FAILED, 30);
+    const failedJobCutoff = new Date(Date.now() - failedJobRetainDays * 24 * 60 * 60 * 1000).toISOString();
     const batchSize = 500;
     let blobKeysDeleted = 0;
 
@@ -2464,11 +2468,39 @@ export class D1Repository {
     const rowsDeleted = Number(oldCountRow?.count || 0);
     await this.db.prepare(`DELETE FROM source_snapshots WHERE fetched_at < ?`).bind(cutoff).run();
 
+    const completedJobsDeletedRow = await this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM sync_jobs
+       WHERE status = 'completed' AND COALESCE(finished_at, started_at) < ?`
+    ).bind(completedJobCutoff).first();
+    const completedJobsDeleted = Number(completedJobsDeletedRow?.count || 0);
+    await this.db.prepare(
+      `DELETE FROM sync_jobs
+       WHERE status = 'completed' AND COALESCE(finished_at, started_at) < ?`
+    ).bind(completedJobCutoff).run();
+
+    const failedJobsDeletedRow = await this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM sync_jobs
+       WHERE status = 'failed' AND COALESCE(finished_at, started_at) < ?`
+    ).bind(failedJobCutoff).first();
+    const failedJobsDeleted = Number(failedJobsDeletedRow?.count || 0);
+    await this.db.prepare(
+      `DELETE FROM sync_jobs
+       WHERE status = 'failed' AND COALESCE(finished_at, started_at) < ?`
+    ).bind(failedJobCutoff).run();
+
     return {
       retainDays,
       cutoff,
       snapshotRowsDeleted: rowsDeleted,
       snapshotBlobKeysDeleted: blobKeysDeleted,
+      completedJobRetainDays,
+      completedJobCutoff,
+      completedJobsDeleted,
+      failedJobRetainDays,
+      failedJobCutoff,
+      failedJobsDeleted,
     };
   }
 

@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-18_
+_Updated: 2026-03-19_
 
 ## Vocabulary
 
@@ -54,6 +54,7 @@ The codebase is now centered on the unified `output_targets` model. Legacy `targ
 35. Queue consumer retries are now delayed and bounded with persisted retry metadata (`attempt_count`, `last_error_kind`) instead of immediate retry storms.
 36. Source snapshots now store `payload_hash`, ingest uses conditional fetch headers when available, and unchanged fetches (`304` or identical payload hash) exit before parse, row rewrites, or downstream Google sync enqueue.
 37. Google sync fanout is now gated on effective source-state changes, so changed fetches that do not alter canonical events, instances, or output rules do not emit new sync jobs.
+38. The daily prune now removes old `sync_jobs` history as well as old snapshots, keeping completed jobs for 7 days and failed jobs for 30 days while leaving active queued/running work untouched.
 
 ---
 
@@ -172,6 +173,7 @@ Do not implement new features there.
 10. Timezone-correction rebuilds can leave stale deleted instance rows behind; admin queries must filter `source_deleted` state consistently.
 11. Operator-supplied regex is a feature, not a trust boundary. Title rewrite rules need conservative safety checks because Worker regex execution has no practical timeout control.
 12. Queue volume is a product behavior, not only an infrastructure concern. The worker has to decide deliberately when a message is necessary and suppress repeated no-op work at ingest and sync boundaries.
+13. Operational history needs retention just like payload snapshots do. `sync_jobs` is useful for recent diagnosis, but it should age out on purpose rather than grow without bound.
 
 ### 2026-03-09 — Session 11
 

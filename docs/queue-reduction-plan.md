@@ -163,12 +163,25 @@ If tuning is needed later:
 - make the chunk size configurable
 - choose the new default from measured quota behavior, not by assumption
 
+### 10. Prune old queue history deliberately
+
+The worker should not keep `sync_jobs` forever. That table is operational history, not the source of truth for events or outputs.
+
+Implemented policy:
+- keep `queued` and `running` jobs until they transition
+- delete `completed` jobs older than 7 days
+- delete `failed` jobs older than 30 days
+
+This runs inside the existing daily `prune_stale_data` path alongside snapshot cleanup.
+
 ## Public Interfaces / Config
 
 Only add config that is justified by verified behavior:
 
 - `JOB_RETRY_MAX_ATTEMPTS`
 - `JOB_RETRY_JITTER_PCT`
+- `JOB_HISTORY_RETAIN_DAYS_COMPLETED`
+- `JOB_HISTORY_RETAIN_DAYS_FAILED`
 
 Conditional config, only if Phase 0 justifies it:
 - `CRON_QUEUE_SEND_SPACING_MS`
@@ -205,6 +218,7 @@ Acceptance criteria:
 - immediate retry storms are eliminated
 - unchanged source checks no longer create downstream queue work
 - daily queue volume drops measurably from the current baseline
+- `sync_jobs` no longer grows indefinitely from completed and failed historical rows
 
 ## Assumptions
 

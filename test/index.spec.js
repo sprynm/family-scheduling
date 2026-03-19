@@ -388,6 +388,12 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('DELETE FROM source_snapshots WHERE fetched_at < ?')) {
+      const [cutoff] = values;
+      this.sourceSnapshots = this.sourceSnapshots.filter((row) => String(row.fetched_at) >= String(cutoff));
+      return;
+    }
+
     if (sql.includes('INSERT INTO source_events')) {
       const [id, sourceId, providerUid, providerRecurrenceId, providerEtag, rawHash, firstSeenAt, lastSeenAt] = values;
       const existing = this.sourceEvents.find((row) => row.id === id);
@@ -893,6 +899,18 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes("DELETE FROM sync_jobs") && sql.includes("status = 'completed'")) {
+      const [cutoff] = values;
+      this.syncJobs = this.syncJobs.filter((row) => !(row.status === 'completed' && String(row.finished_at || row.started_at || '') < String(cutoff)));
+      return;
+    }
+
+    if (sql.includes("DELETE FROM sync_jobs") && sql.includes("status = 'failed'")) {
+      const [cutoff] = values;
+      this.syncJobs = this.syncJobs.filter((row) => !(row.status === 'failed' && String(row.finished_at || row.started_at || '') < String(cutoff)));
+      return;
+    }
+
     if (sql.includes('DELETE FROM output_targets WHERE id = ?')) {
       const [targetId] = values;
       this.outputTargets = this.outputTargets.filter((row) => row.id !== targetId);
@@ -943,6 +961,13 @@ class FakeDb {
         { name: 'google_event_id', notnull: this.googleEventLinkGoogleEventIdNotNull },
         { name: 'target_id', notnull: 0 },
       ];
+    }
+    if (sql.includes('SELECT payload_blob_ref') && sql.includes('FROM source_snapshots') && sql.includes('fetched_at < ?')) {
+      const [cutoff, limit] = values;
+      return this.sourceSnapshots
+        .filter((row) => row.payload_blob_ref && String(row.fetched_at) < String(cutoff))
+        .slice(0, limit || Infinity)
+        .map((row) => ({ payload_blob_ref: row.payload_blob_ref }));
     }
     if (sql.includes('FROM sources s') && sql.includes('LEFT JOIN (') && sql.includes('last_fetched_at') && sql.includes('WHERE s.is_active = 1')) {
       const now = Date.now();
@@ -1383,10 +1408,26 @@ class FakeDb {
     if (sql.includes('SELECT * FROM sources WHERE id = ?')) {
       return this.sources.find((row) => row.id === values[0]) || null;
     }
+    if (sql.includes("SELECT COUNT(*) AS count") && sql.includes("FROM source_snapshots") && sql.includes("fetched_at < ?")) {
+      const [cutoff] = values;
+      return { count: this.sourceSnapshots.filter((row) => String(row.fetched_at) < String(cutoff)).length };
+    }
     if (sql.includes('FROM source_snapshots') && sql.includes('ORDER BY fetched_at DESC')) {
       return this.sourceSnapshots
         .filter((row) => row.source_id === values[0])
         .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)))[0] || null;
+    }
+    if (sql.includes("SELECT COUNT(*) AS count") && sql.includes("FROM sync_jobs") && sql.includes("status = 'completed'")) {
+      const [cutoff] = values;
+      return {
+        count: this.syncJobs.filter((row) => row.status === 'completed' && String(row.finished_at || row.started_at || '') < String(cutoff)).length,
+      };
+    }
+    if (sql.includes("SELECT COUNT(*) AS count") && sql.includes("FROM sync_jobs") && sql.includes("status = 'failed'")) {
+      const [cutoff] = values;
+      return {
+        count: this.syncJobs.filter((row) => row.status === 'failed' && String(row.finished_at || row.started_at || '') < String(cutoff)).length,
+      };
     }
     if (sql.includes('FROM sync_jobs') && sql.includes("status IN ('queued', 'running')")) {
       return this.syncJobs
@@ -3091,6 +3132,141 @@ describe('family-scheduling worker', () => {
     expect(env.JOBS_QUEUE.sent).toHaveLength(0);
   });
 
+  it('prunes old sync job history while keeping current queued and running jobs', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.PRUNE_AFTER_DAYS = '30';
+    env.JOB_HISTORY_RETAIN_DAYS_COMPLETED = '7';
+    env.JOB_HISTORY_RETAIN_DAYS_FAILED = '30';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sourceSnapshots.push(
+      {
+        id: 'snap_old',
+        source_id: 'src_prune',
+        fetched_at: '2026-01-15T00:00:00.000Z',
+        http_status: 200,
+        etag: null,
+        last_modified: null,
+        payload_blob_ref: 'snapshots/src_prune/snap_old.ics',
+        payload_hash: 'hash-old',
+        parse_status: 'parsed',
+        parse_error_summary: null,
+      },
+      {
+        id: 'snap_recent',
+        source_id: 'src_prune',
+        fetched_at: '2026-03-18T00:00:00.000Z',
+        http_status: 200,
+        etag: null,
+        last_modified: null,
+        payload_blob_ref: null,
+        payload_hash: 'hash-recent',
+        parse_status: 'parsed',
+        parse_error_summary: null,
+      }
+    );
+    db.syncJobs.push(
+      {
+        id: 'job_completed_old',
+        job_type: 'sync_google_target',
+        scope_type: 'source_target',
+        scope_id: 'scope_old_completed',
+        status: 'completed',
+        started_at: '2026-03-01T00:00:00.000Z',
+        finished_at: '2026-03-01T00:05:00.000Z',
+        summary_json: null,
+        error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
+      },
+      {
+        id: 'job_completed_recent',
+        job_type: 'sync_google_target',
+        scope_type: 'source_target',
+        scope_id: 'scope_recent_completed',
+        status: 'completed',
+        started_at: '2026-03-18T00:00:00.000Z',
+        finished_at: '2026-03-18T00:05:00.000Z',
+        summary_json: null,
+        error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
+      },
+      {
+        id: 'job_failed_old',
+        job_type: 'ingest_source',
+        scope_type: 'source',
+        scope_id: 'scope_old_failed',
+        status: 'failed',
+        started_at: '2026-02-01T00:00:00.000Z',
+        finished_at: '2026-02-01T00:01:00.000Z',
+        summary_json: null,
+        error_json: '{"message":"old failed"}',
+        attempt_count: 1,
+        last_error_kind: 'network_error',
+      },
+      {
+        id: 'job_failed_recent',
+        job_type: 'ingest_source',
+        scope_type: 'source',
+        scope_id: 'scope_recent_failed',
+        status: 'failed',
+        started_at: '2026-03-18T00:00:00.000Z',
+        finished_at: '2026-03-18T00:01:00.000Z',
+        summary_json: null,
+        error_json: '{"message":"recent failed"}',
+        attempt_count: 1,
+        last_error_kind: 'network_error',
+      },
+      {
+        id: 'job_queued_current',
+        job_type: 'ingest_source',
+        scope_type: 'source',
+        scope_id: 'scope_queued',
+        status: 'queued',
+        started_at: '2026-03-19T00:00:00.000Z',
+        finished_at: null,
+        summary_json: null,
+        error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
+      },
+      {
+        id: 'job_running_current',
+        job_type: 'sync_google_target',
+        scope_type: 'source_target',
+        scope_id: 'scope_running',
+        status: 'running',
+        started_at: '2026-03-19T00:00:00.000Z',
+        finished_at: null,
+        summary_json: null,
+        error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
+      }
+    );
+    env.SNAPSHOTS = {
+      delete: vi.fn(async () => undefined),
+    };
+
+    const repo = new D1Repository(db, env);
+    const summary = await repo.pruneStaleData();
+
+    expect(summary.snapshotRowsDeleted).toBe(1);
+    expect(summary.snapshotBlobKeysDeleted).toBe(1);
+    expect(summary.completedJobsDeleted).toBe(1);
+    expect(summary.failedJobsDeleted).toBe(1);
+    expect(summary.completedJobRetainDays).toBe(7);
+    expect(summary.failedJobRetainDays).toBe(30);
+    expect(db.sourceSnapshots.map((row) => row.id)).toEqual(['snap_recent']);
+    expect(db.syncJobs.map((row) => row.id)).toEqual([
+      'job_completed_recent',
+      'job_failed_recent',
+      'job_queued_current',
+      'job_running_current',
+    ]);
+  });
+
   it('applies fallback sport icon detection when source icon is not configured', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     const db = new FakeDb();
@@ -4252,6 +4428,7 @@ describe('family-scheduling worker', () => {
 
   it('sends floating-time events to Google using the calendar timezone without forcing UTC', async () => {
     env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
     env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
     const db = new FakeDb();
     env.APP_DB = db;

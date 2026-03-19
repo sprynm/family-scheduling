@@ -19,8 +19,8 @@ Prioritized work items. Completed work stays below as historical reference; only
 
 ### Ticket: Validate prune against real D1 and R2
 **Work:**
-1. Run prune against real D1 + R2 with representative stale snapshots and stale event rows.
-2. Record before/after counts for D1 rows and R2 objects.
+1. Run prune against real D1 + R2 with representative stale snapshots, stale `sync_jobs`, and stale event rows.
+2. Record before/after counts for snapshot rows, job-history rows, and R2 objects.
 3. Confirm stale data is removed and active data remains intact.
 4. Document the exact validation steps and observed counts.
 
@@ -102,6 +102,9 @@ Completed. Source title rewrite rules now reject unsafe regex patterns, source-c
 ### Reduce unnecessary queue traffic and retry amplification
 Completed. Cron enqueue failures are now non-fatal and logged, active queue work is best-effort deduped, retryable consumer failures use delayed retries with attempt metadata, and unchanged-source ingests no longer fan out Google sync work.
 
+### Add retention for historical sync job rows
+Completed. Daily prune now removes old completed and failed `sync_jobs` rows so operational job history does not grow indefinitely.
+
 ---
 
 ## Done
@@ -135,3 +138,4 @@ Completed. Cron enqueue failures are now non-fatal and logged, active queue work
 - [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired - 2026-03-08
 - [x] Title rewrite rules hardened and modified-event drawers refactored to client-side toggle - 2026-03-15
 - [x] Queue production, retries, and unchanged-source sync fanout reduced to cut repeated Cloudflare Queue messages - 2026-03-18
+- [x] Daily prune now trims completed and failed `sync_jobs` history with configurable retention windows - 2026-03-19

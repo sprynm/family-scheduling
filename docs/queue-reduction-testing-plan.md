@@ -58,9 +58,25 @@ Validate that queue changes reduce unnecessary message traffic without breaking 
 - sample a real source without validators and confirm payload-hash suppression still avoids no-op downstream work
 - compare daily queue message counts before and after rollout for unchanged sources
 
+## Epic 5: Job History Retention
+
+### Automated tests
+
+- daily prune deletes source snapshots older than `PRUNE_AFTER_DAYS`
+- daily prune deletes completed `sync_jobs` older than `JOB_HISTORY_RETAIN_DAYS_COMPLETED`
+- daily prune deletes failed `sync_jobs` older than `JOB_HISTORY_RETAIN_DAYS_FAILED`
+- queued and running jobs survive prune unchanged
+
+### Manual checks
+
+- inspect `sync_jobs` counts before and after the daily prune window
+- confirm recent failed jobs remain available for troubleshooting
+- confirm old completed job history drops over time instead of growing indefinitely
+
 ## Rollout Verification
 
 - Compare daily Cloudflare Queue message volume before and after deployment.
 - Confirm cron invocations no longer fail with uncaught queue producer `429` exceptions.
 - Confirm queue retry storms are eliminated during transient failures.
 - Confirm feed routes and Google sync outputs remain correct for `family`, `grayson`, and `naomi`.
+- Confirm `sync_jobs` count trends downward after retention begins pruning historical rows.

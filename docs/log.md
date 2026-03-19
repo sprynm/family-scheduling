@@ -65,3 +65,22 @@ At closeout of a unit of work, insights should be compacted into:
 - Current version: `42dc99fc-4c0a-491b-85ce-75ca730b040d`.
 - Published URL: `https://family-scheduling.lance-e35.workers.dev`.
 - Post-deploy validation target: watch `cron_enqueue_summary`, `cron_enqueue_failed`, `queue_job_retry_scheduled`, `queue_job_failed`, and daily Cloudflare Queue message volume for the next full cron cycle.
+
+## 2026-03-19
+
+### Session Notes
+
+- Investigated whether the large `sync_jobs` count represented live calendar size or retained operational history.
+- Confirmed the queue cleanup gap was in job-history retention, not in event/output state.
+
+### Work Completed
+
+- Added `sync_jobs` retention to the daily prune path.
+- Configured prune to delete completed jobs older than 7 days and failed jobs older than 30 days while leaving queued/running jobs untouched.
+- Added regression coverage for snapshot and job-history pruning.
+- Cleaned the stale queued outage-era rows from production and verified the queue recovered to zero queued jobs.
+
+### Discoveries
+
+- `sync_jobs` has real short-term operator value, but most of its growth is operational exhaust rather than durable business state.
+- Recent Cloudflare D1 reads can lag immediately after writes; verification queries may need a short delay after manual cleanup.
