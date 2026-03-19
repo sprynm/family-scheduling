@@ -1919,7 +1919,7 @@ export class D1Repository {
   async enqueueJob({ jobType, scopeType, scopeId, payload = null, dedupe = DEDUPED_JOB_TYPES.has(jobType) }) {
     if (dedupe) {
       const activeJob = await this.findActiveJob(jobType, scopeType, scopeId || null);
-        if (activeJob) {
+      if (activeJob) {
         return {
           id: activeJob.id,
           job_type: activeJob.job_type,
@@ -2556,7 +2556,6 @@ export class D1Repository {
     const sourceUrl = ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
     const previousSnapshot = await this.getLatestSnapshotForSource(sourceId);
-    const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
@@ -2761,6 +2760,7 @@ export class D1Repository {
     }
 
     const targets = await this.resolveTargetsForSource(source);
+    const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const statements = [
       this.db.prepare(
         `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`
