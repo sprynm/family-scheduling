@@ -3,6 +3,10 @@
   "name": "family-scheduling",
   "account_id": "e355dc4894a2d16665c7529ba5309970",
   "main": "src/index.js",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
   "compatibility_date": "2025-09-06",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
@@ -50,6 +54,7 @@
     "CALENDAR_NAME_NAOMI": "Naomi Combined",
     "DEFAULT_LOOKBACK_DAYS": "7",
     "RECURRENCE_HORIZON_DAYS": "180",
+    "INGEST_PAST_RETENTION_DAYS": "30",
     "PRUNE_AFTER_DAYS": "30",
     "SNAPSHOTS_ENABLED": "true",
     "SNAPSHOTS_MAX_BYTES": "1048576",

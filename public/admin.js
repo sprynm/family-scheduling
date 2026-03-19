@@ -1,0 +1,961 @@
+const COPY_RESET_MS = 1500;
+const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
+const ICON_OPTIONS = [
+  { value: '', label: 'None' },
+  { value: '🏒', label: '🏒 Hockey' },
+  { value: '🏀', label: '🏀 Basketball' },
+  { value: '🏐', label: '🏐 Volleyball' },
+  { value: '⚾', label: '⚾ Baseball' },
+  { value: '🥍', label: '🥍 Lacrosse' },
+  { value: '𝄞', label: '𝄞 Music' },
+  { value: '🎭', label: '🎭 Theatre' },
+  { value: '🎓', label: '🎓 School' },
+  { value: '🎉', label: '🎉 Party' },
+  { value: '✈️', label: '✈️ Travel' },
+  { value: '🩺', label: '🩺 Medical' },
+];
+
+const statusEl = document.getElementById('status');
+    const refreshBtn = document.getElementById('refresh');
+    const rebuildBtn = document.getElementById('rebuild');
+
+    // outputs
+    const targetForm = document.getElementById('target-form');
+    const targetKeyInput = document.getElementById('target-key');
+    const targetCalendarInput = document.getElementById('target-calendar');
+    const targetModeInput = document.getElementById('target-mode');
+    const targetsBody = document.getElementById('targets-body');
+    const contractsBody = document.getElementById('contracts-body');
+
+    // sources
+    const sourceForm = document.getElementById('source-form');
+    const sourceNameInput = document.getElementById('source-name');
+    const sourceUrlInput = document.getElementById('source-url');
+    const sourceTitleRulesInput = document.getElementById('source-title-rules');
+    const sourceIcsOutputsEl = document.getElementById('source-ics-outputs');
+    const sourceGoogleOutputsEl = document.getElementById('source-google-outputs');
+    const noGoogleHint = document.getElementById('no-google-hint');
+    const sourceTargetRulesEl = document.getElementById('source-target-rules');
+    const sourcesBody = document.getElementById('sources-body');
+
+    // events / overrides
+    const eventSearchInput = document.getElementById('event-search');
+    const eventSourceFilter = document.getElementById('event-source-filter');
+    const eventOutputFilter = document.getElementById('event-output-filter');
+    const instResultsEl = document.getElementById('inst-results');
+    const modifiedEventsBody = document.getElementById('modified-events-body');
+
+    // metrics
+    const metricSources = document.getElementById('metric-sources');
+    const metricEvents = document.getElementById('metric-events');
+    const metricJobs = document.getElementById('metric-jobs');
+    const metricTargets = document.getElementById('metric-targets');
+    const jobsBody = document.getElementById('jobs-body');
+
+    const sourceRuleState = new Map();
+    let openDrawerInstId = null;
+    let openModifiedOverrideId = null;
+    let allInstances = [];
+    let activeOverrides = [];
+    let autoRefreshTimer = null;
+
+    function setStatus(message, isError) {
+      statusEl.textContent = message;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function renderRows(body, rowsHtml, colCount) {
+      body.innerHTML = rowsHtml || '<tr><td colspan="' + (colCount || 4) + '" style="color:#aaa;font-style:italic">None</td></tr>';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function padDatePart(value) {
+      return String(value).padStart(2, '0');
+    }
+
+    function formatUiDate(value, { includeTime = false } = {}) {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      const stamp = [
+        date.getFullYear(),
+        padDatePart(date.getMonth() + 1),
+        padDatePart(date.getDate()),
+      ].join('.');
+      if (!includeTime) return stamp;
+      return stamp + ' ' + padDatePart(date.getHours()) + ':' + padDatePart(date.getMinutes());
+    }
+
+    function normalizeNote(value) {
+      return String(value || '').trim();
+    }
+
+    function buildDrawerContext({ instanceId = '', canonicalId = '', title = '', date = '' } = {}) {
+      return { instanceId, canonicalId, title, date };
+    }
+
+    function getOverridesForContext(overrides, instanceId) {
+      return (overrides || []).filter((override) => (instanceId ? (!override.event_instance_id || override.event_instance_id === instanceId) : !override.event_instance_id));
+    }
+
+    function buildIconOptions(currentIcon) {
+      const normalizedCurrent = String(currentIcon || '').trim();
+      const options = [...ICON_OPTIONS];
+      if (normalizedCurrent && !options.some((option) => option.value === normalizedCurrent)) {
+        options.splice(1, 0, { value: normalizedCurrent, label: normalizedCurrent + ' Custom' });
+      }
+      return options
+        .map((option) => '<option value="' + escapeHtml(option.value) + '"' + (option.value === normalizedCurrent ? ' selected' : '') + '>' + escapeHtml(option.label) + '</option>')
+        .join('');
+    }
+
+    function getCheckboxTargets(containerEl) {
+      return Array.from(containerEl.querySelectorAll('input[type="checkbox"]')).map((cb) => ({
+        id: cb.value,
+        slug: cb.dataset.targetSlug || '',
+        type: cb.dataset.targetType || '',
+        label: cb.closest('label')?.textContent?.trim() || cb.value,
+      }));
+    }
+
+    function getCheckedTargets(containerEl) {
+      return getCheckboxTargets(containerEl).filter((target) =>
+        containerEl.querySelector('input[type="checkbox"][value="' + target.id + '"]')?.checked
+      );
+    }
+
+    function deriveOwnerType(selectedIcs) {
+      const slugs = selectedIcs.map((target) => target.slug);
+      if (slugs.includes('grayson')) return 'grayson';
+      if (slugs.includes('naomi')) return 'naomi';
+      return 'family';
+    }
+
+    function getDefaultPrefix(targetSlug, ownerType) {
+      if (targetSlug !== 'family') return '';
+      if (ownerType === 'grayson') return 'G:';
+      if (ownerType === 'naomi') return 'N:';
+      return '';
+    }
+
+    function syncTargetRuleInputs() {
+      const selectedIcs = getCheckedTargets(sourceIcsOutputsEl);
+      const selectedGoogle = getCheckedTargets(sourceGoogleOutputsEl);
+      const ownerType = deriveOwnerType(selectedIcs);
+      const allSelected = [...selectedIcs, ...selectedGoogle];
+
+      const nextState = new Map();
+      for (const target of allSelected) {
+        const existing = sourceRuleState.get(target.id) || {};
+        nextState.set(target.id, {
+          icon: existing.icon || '',
+          prefix: existing.prefix !== undefined ? existing.prefix : getDefaultPrefix(target.slug, ownerType),
+        });
+      }
+      sourceRuleState.clear();
+      nextState.forEach((v, k) => sourceRuleState.set(k, v));
+
+      sourceTargetRulesEl.innerHTML = allSelected.length
+        ? allSelected.map((target) => {
+            const state = sourceRuleState.get(target.id) || { icon: '', prefix: '' };
+            const label = (target.type === 'ics' ? 'ICS: ' : 'Google: ') + target.label;
+            return '<div class="target-rule"><strong>' + label + '</strong>' +
+              '<label>Icon<select data-rule-target="' + target.id + '" data-rule-field="icon">' + buildIconOptions(state.icon) + '</select></label>' +
+              '<label>Prefix<input type="text" data-rule-target="' + target.id + '" data-rule-field="prefix" value="' + (state.prefix || '').replace(/"/g, '&quot;') + '" placeholder="' + (target.type === 'ics' && target.slug === 'family' ? 'e.g. G: or N:' : 'optional') + '" /></label>' +
+              '</div>';
+          }).join('')
+        : '';
+
+      sourceTargetRulesEl.querySelectorAll('[data-rule-target]').forEach((input) => {
+        const eventName = input.tagName === 'SELECT' ? 'change' : 'input';
+        input.addEventListener(eventName, () => {
+          const key = input.getAttribute('data-rule-target');
+          const field = input.getAttribute('data-rule-field');
+          if (!key || !field) return;
+          const current = sourceRuleState.get(key) || { icon: '', prefix: '' };
+          current[field] = input.value;
+          sourceRuleState.set(key, current);
+        });
+      });
+    }
+
+    function buildOutputLabels(source) {
+      const links = Array.isArray(source.target_links) ? source.target_links : [];
+      if (links.length) {
+        return links.map((link) => {
+          const type = link.target_type === 'ics' ? 'ICS' : 'GCal';
+          return type + ': ' + (link.display_name || link.target_key);
+        }).join(', ');
+      }
+      const parts = [];
+      if (source.owner_type === 'grayson' && Number(source.include_in_child_ics)) parts.push('ICS:grayson');
+      if (source.owner_type === 'naomi' && Number(source.include_in_child_ics)) parts.push('ICS:naomi');
+      if (Number(source.include_in_family_ics)) parts.push('ICS:family');
+      return parts.join(', ');
+    }
+
+    function buildIconLabel(source) {
+      const links = Array.isArray(source.target_links) ? source.target_links : [];
+      const icons = [...new Set(links.map((l) => l.icon).filter(Boolean))];
+      return icons.join(' ') || (source.icon || '');
+    }
+
+    function extractJobErrorMessage(job) {
+      return job && job.error && typeof job.error.message === 'string' ? job.error.message : '';
+    }
+
+    function extractGoogleSyncFailure(source) {
+      const job = source.latest_job || null;
+      const failedCount = Number(job && job.summary && job.summary.googleSync ? job.summary.googleSync.failed || 0 : 0);
+      const googleError = source.latest_google_sync_error || null;
+      if (!failedCount && !googleError) return null;
+      return {
+        count: failedCount || Number(googleError?.error_count || 0),
+        message: googleError && googleError.message ? googleError.message : 'Google output sync failed.',
+      };
+    }
+
+    function buildGoogleSyncMetrics(source) {
+      const hasGoogleTarget = Array.isArray(source.target_links) && source.target_links.some((link) => link.target_type === 'google');
+      const counts = source.google_sync_counts || {};
+      return [
+        'Events: ' + Number(source.event_count || 0),
+        hasGoogleTarget ? "Google sync'd: " + Number(counts.synced || 0) : 'Google sync: n/a',
+        hasGoogleTarget ? 'Deferred: ' + Number(counts.deferred || 0) : 'Deferred: n/a',
+        'Errors: ' + Number(counts.errors || 0),
+      ];
+    }
+
+    function buildSourceStatus(source) {
+      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob'].includes(source.last_parse_status);
+      const latestJob = source.latest_job || null;
+      const latestJobError = extractJobErrorMessage(latestJob);
+      const googleFailure = extractGoogleSyncFailure(source);
+      const metrics = buildGoogleSyncMetrics(source);
+
+      if (!source.last_parse_status && !latestJob) {
+        return { tone: 'hint', label: 'never', detail: '', metrics };
+      }
+
+      if (latestJob && latestJob.status === 'queued') {
+        return {
+          tone: 'pending',
+          label: 'queued',
+          detail: 'Rebuild is queued and waiting to run.',
+          metrics,
+        };
+      }
+
+      if (latestJob && latestJob.status === 'running') {
+        return {
+          tone: 'pending',
+          label: 'running',
+          detail: 'Rebuild is currently in progress.',
+          metrics,
+        };
+      }
+
+      if (latestJob && latestJob.status === 'failed') {
+        return {
+          tone: 'error',
+          label: 'error',
+          detail: latestJobError || 'Latest rebuild failed.',
+          metrics,
+        };
+      }
+
+      if (googleFailure) {
+        return {
+          tone: 'warn',
+          label: 'partial',
+          detail: (googleFailure.count > 0 ? googleFailure.count + ' Google sync failures. ' : '') + googleFailure.message,
+          metrics,
+        };
+      }
+
+      if (parseOk) {
+        return { tone: 'ok', label: 'ok', detail: '', metrics };
+      }
+
+      return {
+        tone: 'error',
+        label: 'error',
+        detail: source.last_parse_error || 'Latest fetch or parse failed.',
+        metrics,
+      };
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      if (!response.ok) {
+        let message = 'Request failed';
+        try {
+          const payload = await response.json();
+          message = payload.message || payload.error || message;
+        } catch {
+          message = response.status + ' ' + response.statusText;
+        }
+        throw new Error(message);
+      }
+      return response.json();
+    }
+
+    async function loadDashboard() {
+      refreshBtn.disabled = true;
+      rebuildBtn.disabled = true;
+      if (autoRefreshTimer) {
+        clearTimeout(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
+      setStatus('Loading...', false);
+      try {
+        const [sourcesPayload, eventsPayload, jobsPayload, targetsPayload, contractsPayload] = await Promise.all([
+          fetchJson('/api/sources'),
+          fetchJson('/api/events?limit=15'),
+          fetchJson('/api/jobs'),
+          fetchJson('/api/targets'),
+          fetchJson('/api/feed-contracts'),
+        ]);
+
+        const sources = sourcesPayload.sources || [];
+        const events = eventsPayload.events || [];
+        const jobs = jobsPayload.jobs || [];
+        const outputs = targetsPayload.targets || [];
+        const icsTargets = outputs.filter((target) => target.target_type === 'ics' && Number(target.is_system));
+        const googleTargets = outputs.filter((target) => target.target_type === 'google');
+        const activeJobs = jobs.filter((job) => job.status === 'queued' || job.status === 'running');
+        metricSources.textContent = String(sources.length);
+        metricEvents.textContent = String(events.length);
+        metricJobs.textContent = String(jobs.length);
+        metricTargets.textContent = String(googleTargets.length);
+
+        sourceIcsOutputsEl.innerHTML = icsTargets
+          .map((target) =>
+            '<label><input type="checkbox" name="ics-target" value="' + (target.id || '') + '" data-target-slug="' + (target.slug || '') + '" data-target-type="ics"> ' +
+            (target.display_name || target.slug || '') + '</label>'
+          )
+          .join('');
+
+        if (googleTargets.length) {
+          noGoogleHint.classList.add('hidden');
+          sourceGoogleOutputsEl.innerHTML = googleTargets
+            .map((target) =>
+              '<label><input type="checkbox" name="google-target" value="' + (target.id || '') + '" data-target-slug="' + (target.slug || '') + '" data-target-type="google"> ' +
+              (target.display_name || target.slug || '') + '</label>'
+            )
+            .join('');
+        } else {
+          noGoogleHint.classList.remove('hidden');
+          sourceGoogleOutputsEl.innerHTML = '';
+        }
+
+        // populate source filter (Modify Events)
+        const prevSource = eventSourceFilter.value;
+        eventSourceFilter.innerHTML = '<option value="">— pick a source —</option>' +
+          sources.map((s) => '<option value="' + (s.id || '') + '"' + (s.id === prevSource ? ' selected' : '') + '>' + (s.display_name || s.name || '') + ' (' + (s.owner_type || '') + ')</option>').join('');
+
+        // populate event output filter
+        const allOutputKeys = [...new Set(outputs.map((target) => target.slug || target.target_key || '').filter(Boolean))];
+        eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
+          allOutputKeys.map((slug) => {
+            const output = outputs.find((target) => (target.slug || target.target_key) === slug);
+            const label = output ? (output.display_name || slug) : slug;
+            return '<option value="' + slug + '">' + label + '</option>';
+          }).join('');
+
+        // load modified events table
+        await loadModifiedEvents();
+
+        syncTargetRuleInputs();
+
+        // sources table
+        const sortedSources = [...sources].sort((a, b) => {
+          const al = buildOutputLabels(a), bl = buildOutputLabels(b);
+          if (al !== bl) return al.localeCompare(bl);
+          return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''));
+        });
+        renderRows(
+          sourcesBody,
+          sortedSources.slice(0, 30).map((s) => {
+            const lastFetch = formatUiDate(s.last_fetched_at, { includeTime: true });
+            const status = buildSourceStatus(s);
+            const syncCounts = s.google_sync_counts || {};
+            const hasGoogleTarget = Array.isArray(s.target_links) && s.target_links.some((link) => link.target_type === 'google');
+            const statusStyle = status.tone === 'ok'
+              ? 'color:#1a7f37'
+              : status.tone === 'hint'
+                ? 'color:#6b7280'
+                : status.tone === 'pending'
+                  ? 'color:#9a6700'
+                  : status.tone === 'warn'
+                    ? 'color:#9a6700'
+                    : 'color:#a00';
+            const detailStyle = status.tone === 'pending' || status.tone === 'warn' ? 'color:#9a6700' : 'color:#7a1c1c';
+            const sourceCell = '<div>' +
+              '<div style="font-weight:600">' + escapeHtml(s.display_name || s.name || '') + '</div>' +
+              '<div class="hint" style="margin-top:0.15rem">' + escapeHtml(s.owner_type || '') + '</div>' +
+              '<div class="hint" style="margin-top:0.25rem; max-width:22rem; white-space:normal">' + escapeHtml(buildOutputLabels(s) || 'No outputs') + '</div>' +
+              '</div>';
+            const eventsCell = '<div>' +
+              '<div style="font-weight:600">' + Number(s.event_count || 0) + '</div>' +
+              '<div class="hint">from feed</div>' +
+              '</div>';
+            const syncDefCell = '<div>' +
+              '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
+              '<div>' + (hasGoogleTarget ? 'Deferred: ' + Number(syncCounts.deferred || 0) : 'Deferred: n/a') + '</div>' +
+              '</div>';
+            const statusCell = '<div>' +
+              '<span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span>' +
+              '<div class="hint" style="max-width:28rem; white-space:normal; color:#4b5563; margin-top:0.15rem">' +
+                '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
+                '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+              '</div>' +
+              (status.detail ? '<div class="hint" style="max-width:28rem; white-space:normal; ' + detailStyle + '; margin-top:0.15rem" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '') +
+              '</div>';
+            return '<tr>' +
+            '<td>' + sourceCell + '</td>' +
+            '<td>' + eventsCell + '</td>' +
+            '<td>' + syncDefCell + '</td>' +
+            '<td>' + statusCell + '</td>' +
+            '<td><div class="actions">' +
+            '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
+            '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
+            '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
+            '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
+            '</div></td></tr>';
+          }).join(''),
+          5
+        );
+
+        document.querySelectorAll('.rebuild-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            btn.disabled = true;
+            setStatus('Queueing rebuild...', false);
+            try {
+              const p = await fetchJson('/api/sources/' + encodeURIComponent(id) + '/rebuild', { method: 'POST' });
+              setStatus('Rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Rebuild failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        document.querySelectorAll('.change-source').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-source-id');
+            const name = btn.getAttribute('data-source-name') || '';
+            const url = btn.getAttribute('data-source-url') || '';
+            const titleRulesText = decodeURIComponent(btn.getAttribute('data-source-title-rules') || '');
+            let links = [];
+            try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
+            sourceNameInput.value = name;
+            sourceUrlInput.value = url;
+            sourceTitleRulesInput.value = titleRulesText;
+            sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
+            });
+            sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
+            });
+            sourceRuleState.clear();
+            links.forEach((link) => {
+              const stateKey = link.target_id || link.target_key;
+              sourceRuleState.set(stateKey, { icon: link.icon || '', prefix: link.prefix || '' });
+            });
+            syncTargetRuleInputs();
+            sourceForm.setAttribute('data-editing-id', id);
+            document.getElementById('source-save').textContent = 'Update Source';
+            sourceNameInput.focus();
+            sourceForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        });
+
+        document.querySelectorAll('.disable-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+              setStatus('Source disabled.', false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Disable failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        document.querySelectorAll('.delete-source').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-source-id');
+            if (!id) return;
+            if (!confirm('Permanently delete this source and all its events? This cannot be undone.')) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/sources/' + encodeURIComponent(id) + '?permanent=true', { method: 'DELETE' });
+              setStatus('Source deleted.', false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Delete failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        // google outputs table
+        renderRows(
+          targetsBody,
+          googleTargets.map((target) =>
+            '<tr><td>' + (target.display_name || target.slug || '') +
+            '</td><td style="max-width:260px;overflow:hidden;text-overflow:ellipsis">' + (target.calendar_id || '') +
+            '</td><td>' + (Number(target.is_active) ? 'yes' : 'no') +
+            '</td><td><button class="danger delete-target" data-target-key="' + (target.slug || target.target_key || '') + '">Delete</button></td></tr>'
+          ).join(''),
+          4
+        );
+
+        document.querySelectorAll('.delete-target').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const key = btn.getAttribute('data-target-key');
+            if (!key) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/targets/' + encodeURIComponent(key), { method: 'DELETE' });
+              setStatus('Deleted ' + key + '.', false);
+              await loadDashboard();
+            } catch (err) {
+              setStatus('Delete failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+
+        // ics feeds table
+        const feedContracts = contractsPayload.contracts || [];
+        renderRows(
+          contractsBody,
+          feedContracts.map((c) =>
+            '<tr>' +
+            '<td><strong>' + c.target + '</strong></td>' +
+            '<td style="font-size:0.8rem;word-break:break-all">' + escapeHtml(c.url) + '</td>' +
+            '<td><button class="copy-feed-url" data-url="' + c.url.replace(/"/g, '&quot;') + '">Copy</button></td>' +
+            '</tr>'
+          ).join(''),
+          3
+        );
+        document.querySelectorAll('.copy-feed-url').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const orig = btn.textContent;
+            navigator.clipboard.writeText(btn.getAttribute('data-url'))
+              .then(() => {
+                btn.textContent = 'Copied!';
+                setTimeout(() => { btn.textContent = orig; }, COPY_RESET_MS);
+              })
+              .catch(() => {
+                btn.textContent = 'Failed';
+                setTimeout(() => { btn.textContent = orig; }, COPY_RESET_MS);
+                setStatus('Clipboard permission denied.', true);
+              });
+          });
+        });
+
+        // jobs
+        renderRows(
+          jobsBody,
+          jobs.slice(0, 20).map((j) =>
+            '<tr><td>' + (j.job_type || '') + '</td><td>' + (j.scope_type || 'system') + '</td><td>' + (j.status || '') + (j.error_json ? '<div class="hint" style="max-width:24rem; white-space:normal; color:#7a1c1c">' + escapeHtml((() => { try { return JSON.parse(j.error_json || '{}').message || ''; } catch { return ''; } })()) + '</div>' : '') + '</td></tr>'
+          ).join(''),
+          3
+        );
+
+        if (activeJobs.length) {
+          setStatus('Loaded. ' + activeJobs.length + ' job' + (activeJobs.length === 1 ? '' : 's') + ' still running.', false);
+          autoRefreshTimer = setTimeout(() => {
+            loadDashboard();
+          }, 4000);
+        } else {
+          setStatus('Loaded.', false);
+        }
+      } catch (err) {
+        setStatus('Load failed: ' + (err.message || String(err)), true);
+      } finally {
+        refreshBtn.disabled = false;
+        rebuildBtn.disabled = false;
+      }
+    }
+
+    // --- Instance list & overrides ---
+
+    async function loadInstances() {
+      const sourceId = eventSourceFilter.value;
+      const outputKey = eventOutputFilter.value;
+      if (!sourceId && !outputKey) {
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p>';
+        allInstances = [];
+        return;
+      }
+      instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Loading...</p>';
+      openDrawerInstId = null;
+      try {
+        let url = '/api/instances?future=1&limit=200';
+        if (sourceId) url += '&source=' + encodeURIComponent(sourceId);
+        if (outputKey) url += '&output=' + encodeURIComponent(outputKey);
+        const payload = await fetchJson(url);
+        allInstances = payload.instances || [];
+        renderInstances();
+      } catch (err) {
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0;color:#a00">Failed to load instances.</p>';
+      }
+    }
+
+    function renderInstances() {
+      const query = eventSearchInput.value.trim().toLowerCase();
+      let rows = allInstances;
+      if (query) rows = rows.filter((i) => (i.title || '').toLowerCase().includes(query));
+      if (!rows.length) {
+        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">No upcoming events found.</p>';
+        return;
+      }
+      instResultsEl.innerHTML = rows.slice(0, 100).map((inst) => {
+        const dt = formatUiDate(inst.occurrence_start_at, { includeTime: true });
+        const meta = (inst.owner_type || '') + ' · ' + (inst.source_name || '');
+        return '<div class="inst-row' + (inst.id === openDrawerInstId ? ' open' : '') + '" data-inst-id="' + (inst.id || '') + '" data-canonical-id="' + (inst.canonical_event_id || '') + '" data-title="' + (inst.title || '').replace(/"/g, '&quot;') + '" data-date="' + dt.replace(/"/g, '&quot;') + '" data-meta="' + meta.replace(/"/g, '&quot;') + '">' +
+          '<span class="inst-row-date">' + dt + '</span>' +
+          '<span class="inst-row-title">' + (inst.title || '') + '</span>' +
+          '<span class="inst-row-meta">' + meta + '</span>' +
+          '</div>' +
+          (inst.id === openDrawerInstId ? '<div class="inst-drawer" id="drawer-' + inst.id + '"><p class="hint">Loading...</p></div>' : '');
+      }).join('');
+
+      instResultsEl.querySelectorAll('.inst-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const id = row.getAttribute('data-inst-id');
+          const canonicalId = row.getAttribute('data-canonical-id');
+          const title = row.getAttribute('data-title');
+          const date = row.getAttribute('data-date');
+          const meta = row.getAttribute('data-meta');
+          if (openDrawerInstId === id) {
+            openDrawerInstId = null;
+            renderInstances();
+          } else {
+            openDrawerInstId = id;
+            renderInstances(); // loads drawer content at the end
+          }
+        });
+      });
+
+      if (openDrawerInstId) {
+        const drawerEl = document.getElementById('drawer-' + openDrawerInstId);
+        const inst = allInstances.find((i) => i.id === openDrawerInstId);
+        if (drawerEl) {
+          loadDrawerContent(buildDrawerContext({
+            instanceId: openDrawerInstId,
+            canonicalId: inst?.canonical_event_id || '',
+            title: inst?.title || '',
+            date: formatUiDate(inst?.occurrence_start_at, { includeTime: true }),
+          }), drawerEl);
+        }
+      }
+    }
+
+    async function loadDrawerContent(context, drawerEl) {
+      const instanceId = context?.instanceId || '';
+      let canonicalId = context?.canonicalId || '';
+      let title = context?.title || '';
+      let date = context?.date || '';
+      if (!canonicalId && instanceId) {
+        const inst = allInstances.find((i) => i.id === instanceId);
+        if (inst) {
+          canonicalId = inst.canonical_event_id;
+          title = inst.title;
+          date = formatUiDate(inst.occurrence_start_at, { includeTime: true });
+        }
+      }
+      if (!canonicalId) {
+        drawerEl.innerHTML = '<p class="hint" style="color:#a00">Event detail is unavailable.</p>';
+        return;
+      }
+      try {
+        const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(canonicalId));
+        const overrides = getOverridesForContext(eventPayload.overrides || [], instanceId)
+          .map((ov) => ({ ...ov, payload: typeof ov.payload_json === 'string' ? JSON.parse(ov.payload_json || '{}') : (ov.payload_json || {}) }));
+        drawerEl.innerHTML =
+          '<h4>' + (title || 'Event') + ' <span class="hint" style="font-weight:400">' + (date || '') + '</span></h4>' +
+          '<form class="override-form" data-canonical-id="' + (canonicalId || '') + '" data-instance-id="' + instanceId + '">' +
+          '<div class="field-group"><span class="field-label">Override type</span>' +
+          '<select name="override-type">' +
+          '<option value="skip">Skip — remove from all outputs</option>' +
+          '<option value="hidden">Hidden — suppress from a specific output</option>' +
+          '<option value="maybe">Maybe — flag as uncertain</option>' +
+          '<option value="note">Note — attach context only</option>' +
+          '</select></div>' +
+          '<div class="field-group"><span class="field-label">Note (optional)</span><input type="text" name="override-note" placeholder="e.g. Can&#39;t make it this week" /></div>' +
+          '<div class="field-group" style="justify-content:flex-end"><span class="field-label">&nbsp;</span><button class="primary" type="submit">Apply</button></div>' +
+          '</form>' +
+          (overrides.length ? '<div class="override-list">' + overrides.map((ov) =>
+            '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
+            '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
+            (ov.payload?.note ? ' — ' + ov.payload.note : '') +
+            '<div class="override-item-meta">' + (ov.event_instance_id ? 'This instance' : 'All instances') + ' · by ' + (ov.created_by || '') + '</div></div>' +
+            '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
+            '</div>'
+          ).join('') + '</div>' : '');
+
+        const form = drawerEl.querySelector('form');
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('button[type="submit"]');
+          btn.disabled = true;
+          try {
+            await fetchJson('/api/events/' + encodeURIComponent(canonicalId) + '/overrides', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                overrideType: form.querySelector('[name="override-type"]').value,
+                eventInstanceId: instanceId || undefined,
+                payload: form.querySelector('[name="override-note"]').value ? { note: form.querySelector('[name="override-note"]').value } : {},
+              }),
+            });
+            setStatus('Override applied.', false);
+            await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
+            await loadModifiedEvents();
+            renderInstances();
+          } catch (err) {
+            setStatus('Override failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+
+        drawerEl.querySelectorAll('.remove-override').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-override-id');
+            if (!id) return;
+            btn.disabled = true;
+            try {
+              await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
+              setStatus('Override removed.', false);
+              await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
+              await loadModifiedEvents();
+              renderInstances();
+            } catch (err) {
+              setStatus('Remove failed: ' + (err.message || String(err)), true);
+              btn.disabled = false;
+            }
+          });
+        });
+      } catch (err) {
+        drawerEl.innerHTML = '<p class="hint" style="color:#a00">Failed to load event detail.</p>';
+      }
+    }
+
+    function renderModifiedEvents() {
+      if (!activeOverrides.length) {
+        modifiedEventsBody.innerHTML = '<p class="hint" style="padding:8px 0">No future events with modifications.</p>';
+        return;
+      }
+
+      // Toggling drawers stays client-side; only real override mutations refetch /api/overrides.
+      modifiedEventsBody.innerHTML = activeOverrides.map((ov) => {
+        const eventDt = formatUiDate(ov.event_date, { includeTime: true });
+        const meta = [ov.owner_type || '', ov.source_name || '', normalizeNote(ov.payload?.note)].filter(Boolean).join(' · ');
+        const isOpen = ov.id === openModifiedOverrideId;
+        return '<div class="modified-item' + (isOpen ? ' open' : '') + '" data-override-id="' + escapeHtml(ov.id || '') + '">' +
+          '<div class="modified-item-main">' +
+          '<div class="modified-item-date">' + escapeHtml(eventDt) + '</div>' +
+          '<div class="modified-item-title">' + escapeHtml(ov.title || '') + '</div>' +
+          '<span class="status-pill status-pill-' + escapeHtml(ov.override_type || '') + '">' + escapeHtml(ov.override_type || '') + '</span>' +
+          '</div>' +
+          '<div class="modified-item-meta">' + escapeHtml(meta) + '</div>' +
+          (isOpen
+            ? '<div class="modified-item-drawer"><div class="inst-drawer" id="modified-drawer-' + escapeHtml(ov.id || '') + '"><p class="hint">Loading...</p></div></div>'
+            : '') +
+          '</div>';
+      }).join('');
+
+      modifiedEventsBody.querySelectorAll('.modified-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          const overrideId = item.getAttribute('data-override-id');
+          if (!overrideId) return;
+          openModifiedOverrideId = openModifiedOverrideId === overrideId ? null : overrideId;
+          renderModifiedEvents();
+        });
+      });
+
+      if (openModifiedOverrideId) {
+        const override = activeOverrides.find((ov) => ov.id === openModifiedOverrideId);
+        const drawerEl = document.getElementById('modified-drawer-' + openModifiedOverrideId);
+        if (override && drawerEl) {
+          drawerEl.addEventListener('click', (event) => event.stopPropagation());
+          loadDrawerContent(buildDrawerContext({
+            instanceId: override.event_instance_id || '',
+            canonicalId: override.canonical_event_id || '',
+            title: override.title || '',
+            date: formatUiDate(override.event_date, { includeTime: true }),
+          }), drawerEl);
+        }
+      }
+    }
+
+    async function loadModifiedEvents() {
+      try {
+        const payload = await fetchJson('/api/overrides');
+        activeOverrides = payload.overrides || [];
+        renderModifiedEvents();
+      } catch (err) {
+        // non-fatal, modified events table is secondary
+      }
+    }
+
+    eventSourceFilter.addEventListener('change', loadInstances);
+    eventOutputFilter.addEventListener('change', loadInstances);
+    eventSearchInput.addEventListener('input', renderInstances);
+
+    // --- Source form ---
+    sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
+    sourceGoogleOutputsEl.addEventListener('change', syncTargetRuleInputs);
+
+    function resetSourceForm() {
+      sourceNameInput.value = '';
+      sourceUrlInput.value = '';
+      sourceTitleRulesInput.value = '';
+      sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+      sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
+      sourceRuleState.clear();
+      syncTargetRuleInputs();
+      sourceForm.removeAttribute('data-editing-id');
+      document.getElementById('source-save').textContent = 'Add Source';
+    }
+
+    sourceForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const saveBtn = document.getElementById('source-save');
+      saveBtn.disabled = true;
+      const editingId = sourceForm.getAttribute('data-editing-id') || null;
+      setStatus(editingId ? 'Updating source...' : 'Saving source...', false);
+      try {
+        const sourceUrl = String(sourceUrlInput.value || '').trim();
+        const selectedIcs = getCheckedTargets(sourceIcsOutputsEl);
+        const selectedGoogle = getCheckedTargets(sourceGoogleOutputsEl);
+
+        if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
+          throw new Error('Source URL must start with http:// or https://');
+        }
+        if (!selectedIcs.length && !selectedGoogle.length) {
+          throw new Error('Select at least one output (ICS or Google).');
+        }
+        const selectedIcsSlugs = selectedIcs.map((target) => target.slug);
+        if (selectedIcsSlugs.includes('grayson') && selectedIcsSlugs.includes('naomi')) {
+          throw new Error('A source cannot target both grayson and naomi ICS feeds.');
+        }
+
+        const ownerType = deriveOwnerType(selectedIcs);
+        const allTargets = [...selectedIcs, ...selectedGoogle];
+        const targetLinks = allTargets.map((target) => {
+          const rule = sourceRuleState.get(target.id) || { icon: '', prefix: getDefaultPrefix(target.slug, ownerType) };
+          return { target_id: target.id, target_key: target.slug, icon: rule.icon || '', prefix: rule.prefix || '' };
+        });
+
+        const body = {
+          owner_type: ownerType,
+          display_name: sourceNameInput.value,
+          url: sourceUrl,
+          include_in_child_ics: selectedIcsSlugs.includes('grayson') || selectedIcsSlugs.includes('naomi'),
+          include_in_family_ics: selectedIcsSlugs.includes('family'),
+          include_in_child_google_output: selectedGoogle.length > 0,
+          title_rewrite_rules_text: sourceTitleRulesInput.value,
+          target_links: targetLinks,
+        };
+
+        if (editingId) {
+          await fetchJson('/api/sources/' + encodeURIComponent(editingId), {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          setStatus('Source updated.', false);
+        } else {
+          await fetchJson('/api/sources', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          setStatus('Source saved. Queue a rebuild to ingest it now.', false);
+        }
+
+        resetSourceForm();
+        await loadDashboard();
+      } catch (err) {
+        setStatus('Save failed: ' + (err.message || String(err)), true);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    // --- Google output form ---
+    targetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const saveBtn = document.getElementById('target-save');
+      saveBtn.disabled = true;
+      setStatus('Saving Google output...', false);
+      try {
+        const displayName = String(targetKeyInput.value || '').trim();
+        const targetKey = displayName.trim().toLowerCase();
+        const calendarId = String(targetCalendarInput.value || '').trim();
+        if (SYSTEM_TARGET_SLUGS.has(targetKey)) {
+          throw new Error('Google output keys cannot be family, grayson, or naomi. Use a distinct key such as ' + targetKey + '_clubs.');
+        }
+        if (!calendarId.includes('@')) {
+          throw new Error('Calendar ID should be a full Google Calendar ID (contains "@").');
+        }
+        await fetchJson('/api/targets', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            display_name: displayName,
+            target_key: targetKeyInput.value,
+            calendar_id: calendarId,
+            ownership_mode: targetModeInput.value,
+          }),
+        });
+        targetKeyInput.value = '';
+        targetCalendarInput.value = '';
+        setStatus('Google output saved.', false);
+        await loadDashboard();
+      } catch (err) {
+        setStatus('Save failed: ' + (err.message || String(err)), true);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadDashboard);
+    rebuildBtn.addEventListener('click', async () => {
+      rebuildBtn.disabled = true;
+      setStatus('Queueing full rebuild...', false);
+      try {
+        const p = await fetchJson('/api/rebuild/full', { method: 'POST' });
+        setStatus('Full rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
+        await loadDashboard();
+      } catch (err) {
+        setStatus('Rebuild failed: ' + (err.message || String(err)), true);
+      } finally {
+        rebuildBtn.disabled = false;
+      }
+    });
+
+    loadDashboard().catch((err) => {
+      setStatus(err.message || String(err), true);
+    });
