@@ -21,7 +21,15 @@ function parsePropertyLine(line) {
   return { name: name.toUpperCase(), params, value };
 }
 
-function parseDateValue(raw, tzid) {
+function unescapeText(value) {
+  return String(value || '')
+    .replace(/\\n/gi, '\n')
+    .replace(/\\,/g, ',')
+    .replace(/\\;/g, ';')
+    .replace(/\\\\/g, '\\');
+}
+
+function parseDateValue(raw, tzid, fallbackTz) {
   if (!raw) return null;
   if (/^\d{8}$/.test(raw)) {
     return { iso: `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T00:00:00.000Z`, tzid: tzid || 'UTC', isDateOnly: true };
@@ -31,8 +39,9 @@ function parseDateValue(raw, tzid) {
     return { iso, tzid: tzid || 'UTC', isDateOnly: false };
   }
   if (/^\d{8}T\d{6}$/.test(raw)) {
-    const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(9, 11)}:${raw.slice(11, 13)}:${raw.slice(13, 15)}.000Z`;
-    return { iso, tzid: tzid || 'UTC', isDateOnly: false };
+    // Floating local time — no Z suffix so the consumer can treat it as wall-clock
+    const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(9, 11)}:${raw.slice(11, 13)}:${raw.slice(13, 15)}.000`;
+    return { iso, tzid: tzid || fallbackTz || 'UTC', isDateOnly: false };
   }
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return null;
@@ -44,6 +53,16 @@ export function parseICS(text) {
   const lines = unfolded.split(/\r?\n/);
   const events = [];
   let current = null;
+
+  // Extract X-WR-TIMEZONE from calendar header (lines before any VEVENT)
+  let calendarTimezone = null;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line === 'BEGIN:VEVENT') break;
+    if (line.startsWith('X-WR-TIMEZONE:')) {
+      calendarTimezone = line.slice('X-WR-TIMEZONE:'.length).trim() || null;
+    }
+  }
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -63,15 +82,15 @@ export function parseICS(text) {
     if (!parsed) continue;
     const { name, params, value } = parsed;
     if (name === 'UID') current.uid = value;
-    if (name === 'SUMMARY') current.summary = value;
-    if (name === 'DESCRIPTION') current.description = value;
-    if (name === 'LOCATION') current.location = value;
+    if (name === 'SUMMARY') current.summary = unescapeText(value);
+    if (name === 'DESCRIPTION') current.description = unescapeText(value);
+    if (name === 'LOCATION') current.location = unescapeText(value);
     if (name === 'STATUS') current.status = value.toLowerCase();
     if (name === 'RRULE') current.rrule = value;
-    if (name === 'DTSTART') current.dtstart = parseDateValue(value, params.TZID);
-    if (name === 'DTEND') current.dtend = parseDateValue(value, params.TZID);
-    if (name === 'RECURRENCE-ID') current.recurrenceId = parseDateValue(value, params.TZID)?.iso || value;
-    if (name === 'LAST-MODIFIED') current.lastModified = parseDateValue(value, params.TZID)?.iso || value;
+    if (name === 'DTSTART') current.dtstart = parseDateValue(value, params.TZID, calendarTimezone);
+    if (name === 'DTEND') current.dtend = parseDateValue(value, params.TZID, calendarTimezone);
+    if (name === 'RECURRENCE-ID') current.recurrenceId = parseDateValue(value, params.TZID, calendarTimezone)?.iso || value;
+    if (name === 'LAST-MODIFIED') current.lastModified = parseDateValue(value, params.TZID, calendarTimezone)?.iso || value;
   }
 
   return events

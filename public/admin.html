@@ -13,6 +13,10 @@
     <!-- Header -->
     <div class="card">
       <p class="eyebrow">Family Scheduling</p>
+      <div class="page-nav">
+        <a href="/admin" class="page-nav-link active">Configure</a>
+        <a href="/admin/events" class="page-nav-link">Modify Events</a>
+      </div>
       <h1>Admin Console</h1>
       <div class="summary-grid">
         <div class="metric-card"><p class="metric-label">Sources</p><p class="metric" id="metric-sources">-</p></div>
@@ -23,6 +27,7 @@
       <div class="toolbar">
         <button id="refresh" class="primary">Refresh</button>
         <button id="rebuild" class="warn">Queue Full Rebuild</button>
+        <a href="/admin/events" class="button-link">Open Mobile Event Tools</a>
       </div>
     </div>
 
@@ -100,6 +105,11 @@
             <input id="source-url" type="url" placeholder="https://..." required />
           </div>
         </div>
+        <div class="field-group">
+          <span class="field-label">Title Rewrite Rules</span>
+          <textarea id="source-title-rules" rows="4" placeholder="/u11a/gi => Tigers&#10;/WCHC 2016 REDS/g => BW"></textarea>
+          <p class="hint">Applied from the original upstream title on ingest and source updates. One rule per line: <code>/pattern/flags =&gt; replacement</code>.</p>
+        </div>
         <div>
           <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
           <div class="checkbox-wrap" id="source-ics-outputs"></div>
@@ -119,11 +129,9 @@
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Owner</th>
-              <th>Outputs</th>
+              <th>Source</th>
               <th>Events</th>
-              <th>Last Fetch</th>
+              <th>Sync/Def</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
@@ -162,12 +170,7 @@
 
       <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
         <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Future Events with Modifications</h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Event Date</th><th>Event</th><th>Source</th><th>Override</th><th>Note</th><th></th></tr></thead>
-            <tbody id="modified-events-body"></tbody>
-          </table>
-        </div>
+        <div id="modified-events-body" class="modified-events-list"></div>
       </div>
     </div>
 

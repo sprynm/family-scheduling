@@ -12,6 +12,8 @@ npm run dev
 
 ## Docs
 
+- [Project decisions](./docs/decisions.md)
+- [Development log](./docs/log.md)
 - [Todo / work items](./docs/todo.md)
 - [Coding standards](./docs/coding-standards.md)
 - [Implementation plan](./docs/implementation-plan.md)

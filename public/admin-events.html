@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modify Events | Family Scheduling</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="event-page">
+  <main class="event-main">
+    <div class="card hero-card">
+      <p class="eyebrow">Family Scheduling</p>
+      <div class="page-nav">
+        <a href="/admin" class="page-nav-link">Configure</a>
+        <a href="/admin/events" class="page-nav-link active">Modify Events</a>
+      </div>
+      <h1>Modify Events</h1>
+      <p class="section-desc">Mobile-first event corrections. Pick a source, find the instance, and apply the override here.</p>
+      <div id="event-page-status" class="status">Loading...</div>
+    </div>
+
+    <div class="card mobile-focus-card">
+      <div class="card-header">
+        <h2>Upcoming Instances</h2>
+      </div>
+      <div class="event-filter-sticky">
+        <div class="event-filter-grid">
+          <div class="field-group">
+            <span class="field-label">Source</span>
+            <select id="event-source-filter">
+              <option value="">— pick a source —</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <span class="field-label">Output</span>
+            <select id="event-output-filter">
+              <option value="">All outputs</option>
+            </select>
+          </div>
+          <div class="field-group event-search-group">
+            <span class="field-label">Search</span>
+            <input type="search" id="event-search" placeholder="Title keyword..." />
+          </div>
+        </div>
+      </div>
+      <div id="inst-results" class="inst-results mobile-inst-results">
+        <p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Modified Events</h2>
+      </div>
+      <p class="section-desc">Recent manual changes. Open an item here to review, add, or remove overrides.</p>
+      <div id="modified-events-list" class="modified-events-list">
+        <p class="hint" style="padding:8px 0">Loading...</p>
+      </div>
+    </div>
+  </main>
+  <script src="/admin-events.js" defer></script>
+</body>
+</html>
