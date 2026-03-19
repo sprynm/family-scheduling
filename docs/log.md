@@ -79,8 +79,15 @@ At closeout of a unit of work, insights should be compacted into:
 - Configured prune to delete completed jobs older than 7 days and failed jobs older than 30 days while leaving queued/running jobs untouched.
 - Added regression coverage for snapshot and job-history pruning.
 - Cleaned the stale queued outage-era rows from production and verified the queue recovered to zero queued jobs.
+- Deployed the retention update via Wrangler.
 
 ### Discoveries
 
 - `sync_jobs` has real short-term operator value, but most of its growth is operational exhaust rather than durable business state.
 - Recent Cloudflare D1 reads can lag immediately after writes; verification queries may need a short delay after manual cleanup.
+
+### Release Result
+
+- Deployment completed successfully on 2026-03-19.
+- Current version: `05d22fe1-be10-4380-aee1-cca664194c6e`.
+- Published URL: `https://family-scheduling.lance-e35.workers.dev`.
