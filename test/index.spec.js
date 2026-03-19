@@ -1465,12 +1465,12 @@ beforeEach(() => {
     fetch: vi.fn(async (request) => {
       const url = new URL(request.url);
       if (url.pathname === '/admin.html') {
-        return new Response('<!doctype html><html><body><h1>Admin Console</h1></body></html>', {
+        return new Response('<!doctype html><html><head><meta name="robots" content="noindex, nofollow"></head><body><h1>Admin Console</h1></body></html>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
       if (url.pathname === '/admin-events.html') {
-        return new Response('<!doctype html><html><body><h1>Modify Events</h1></body></html>', {
+        return new Response('<!doctype html><html><head><meta name="robots" content="noindex, nofollow"></head><body><h1>Modify Events</h1></body></html>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
@@ -2182,6 +2182,7 @@ describe('family-scheduling worker', () => {
     const body = await response.text();
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
+    expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
     expect(body).toContain('Admin Console');
     expect(env.ASSETS.fetch).toHaveBeenCalledTimes(1);
   });
@@ -2194,6 +2195,7 @@ describe('family-scheduling worker', () => {
     const body = await response.text();
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
+    expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
     expect(body).toContain('Modify Events');
   });
 

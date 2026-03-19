@@ -127,7 +127,14 @@ async function serveAdminAsset(request, env) {
   if (!env.ASSETS?.fetch) {
     return text('Admin assets binding is required', { status: 500 });
   }
-  return env.ASSETS.fetch(buildAdminAssetRequest(request));
+  const response = await env.ASSETS.fetch(buildAdminAssetRequest(request));
+  const headers = new Headers(response.headers);
+  headers.set('X-Robots-Tag', 'noindex, nofollow');
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function asBadRequest(error) {
