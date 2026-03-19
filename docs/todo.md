@@ -99,6 +99,9 @@ Completed. `listInstances` now excludes `source_deleted` canonical events and `s
 ### Harden title rewrite rules and admin override drawers
 Completed. Source title rewrite rules now reject unsafe regex patterns, source-config title backfills run set-based instead of N+1 updates, the orphaned `0006` migration file was removed, and both admin surfaces now toggle modified-event drawers client-side using the same context shape.
 
+### Reduce unnecessary queue traffic and retry amplification
+Completed. Cron enqueue failures are now non-fatal and logged, active queue work is best-effort deduped, retryable consumer failures use delayed retries with attempt metadata, and unchanged-source ingests no longer fan out Google sync work.
+
 ---
 
 ## Done
@@ -131,3 +134,4 @@ Completed. Source title rewrite rules now reject unsafe regex patterns, source-c
 - [x] Top-level `loadDashboard()` call is now guarded with `.catch(...)` - 2026-03-08
 - [x] Feed cache TTL already uses `FEED_CACHE_MAX_AGE_DEFAULT` / `env.FEED_CACHE_MAX_AGE`; old inline-cache TODO retired - 2026-03-08
 - [x] Title rewrite rules hardened and modified-event drawers refactored to client-side toggle - 2026-03-15
+- [x] Queue production, retries, and unchanged-source sync fanout reduced to cut repeated Cloudflare Queue messages - 2026-03-18

@@ -1,6 +1,6 @@
 # Implementation Plan
 
-_Updated: 2026-03-15_
+_Updated: 2026-03-18_
 
 ## Vocabulary
 
@@ -49,6 +49,11 @@ The codebase is now centered on the unified `output_targets` model. Legacy `targ
 30. `/api/instances` excludes stale `source_deleted` rows so corrected timezone rebuilds do not show duplicate pre-fix instances in admin.
 31. Source title rewrite rules reject unsafe regex patterns and preserve `source_title_raw` so title changes can be backfilled and reverted safely.
 32. Source config title backfills are set-based, and modified-event drawers on both admin pages now toggle client-side without refetching `/api/overrides`.
+33. Cron queue production is now failure-tolerant: enqueue failures are logged with context, later sources continue processing, and each cron run emits a queue summary instead of failing on the first queue `429`.
+34. Active queue work is best-effort deduped for source ingest, source rebuild, Google target sync, and prune jobs so the worker avoids sending repeat messages for work already in flight.
+35. Queue consumer retries are now delayed and bounded with persisted retry metadata (`attempt_count`, `last_error_kind`) instead of immediate retry storms.
+36. Source snapshots now store `payload_hash`, ingest uses conditional fetch headers when available, and unchanged fetches (`304` or identical payload hash) exit before parse, row rewrites, or downstream Google sync enqueue.
+37. Google sync fanout is now gated on effective source-state changes, so changed fetches that do not alter canonical events, instances, or output rules do not emit new sync jobs.
 
 ---
 
@@ -166,6 +171,7 @@ Do not implement new features there.
 9. Custom outputs should follow the same visual-decoration rules as system outputs unless there is a deliberate product reason not to.
 10. Timezone-correction rebuilds can leave stale deleted instance rows behind; admin queries must filter `source_deleted` state consistently.
 11. Operator-supplied regex is a feature, not a trust boundary. Title rewrite rules need conservative safety checks because Worker regex execution has no practical timeout control.
+12. Queue volume is a product behavior, not only an infrastructure concern. The worker has to decide deliberately when a message is necessary and suppress repeated no-op work at ingest and sync boundaries.
 
 ### 2026-03-09 — Session 11
 

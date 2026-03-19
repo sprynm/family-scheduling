@@ -35,3 +35,31 @@ At closeout of a unit of work, insights should be compacted into:
 ### Next Steps
 
 - Rebuild the affected family source in production so the oversized historical import is reprocessed under the new ingest retention window.
+
+## 2026-03-18
+
+### Session Notes
+
+- Investigated production Cloudflare Queue volume and confirmed the immediate failure mode was cron producer `429 Too Many Requests`, with additional message churn coming from immediate retry behavior and unchanged-source fanout.
+- Split the fix into queue stability and deliberate message suppression so the worker only emits jobs that move state forward.
+
+### Work Completed
+
+- Added non-fatal cron enqueue handling with structured `cron_enqueue_failed` and `cron_enqueue_summary` logs.
+- Added best-effort active-job dedupe for `ingest_source`, `rebuild_source`, `sync_google_target`, and `prune_stale_data`.
+- Replaced immediate queue retries with delayed, bounded retries and persisted retry metadata on `sync_jobs`.
+- Added `payload_hash` to `source_snapshots`, conditional fetch headers for sources that support them, and early exits for `304` and unchanged payloads.
+- Gated Google sync enqueueing on effective source-state changes so no-op ingests do not fan out downstream sync jobs.
+- Added and documented a queue-reduction testing plan, then ran the full `vitest` suite successfully.
+- Merged the feature branch into `main` and deployed the worker via Wrangler.
+
+### Discoveries
+
+- Queue volume is primarily a behavior problem at cron and ingest boundaries, not just a provider limit issue.
+- Best-effort dedupe is useful but not authoritative because D1 read-before-write races can still allow occasional duplicate attempts.
+- `hashValue()` is deterministic across restarts; the operational risk is not hash instability but computing state fingerprints more often than necessary.
+
+### Release Result
+
+- Deployment completed successfully on 2026-03-18.
+- Post-deploy validation target: watch `cron_enqueue_summary`, `cron_enqueue_failed`, `queue_job_retry_scheduled`, `queue_job_failed`, and daily Cloudflare Queue message volume for the next full cron cycle.
