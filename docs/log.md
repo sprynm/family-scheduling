@@ -62,4 +62,6 @@ At closeout of a unit of work, insights should be compacted into:
 ### Release Result
 
 - Deployment completed successfully on 2026-03-18.
+- Current version: `42dc99fc-4c0a-491b-85ce-75ca730b040d`.
+- Published URL: `https://family-scheduling.lance-e35.workers.dev`.
 - Post-deploy validation target: watch `cron_enqueue_summary`, `cron_enqueue_failed`, `queue_job_retry_scheduled`, `queue_job_failed`, and daily Cloudflare Queue message volume for the next full cron cycle.
