@@ -132,6 +132,10 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('ALTER TABLE source_snapshots ADD COLUMN payload_hash')) {
+      return;
+    }
+
     if (sql.includes('ALTER TABLE sync_jobs ADD COLUMN attempt_count')) {
       return;
     }
@@ -368,7 +372,7 @@ class FakeDb {
     }
 
     if (sql.includes('INSERT INTO source_snapshots')) {
-      const [id, sourceId, fetchedAt, httpStatus, etag, lastModified, payloadBlobRef, parseStatus, parseErrorSummary] = values;
+      const [id, sourceId, fetchedAt, httpStatus, etag, lastModified, payloadBlobRef, payloadHash, parseStatus, parseErrorSummary] = values;
       this.sourceSnapshots.push({
         id,
         source_id: sourceId,
@@ -377,6 +381,7 @@ class FakeDb {
         etag,
         last_modified: lastModified,
         payload_blob_ref: payloadBlobRef,
+        payload_hash: payloadHash,
         parse_status: parseStatus,
         parse_error_summary: parseErrorSummary,
       });
@@ -984,6 +989,61 @@ class FakeDb {
         });
     }
     if (sql.includes('FROM sync_jobs ORDER BY')) return this.syncJobs.slice(0, values[0] || 50);
+    if (sql.includes('FROM canonical_events') && sql.includes('WHERE source_id = ?') && sql.includes('ORDER BY id ASC')) {
+      return this.canonicalEvents
+        .filter((row) => row.source_id === values[0])
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .map((row) => ({
+          id: row.id,
+          title: row.title,
+          source_title_raw: row.source_title_raw,
+          source_icon: row.source_icon,
+          source_prefix: row.source_prefix,
+          description: row.description,
+          location: row.location,
+          start_at: row.start_at,
+          end_at: row.end_at,
+          timezone: row.timezone,
+          status: row.status,
+          rrule: row.rrule,
+          source_deleted: row.source_deleted,
+        }));
+    }
+    if (sql.includes('FROM event_instances') && sql.includes('JOIN canonical_events') && sql.includes('ORDER BY event_instances.id ASC')) {
+      return this.eventInstances
+        .filter((row) => {
+          const event = this.canonicalEvents.find((candidate) => candidate.id === row.canonical_event_id);
+          return event?.source_id === values[0];
+        })
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .map((row) => ({
+          id: row.id,
+          canonical_event_id: row.canonical_event_id,
+          occurrence_start_at: row.occurrence_start_at,
+          occurrence_end_at: row.occurrence_end_at,
+          recurrence_instance_key: row.recurrence_instance_key,
+          provider_recurrence_id: row.provider_recurrence_id,
+          status: row.status,
+          source_deleted: row.source_deleted,
+        }));
+    }
+    if (sql.includes('FROM output_rules') && sql.includes('ORDER BY output_rules.id ASC')) {
+      return this.outputRules
+        .filter((row) => {
+          const event = this.canonicalEvents.find((candidate) => candidate.id === row.canonical_event_id);
+          return event?.source_id === values[0];
+        })
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        .map((row) => ({
+          id: row.id,
+          canonical_event_id: row.canonical_event_id,
+          event_instance_id: row.event_instance_id,
+          target_id: row.target_id,
+          target_key: row.target_key,
+          include_state: row.include_state,
+          derived_reason: row.derived_reason,
+        }));
+    }
     if (sql.includes('FROM source_target_links') && sql.includes('DISTINCT output_targets.id')) {
       return this.sourceTargetLinks
         .filter((row) => row.source_id === values[0] && row.is_enabled === 1)
@@ -1322,6 +1382,11 @@ class FakeDb {
     }
     if (sql.includes('SELECT * FROM sources WHERE id = ?')) {
       return this.sources.find((row) => row.id === values[0]) || null;
+    }
+    if (sql.includes('FROM source_snapshots') && sql.includes('ORDER BY fetched_at DESC')) {
+      return this.sourceSnapshots
+        .filter((row) => row.source_id === values[0])
+        .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)))[0] || null;
     }
     if (sql.includes('FROM sync_jobs') && sql.includes("status IN ('queued', 'running')")) {
       return this.syncJobs
@@ -2789,7 +2854,10 @@ describe('family-scheduling worker', () => {
     const repo = new D1Repository(db, env);
     const result = await repo.ingestSource('src_custom_naomi');
     expect(result.urlsFetched).toBe(1);
-    expect(global.fetch).toHaveBeenCalledWith('https://example.com/naomi-volleyball.ics', { cf: { cacheTtl: 0 } });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://example.com/naomi-volleyball.ics',
+      expect.objectContaining({ cf: { cacheTtl: 0 } })
+    );
 
     const familyFeed = await repo.generateFeed({
       target: 'family',
@@ -2804,6 +2872,223 @@ describe('family-scheduling worker', () => {
 
     expect(familyFeed).toContain('SUMMARY:N: 🏐 Volleyball Game');
     expect(naomiFeed).toContain('SUMMARY:🏐 Volleyball Game');
+  });
+
+  it('skips ingest and google sync when the upstream source returns 304 not modified', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_not_modified',
+      name: 'family-cacheable',
+      display_name: 'Family Cacheable',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-cacheable.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceSnapshots.push({
+      id: 'snap_prev',
+      source_id: 'src_not_modified',
+      fetched_at: '2026-03-03T00:00:00.000Z',
+      http_status: 200,
+      etag: '"etag-prev"',
+      last_modified: 'Mon, 03 Mar 2026 00:00:00 GMT',
+      payload_blob_ref: null,
+      payload_hash: 'hash-prev',
+      parse_status: 'parsed',
+      parse_error_summary: null,
+    });
+    const fetchMock = vi.fn(async (_url, options = {}) => {
+      expect(options.headers['If-None-Match']).toBe('"etag-prev"');
+      expect(options.headers['If-Modified-Since']).toBe('Mon, 03 Mar 2026 00:00:00 GMT');
+      return new Response(null, { status: 304 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const repo = new D1Repository(db, env);
+    const result = await repo.ingestSource('src_not_modified');
+
+    expect(result.fetchState).toBe('not_modified');
+    expect(result.dataChanged).toBe(false);
+    expect(result.googleSync.queued_jobs).toBe(0);
+    expect(env.JOBS_QUEUE.sent).toHaveLength(0);
+    expect(db.sourceSnapshots.at(-1)?.parse_status).toBe('not_modified');
+  });
+
+  it('skips ingest and google sync when a 200 response has the same payload hash', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_same_payload',
+      name: 'family-same-payload',
+      display_name: 'Family Same Payload',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-same-payload.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    const payload = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:family-same-payload-1',
+      'SUMMARY:Family Dinner',
+      'DTSTART:20260610T010000Z',
+      'DTEND:20260610T020000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(payload, {
+          status: 200,
+          headers: { etag: '"etag-same"', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' },
+        })
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    const first = await repo.ingestSource('src_same_payload');
+    expect(first.fetchState).toBe('changed');
+    env.JOBS_QUEUE.sent = [];
+    const second = await repo.ingestSource('src_same_payload');
+
+    expect(second.fetchState).toBe('unchanged_payload');
+    expect(second.dataChanged).toBe(false);
+    expect(second.googleSync.queued_jobs).toBe(0);
+    expect(env.JOBS_QUEUE.sent).toHaveLength(0);
+  });
+
+  it('skips google sync when payload changes but effective source state does not', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_same_state',
+      target_type: 'google',
+      slug: 'family_clubs',
+      display_name: 'Family Clubs',
+      calendar_id: 'family-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_same_state',
+      name: 'family-same-state',
+      display_name: 'Family Same State',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-same-state.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_same_state',
+      source_id: 'src_same_state',
+      target_id: 'outt_google_same_state',
+      target_key: 'family_clubs',
+      target_type: 'google',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let variant = 1;
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      if (String(url) === 'https://example.com/family-same-state.ics') {
+        const lines = variant === 1
+          ? [
+              'BEGIN:VCALENDAR',
+              'BEGIN:VEVENT',
+              'UID:family-same-state-1',
+              'SUMMARY:Family Dinner',
+              'DTSTART:20260610T010000Z',
+              'DTEND:20260610T020000Z',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ]
+          : [
+              'BEGIN:VCALENDAR',
+              'BEGIN:VEVENT',
+              'UID:family-same-state-1',
+              'DTEND:20260610T020000Z',
+              'DTSTART:20260610T010000Z',
+              'SUMMARY:Family Dinner',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ];
+        return new Response(lines.join('\r\n'), {
+          status: 200,
+          headers: { etag: `"state-${variant}"`, 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' },
+        });
+      }
+      if (String(url) === 'https://oauth2.googleapis.com/token') {
+        return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/family-clubs%40group.calendar.google.com/events' && options.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'google-same-state-1', etag: 'etag-1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+    }));
+
+    const repo = new D1Repository(db, env);
+    const first = await repo.ingestSource('src_same_state');
+    expect(first.googleSync.queued_jobs).toBe(1);
+    await drainQueue(env);
+    env.JOBS_QUEUE.sent = [];
+
+    variant = 2;
+    const second = await repo.ingestSource('src_same_state');
+
+    expect(second.fetchState).toBe('changed');
+    expect(second.dataChanged).toBe(false);
+    expect(second.googleSync.queued_jobs).toBe(0);
+    expect(env.JOBS_QUEUE.sent).toHaveLength(0);
   });
 
   it('applies fallback sport icon detection when source icon is not configured', async () => {
