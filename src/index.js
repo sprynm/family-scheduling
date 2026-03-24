@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { getRoleFromRequest, requireRole } from './lib/auth.js';
 import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
@@ -94,11 +95,23 @@ function getCalendarName(env, target, requestedName) {
   return env.CALENDAR_NAME_NAOMI || 'Naomi Combined';
 }
 
+function timingSafeTokenEquals(actual, expected) {
+  const encoder = new TextEncoder();
+  const actualBytes = encoder.encode(String(actual ?? ''));
+  const expectedBytes = encoder.encode(String(expected ?? ''));
+  const maxLength = Math.max(actualBytes.length, expectedBytes.length, 1);
+  const left = new Uint8Array(maxLength);
+  const right = new Uint8Array(maxLength);
+  left.set(actualBytes);
+  right.set(expectedBytes);
+  return timingSafeEqual(Buffer.from(left), Buffer.from(right)) && actualBytes.length === expectedBytes.length;
+}
+
 function requireFeedToken(request, env) {
   const configuredToken = env.TOKEN || '';
   if (!configuredToken) return null;
   const token = new URL(request.url).searchParams.get('token');
-  if (token !== configuredToken) {
+  if (!timingSafeTokenEquals(token, configuredToken)) {
     return text('Unauthorized', { status: 401 });
   }
   return null;
@@ -144,6 +157,23 @@ function asBadRequest(error) {
       message: error instanceof Error ? error.message : String(error),
     },
     { status: 400 }
+  );
+}
+
+async function buildInternalErrorResponse(request, env, error) {
+  let includeDetails = false;
+  try {
+    const role = await getRoleFromRequest(request, env);
+    includeDetails = ADMIN_ROLES.includes(role);
+  } catch {}
+  return json(
+    {
+      error: 'Internal error',
+      message: includeDetails
+        ? (error instanceof Error ? error.message : String(error))
+        : 'An internal error occurred.',
+    },
+    { status: 500 }
   );
 }
 
@@ -340,6 +370,15 @@ export default {
         return json({ job }, { status: 202 });
       }
 
+      if (pathname.startsWith('/api/sources/') && pathname.endsWith('/diagnose') && request.method === 'POST') {
+        const authError = await requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        const sourceId = pathname.split('/').filter(Boolean)[2];
+        const repo = await createRepository(env);
+        const diagnostic = await repo.diagnoseSourceIdentity(sourceId);
+        return json({ diagnostic });
+      }
+
       if (pathname.startsWith('/api/sources/') && request.method === 'PATCH') {
         const authError = await requireRole(request, env, ['admin']);
         if (authError) return authError;
@@ -384,13 +423,7 @@ export default {
 
       return text('Not found', { status: 404 });
     } catch (error) {
-      return json(
-        {
-          error: 'Internal error',
-          message: error instanceof Error ? error.message : String(error),
-        },
-        { status: 500 }
-      );
+      return buildInternalErrorResponse(request, env, error);
     }
   },
   async queue(batch, env) {
@@ -401,7 +434,9 @@ export default {
         await repo.markJobStatus(job.jobId, 'running');
         let summary = { status: 'noop' };
         if (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source') {
-          summary = await repo.ingestSource(job.scopeId);
+          summary = await repo.ingestSource(job.scopeId, {
+            forceRefresh: job.jobType === 'rebuild_source',
+          });
         } else if (job.jobType === 'sync_google_target') {
           summary = await repo.syncGoogleOutputsForTargetChunk(job.sourceId, job.targetId, {
             mode: job.mode || 'sync',
@@ -422,7 +457,7 @@ export default {
           const sources = await repo.listActiveSources();
           const results = [];
           for (const source of sources) {
-            results.push(await repo.ingestSource(source.id));
+            results.push(await repo.ingestSource(source.id, { forceRefresh: true }));
           }
           summary = { sourcesProcessed: results.length, results };
         } else if (job.jobType === 'prune_stale_data') {

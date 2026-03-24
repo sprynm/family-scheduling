@@ -111,6 +111,14 @@
           <textarea id="source-title-rules" rows="4" placeholder="/u11a/gi => Tigers&#10;/WCHC 2016 REDS/g => BW"></textarea>
           <p class="hint">Applied from the original upstream title on ingest and source updates. One rule per line: <code>/pattern/flags =&gt; replacement</code>.</p>
         </div>
+        <label class="field-group" style="display:flex;flex-direction:row;align-items:center;gap:10px">
+          <input id="source-uid-fallback" type="checkbox" />
+          <span>
+            <span class="field-label" style="display:block;margin-bottom:4px">UID fallback</span>
+            <span class="hint">Use fallback identity matching when the upstream feed regenerates unstable UIDs.</span>
+          </span>
+        </label>
+        <div id="source-diagnostic" class="hint" style="white-space:pre-wrap; max-height:240px; overflow:auto; padding:10px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,0.02)"></div>
         <div>
           <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
           <div class="checkbox-wrap" id="source-ics-outputs"></div>

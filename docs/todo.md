@@ -60,6 +60,24 @@ Completed. `listActiveSources()` now filters by `last_fetched_at` and `poll_inte
 ### Google Calendar outbound sync
 Completed. Ingest/source sync now reconciles linked Google outputs using `GOOGLE_SERVICE_ACCOUNT_JSON` and persists sync state in `google_event_links`.
 
+### Source-level UID fallback diagnostics
+Completed. Sources now have an operator-visible UID fallback toggle, a two-fetch stability diagnostic, persisted fallback state, and ingest honors the toggle for unstable standalone events.
+
+### Admin source-submit flow keeps edit state intact
+Completed. Saving a source now preserves the current editor values, keeps the UID fallback checkbox and output selections in place, and renders the diagnostic report inline without resetting the form.
+
+### Treat no-op fetch states as healthy
+Completed. `304 Not Modified` and unchanged-payload fetches are now shown as healthy source states instead of a parse failure warning.
+
+### Preserve source editor state across save/refresh
+Completed. Source edit mode now rehydrates correctly after dashboard refresh, and list-source payloads include all edit-critical fields (`uid_fallback_*` and `title_rewrite_rules_json`) to prevent accidental config drift.
+
+### Collapse healthy source status detail by default
+Completed. `ok` source rows now show compact status with click-to-open details, `304 Not Modified` detail is neutral (not error-colored), and fallback noise is reduced for untested feeds.
+
+### Harden public error boundaries and request-path efficiency
+Completed. Top-level `500` responses are now generic for non-admin callers, feed tokens use timing-safe comparison, legacy bootstrap is cached per D1 binding, feed lookback is enforced in SQL, JSON responses are compact, and Google write spacing is configurable.
+
 ### Google sync schema repair + live diagnostics
 Completed. Added `0005_google_event_links_nullable.sql`, runtime compatibility repair, actionable source status messaging, auto-refresh while jobs are active, and rate-limit mitigation for Google writes.
 

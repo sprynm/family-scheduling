@@ -275,6 +275,36 @@
     }
     .status.error { background: rgba(255, 111, 125, 0.12); color: #ffacb4; border-color: rgba(255, 111, 125, 0.2); }
     .hint { font-size: 0.76rem; color: var(--muted); }
+    .status-stack { max-width: 28rem; }
+    .status-stack summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+      list-style: none;
+    }
+    .status-stack summary::-webkit-details-marker { display: none; }
+    .status-stack-panel {
+      margin-top: 4px;
+      overflow: hidden;
+      max-height: 240px;
+      transition: max-height 180ms ease;
+    }
+    .status-stack-ok .status-stack-panel {
+      max-height: 0;
+      margin-top: 0;
+    }
+    .status-stack-ok[open] .status-stack-panel {
+      max-height: 240px;
+      margin-top: 4px;
+    }
+    .status-stack-body,
+    .status-stack-detail {
+      max-width: 28rem;
+      white-space: normal;
+      margin-top: 2px;
+    }
     /* instance list (Modify Events) */
     .inst-results { display: grid; gap: 2px; margin-top: 10px; }
     .inst-row {

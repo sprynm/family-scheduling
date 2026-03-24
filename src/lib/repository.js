@@ -23,6 +23,7 @@ function stableId(prefix, value = '') {
 
 function mapRow(row) {
   if (!row) return null;
+  // D1 returns row-like objects; normalize them into plain objects before we enrich them.
   return Object.fromEntries(Object.entries(row));
 }
 
@@ -205,9 +206,99 @@ function isDeferredRateLimitMessage(message) {
   return String(message || '').startsWith('Deferred after rate limit:');
 }
 
+function buildIdentitySignature(event) {
+  return JSON.stringify({
+    summary: String(event.summary || ''),
+    description: String(event.description || ''),
+    location: String(event.location || ''),
+    startAt: String(event.startAt || ''),
+    endAt: String(event.endAt || ''),
+    timezone: String(event.timezone || ''),
+    status: String(event.status || ''),
+    rrule: String(event.rrule || ''),
+    recurrenceId: String(event.recurrenceId || ''),
+  });
+}
+
+function sortIdentityEvents(events) {
+  return [...events].sort((a, b) =>
+    String(a.startAt || '').localeCompare(String(b.startAt || '')) ||
+    String(a.endAt || '').localeCompare(String(b.endAt || '')) ||
+    String(a.summary || '').localeCompare(String(b.summary || '')) ||
+    String(a.location || '').localeCompare(String(b.location || '')) ||
+    String(a.uid || '').localeCompare(String(b.uid || ''))
+  );
+}
+
+function buildUidStabilityReport(firstEvents, secondEvents) {
+  const firstSorted = sortIdentityEvents(firstEvents);
+  const secondSorted = sortIdentityEvents(secondEvents);
+  const report = {
+    checked_at: nowIso(),
+    first_count: firstSorted.length,
+    second_count: secondSorted.length,
+    matched_count: 0,
+    changed_uid_count: 0,
+    status: 'inconclusive',
+    recommendation: 'review',
+    message: '',
+    sample: [],
+  };
+
+  if (firstSorted.length !== secondSorted.length) {
+    report.message = `Event count changed between fetches (${firstSorted.length} -> ${secondSorted.length}).`;
+    return report;
+  }
+
+  let sameSignatureCount = 0;
+  let changedUidCount = 0;
+  const sample = [];
+  for (let index = 0; index < firstSorted.length; index += 1) {
+    const first = firstSorted[index];
+    const second = secondSorted[index];
+    const firstSignature = buildIdentitySignature(first);
+    const secondSignature = buildIdentitySignature(second);
+    if (firstSignature !== secondSignature) {
+      report.message = 'Event content changed between fetches, so UID stability could not be confirmed.';
+      return report;
+    }
+    sameSignatureCount += 1;
+    if (String(first.uid || '') !== String(second.uid || '')) {
+      changedUidCount += 1;
+      if (sample.length < 5) {
+        sample.push({
+          summary: first.summary || '(untitled event)',
+          startAt: first.startAt,
+          endAt: first.endAt,
+          first_uid: first.uid || null,
+          second_uid: second.uid || null,
+        });
+      }
+    }
+  }
+
+  report.matched_count = sameSignatureCount;
+  report.changed_uid_count = changedUidCount;
+  report.sample = sample;
+
+  if (changedUidCount > 0) {
+    report.status = 'unstable';
+    report.recommendation = 'enable_fallback';
+    report.message = `${changedUidCount} matching event${changedUidCount === 1 ? '' : 's'} changed UID between fetches.`;
+    return report;
+  }
+
+  report.status = 'stable';
+  report.recommendation = 'keep_normal';
+  report.message = 'Event UIDs remained stable across both fetches.';
+  return report;
+}
+
 const GOOGLE_SYNC_JOB_CHUNK_SIZE = 10;
 const supportTablesReadyByDb = new WeakSet();
 const supportTablesInitByDb = new WeakMap();
+const legacyBootstrapReadyByDb = new WeakSet();
+const legacyBootstrapInitByDb = new WeakMap();
 
 function buildSourceTargetScopeId(sourceId, targetId, mode = 'sync') {
   return `${sourceId}|${targetId}|${mode}`;
@@ -433,6 +524,24 @@ export class D1Repository {
     await ensureColumn('target_id', 'TEXT REFERENCES output_targets(id)');
     try {
       await this.db.prepare(`ALTER TABLE sources ADD COLUMN title_rewrite_rules_json TEXT NOT NULL DEFAULT '[]'`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    try {
+      await this.db.prepare(`ALTER TABLE sources ADD COLUMN uid_fallback_enabled INTEGER NOT NULL DEFAULT 0`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    try {
+      await this.db.prepare(`ALTER TABLE sources ADD COLUMN uid_fallback_checked_at TEXT`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    try {
+      await this.db.prepare(`ALTER TABLE sources ADD COLUMN uid_fallback_report_json TEXT`).run();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!/duplicate column name|already exists/i.test(message)) throw error;
@@ -690,6 +799,8 @@ export class D1Repository {
       `SELECT
          s.id, s.name, s.display_name, s.owner_type, s.provider_type, s.source_category,
          s.url, s.icon, s.prefix,
+         s.title_rewrite_rules_json,
+         s.uid_fallback_enabled, s.uid_fallback_checked_at, s.uid_fallback_report_json,
          s.include_in_child_ics, s.include_in_family_ics, s.include_in_child_google_output,
          s.is_active, s.sort_order, s.poll_interval_minutes, s.quality_profile, s.updated_at,
          snap.fetched_at AS last_fetched_at,
@@ -826,6 +937,9 @@ export class D1Repository {
       ...source,
       title_rewrite_rules: normalizeTitleRewriteRules(source.title_rewrite_rules_json || []),
       title_rewrite_rules_text: titleRewriteRulesToText(source.title_rewrite_rules_json || []),
+      uid_fallback_enabled: Number(source.uid_fallback_enabled || 0),
+      uid_fallback_checked_at: source.uid_fallback_checked_at || null,
+      uid_fallback_report: tryParseJson(source.uid_fallback_report_json, null),
       latest_job: latestJobsBySource.get(source.id) || null,
       latest_google_sync_error: latestGoogleErrorBySource.get(source.id) || null,
       google_sync_counts: googleCountsBySource.get(source.id) || { synced: 0, deferred: 0, errors: 0 },
@@ -849,8 +963,9 @@ export class D1Repository {
       `INSERT INTO sources (
         id, name, display_name, provider_type, owner_type, source_category, url, icon, prefix, fetch_url_secret_ref,
         include_in_child_ics, include_in_family_ics, include_in_child_google_output, title_rewrite_rules_json,
+        uid_fallback_enabled, uid_fallback_checked_at, uid_fallback_report_json,
         is_active, sort_order, poll_interval_minutes, quality_profile, created_at, updated_at
-      ) VALUES (?, ?, ?, 'ics', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, 'ics', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)`
     ).bind(
       sourceId,
       name,
@@ -864,6 +979,7 @@ export class D1Repository {
       toBoolInt(input.include_in_family_ics, 1),
       toBoolInt(input.include_in_child_google_output, deriveDefaultGoogleInclusion(sourceCategory, ownerType)),
       JSON.stringify(titleRewriteRules),
+      toBoolInt(input.uid_fallback_enabled, 0),
       Number(input.sort_order || 0),
       Number(input.poll_interval_minutes || 30),
       input.quality_profile || 'standard',
@@ -898,6 +1014,7 @@ export class D1Repository {
       include_in_child_ics: toBoolInt(input.include_in_child_ics, existing.include_in_child_ics),
       include_in_family_ics: toBoolInt(input.include_in_family_ics, existing.include_in_family_ics),
       include_in_child_google_output: toBoolInt(input.include_in_child_google_output, existing.include_in_child_google_output),
+      uid_fallback_enabled: toBoolInt(input.uid_fallback_enabled, existing.uid_fallback_enabled),
       title_rewrite_rules_json: JSON.stringify(
         normalizeTitleRewriteRules(
           input.title_rewrite_rules ?? input.title_rewrite_rules_text ?? existing.title_rewrite_rules_json ?? []
@@ -912,7 +1029,7 @@ export class D1Repository {
       `UPDATE sources
        SET name = ?, display_name = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
            include_in_child_ics = ?, include_in_family_ics = ?, include_in_child_google_output = ?, title_rewrite_rules_json = ?,
-           is_active = ?, sort_order = ?, poll_interval_minutes = ?, quality_profile = ?, updated_at = ?
+           uid_fallback_enabled = ?, is_active = ?, sort_order = ?, poll_interval_minutes = ?, quality_profile = ?, updated_at = ?
        WHERE id = ?`
     ).bind(
       updated.name,
@@ -926,6 +1043,7 @@ export class D1Repository {
       updated.include_in_family_ics,
       updated.include_in_child_google_output,
       updated.title_rewrite_rules_json,
+      updated.uid_fallback_enabled,
       updated.is_active,
       updated.sort_order,
       updated.poll_interval_minutes,
@@ -1715,7 +1833,7 @@ export class D1Repository {
 
       try {
         if (writeCount > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 75));
+          await new Promise((resolve) => setTimeout(resolve, this.getGoogleWriteSpacingMs()));
         }
         if (operation.type === 'update') {
           const { row, existing, syncHash, eventPayload } = operation;
@@ -1994,6 +2112,8 @@ export class D1Repository {
   }
 
   async generateFeed({ target, calendarName, lookbackDays = 7 }) {
+    const lookbackCutoff = new Date();
+    lookbackCutoff.setUTCDate(lookbackCutoff.getUTCDate() - lookbackDays);
     const result = await this.db.prepare(
       `SELECT
         canonical_events.id AS canonical_event_id,
@@ -2023,14 +2143,12 @@ export class D1Repository {
         AND output_rules.include_state = 'included'
         AND canonical_events.source_deleted = 0
         AND event_instances.source_deleted = 0
+        AND event_instances.occurrence_end_at >= ?
       ORDER BY event_instances.occurrence_start_at ASC`
-    ).bind(target, target).all();
+    ).bind(target, target, lookbackCutoff.toISOString()).all();
 
     const rows = result.results || [];
-    const lookbackCutoff = new Date();
-    lookbackCutoff.setUTCDate(lookbackCutoff.getUTCDate() - lookbackDays);
     const events = rows
-      .filter((row) => new Date(row.occurrence_end_at) >= lookbackCutoff)
       .map((row) => ({
         uid: `${row.event_instance_id}@family-scheduling`,
         startAt: row.occurrence_start_at,
@@ -2096,8 +2214,11 @@ export class D1Repository {
     }
   }
 
+  getGoogleWriteSpacingMs() {
+    return parsePositiveInt(this.env.GOOGLE_WRITE_SPACING_MS, 75);
+  }
+
   async seedSampleData() {
-    await this.bootstrapLegacySources();
     const existing = await this.db.prepare(`SELECT COUNT(*) AS count FROM canonical_events`).first();
     if ((existing?.count || 0) > 0) return;
 
@@ -2272,6 +2393,9 @@ export class D1Repository {
       ...mapRow(source),
       title_rewrite_rules: normalizeTitleRewriteRules(source.title_rewrite_rules_json || []),
       title_rewrite_rules_text: titleRewriteRulesToText(source.title_rewrite_rules_json || []),
+      uid_fallback_enabled: Number(source.uid_fallback_enabled || 0),
+      uid_fallback_checked_at: source.uid_fallback_checked_at || null,
+      uid_fallback_report: tryParseJson(source.uid_fallback_report_json, null),
       target_links: targetLinks,
       target_keys: targetLinks.map((link) => link.target_key),
     };
@@ -2397,6 +2521,47 @@ export class D1Repository {
     await this.db.batch(statements);
     await this.reapplyActiveOverridesForSource(source.id);
     await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'sync' });
+  }
+
+  async diagnoseSourceIdentity(sourceId) {
+    const source = await this.getSourceById(sourceId);
+    if (!source) throw new Error(`Unknown source: ${sourceId}`);
+    const sourceUrl = ensureHttpsUrl(source.url);
+
+    const fetchSnapshot = async () => {
+      const response = await fetch(sourceUrl, {
+        cf: { cacheTtl: 0 },
+      });
+      const body = await response.text();
+      if (!response.ok) {
+        throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
+      }
+      return parseICS(body);
+    };
+
+    const firstEvents = await fetchSnapshot();
+    const secondEvents = await fetchSnapshot();
+    const report = buildUidStabilityReport(firstEvents, secondEvents);
+    const checkedAt = report.checked_at || nowIso();
+    const persistedReport = {
+      ...report,
+      source_id: source.id,
+      source_url: sourceUrl,
+      fallback_enabled: Number(source.uid_fallback_enabled || 0),
+    };
+
+    await this.db.prepare(
+      `UPDATE sources
+       SET uid_fallback_checked_at = ?, uid_fallback_report_json = ?, updated_at = ?
+       WHERE id = ?`
+    ).bind(checkedAt, JSON.stringify(persistedReport), checkedAt, source.id).run();
+
+    return {
+      source_id: source.id,
+      source_url: sourceUrl,
+      fallback_enabled: Number(source.uid_fallback_enabled || 0),
+      report: persistedReport,
+    };
   }
 
   async markJobStatus(jobId, status, { summary = null, error = null, attemptCount = null, lastErrorKind = null } = {}) {
@@ -2579,7 +2744,8 @@ export class D1Repository {
     return '';
   }
 
-  async ingestSource(sourceId) {
+  async ingestSource(sourceId, options = {}) {
+    const forceRefresh = options && options.forceRefresh === true;
     const source = await this.getSourceById(sourceId);
     if (!source) throw new Error(`Unknown source: ${sourceId}`);
     if (!Number(source.is_active)) {
@@ -2600,10 +2766,10 @@ export class D1Repository {
     let response;
     let body = '';
     const requestHeaders = {};
-    if (previousSnapshot?.etag) {
+    if (!forceRefresh && previousSnapshot?.etag) {
       requestHeaders['If-None-Match'] = previousSnapshot.etag;
     }
-    if (previousSnapshot?.last_modified) {
+    if (!forceRefresh && previousSnapshot?.last_modified) {
       requestHeaders['If-Modified-Since'] = previousSnapshot.last_modified;
     }
     try {
@@ -2651,7 +2817,7 @@ export class D1Repository {
     let storedBlobRef = null;
     const payloadHash = body ? hashValue(body) : (previousSnapshot?.payload_hash || null);
 
-    if (response.status === 304) {
+    if (!forceRefresh && response.status === 304) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -2681,7 +2847,7 @@ export class D1Repository {
       };
     }
 
-    if (response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
+    if (!forceRefresh && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -2750,7 +2916,9 @@ export class D1Repository {
     }
 
     const events = parseICS(body).sort(compareEventsForIngest);
-    for (const event of events) {
+    const useUidFallback = Number(source.uid_fallback_enabled || 0) === 1;
+
+    for (const [eventIndex, event] of events.entries()) {
       totalEvents += 1;
       if (event.rrule == null && !isIsoOnOrAfter(event.endAt, pastCutoffIso)) {
         continue;
@@ -2760,9 +2928,19 @@ export class D1Repository {
       const rawTitle = String(event.summary || '(untitled event)');
       const rewrittenTitle = applyTitleRewriteRules(rawTitle, titleRewriteRules);
       const fallbackKey = `${sourceId}:${rawTitle}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
-      const identityKey = hashValue(event.uid ? (event.recurrenceId ? canonicalProviderKey : providerKey) : fallbackKey);
+      const identitySeed = useUidFallback && !event.rrule && !event.recurrenceId
+        ? `${sourceId}:uid_fallback:${eventIndex}`
+        : event.uid
+        ? (event.recurrenceId ? canonicalProviderKey : providerKey)
+        : fallbackKey;
+      const identityKey = hashValue(identitySeed);
       const canonicalEventId = stableId('evt', identityKey);
-      const sourceEventId = stableId('sev', providerKey || fallbackKey);
+      const sourceEventId = stableId(
+        'sev',
+        useUidFallback && !event.rrule && !event.recurrenceId
+          ? `${sourceId}:uid_fallback:${eventIndex}`
+          : providerKey || fallbackKey
+      );
       const instances = expandRecurringEvent(event, {
         horizonDays,
         lookbackDays,
@@ -2987,7 +3165,22 @@ export async function createRepository(env) {
     }
     await initPromise;
   }
-  await repo.bootstrapLegacySources();
+  if (!legacyBootstrapReadyByDb.has(env.APP_DB)) {
+    let bootstrapPromise = legacyBootstrapInitByDb.get(env.APP_DB);
+    if (!bootstrapPromise) {
+      bootstrapPromise = repo.bootstrapLegacySources()
+        .then(() => {
+          legacyBootstrapReadyByDb.add(env.APP_DB);
+          legacyBootstrapInitByDb.delete(env.APP_DB);
+        })
+        .catch((error) => {
+          legacyBootstrapInitByDb.delete(env.APP_DB);
+          throw error;
+        });
+      legacyBootstrapInitByDb.set(env.APP_DB, bootstrapPromise);
+    }
+    await bootstrapPromise;
+  }
   if (String(env.SEED_SAMPLE_DATA || '').toLowerCase() === 'true') {
     await repo.seedSampleData();
   }

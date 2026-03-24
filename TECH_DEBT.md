@@ -1,30 +1,16 @@
 # Tech Debt
 
-## runInTransaction() — migrate callers to db.batch()
+## `runInTransaction()` migration — Fixed
 
-**File:** `src/lib/repository.js`
-**Lines:** 329, 353, 435, 924, 1214
+The original `runInTransaction()` debt item is closed. The high-write repository paths were migrated to `db.batch()`, and the old helper no longer exists in `src/`.
 
-`runInTransaction()` was written to wrap multi-statement writes in a SQL transaction.
-D1 does not support `BEGIN`/`COMMIT`, so the implementation was gutted to just call
-`work()` directly. The callers now run their statements as sequential, independent
-writes with no atomicity.
+The remaining debt is structural rather than transactional:
 
-**Risk:** If the Worker crashes or D1 times out mid-sequence, the database can be
-left in a partially-written state. The most exposed caller is `setSourceTargets`,
-which deletes all target links then re-inserts them — a crash between those two
-steps leaves a source with no output mappings.
+1. `src/lib/repository.js` is still carrying too many responsibilities and should be split by domain.
+2. Route matching in `src/index.js` is still order-dependent and should eventually move to a clearer router shape.
+3. Support-table bootstrap still uses sequential `ALTER TABLE ... ADD COLUMN` probes on cold start.
 
-**Correct fix:** Replace each `runInTransaction(async () => { ... })` body with a
-`db.batch([stmt1, stmt2, ...])` call. All prepared statements must be built without
-`.run()` and passed as an array. Statements that depend on the result of a prior
-statement within the same sequence cannot be batched — those need to be restructured
-(e.g. using RETURNING to get inserted IDs).
-
-See `C:\Dev\Agents\antipatterns\d1-sql-transactions.md` for the full pattern.
-
-**Priority:** Low — the failure window is narrow and the path is admin-only with
-low concurrency. Address before any high-volume or user-facing write paths are added.
+See `docs/todo.md` and `docs/decisions.md` for current active follow-up work.
 
 ## deleteSource() — non-atomic cascade — Fixed ✓ 2026-03-06
 

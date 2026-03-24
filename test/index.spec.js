@@ -97,6 +97,7 @@ class FakeDb {
     this.syncJobs = [];
     this.googleEventLinkGoogleEventIdNotNull = 0;
     this.googleEventLinksV2 = null;
+    this.sourceCountQueryRuns = 0;
   }
 
   prepare(sql) {
@@ -125,6 +126,18 @@ class FakeDb {
     }
 
     if (sql.includes('ALTER TABLE sources ADD COLUMN title_rewrite_rules_json')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE sources ADD COLUMN uid_fallback_enabled')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE sources ADD COLUMN uid_fallback_checked_at')) {
+      return;
+    }
+
+    if (sql.includes('ALTER TABLE sources ADD COLUMN uid_fallback_report_json')) {
       return;
     }
 
@@ -231,6 +244,7 @@ class FakeDb {
     }
 
     if (sql.includes('INSERT INTO sources')) {
+      const hasUidFallbackColumns = sql.includes('uid_fallback_enabled');
       const [
         id,
         name,
@@ -244,12 +258,25 @@ class FakeDb {
         includeInFamilyIcs,
         includeInChildGoogleOutput,
         titleRewriteRulesJson,
-        sortOrder,
-        pollIntervalMinutes,
-        qualityProfile,
-        createdAt,
-        updatedAt,
+        uidFallbackEnabledOrSortOrder,
+        uidFallbackCheckedAtOrPollIntervalMinutes,
+        uidFallbackReportJsonOrQualityProfile,
+        maybeIsActive,
+        maybeSortOrder,
+        maybePollIntervalMinutes,
+        maybeQualityProfile,
+        maybeCreatedAt,
+        maybeUpdatedAt,
       ] = values;
+      const uidFallbackEnabled = hasUidFallbackColumns ? uidFallbackEnabledOrSortOrder : 0;
+      const uidFallbackCheckedAt = hasUidFallbackColumns ? uidFallbackCheckedAtOrPollIntervalMinutes : null;
+      const uidFallbackReportJson = hasUidFallbackColumns ? uidFallbackReportJsonOrQualityProfile : null;
+      const isActive = hasUidFallbackColumns ? maybeIsActive : 1;
+      const sortOrder = hasUidFallbackColumns ? maybeSortOrder : uidFallbackEnabledOrSortOrder;
+      const pollIntervalMinutes = hasUidFallbackColumns ? maybePollIntervalMinutes : uidFallbackCheckedAtOrPollIntervalMinutes;
+      const qualityProfile = hasUidFallbackColumns ? maybeQualityProfile : uidFallbackReportJsonOrQualityProfile;
+      const createdAt = hasUidFallbackColumns ? maybeCreatedAt : maybeCreatedAt;
+      const updatedAt = hasUidFallbackColumns ? maybeUpdatedAt : maybeUpdatedAt;
       this.sources.push({
         id,
         name,
@@ -265,7 +292,10 @@ class FakeDb {
         include_in_family_ics: includeInFamilyIcs,
         include_in_child_google_output: includeInChildGoogleOutput,
         title_rewrite_rules_json: titleRewriteRulesJson,
-        is_active: 1,
+        uid_fallback_enabled: uidFallbackEnabled,
+        uid_fallback_checked_at: uidFallbackCheckedAt,
+        uid_fallback_report_json: uidFallbackReportJson,
+        is_active: isActive,
         sort_order: sortOrder,
         poll_interval_minutes: pollIntervalMinutes,
         quality_profile: qualityProfile,
@@ -927,8 +957,26 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE sources') && sql.includes('uid_fallback_checked_at')) {
+      const [checkedAt, reportJson, updatedAt, sourceId] = values;
+      const source = this.sources.find((row) => row.id === sourceId);
+      if (source) {
+        source.uid_fallback_checked_at = checkedAt;
+        source.uid_fallback_report_json = reportJson;
+        source.updated_at = updatedAt;
+      }
+      return;
+    }
+
     if (sql.includes('UPDATE sources') && sql.includes('display_name')) {
-      const [name, displayName, ownerType, sourceCategory, url, icon, prefix, includeInChildIcs, includeInFamilyIcs, includeInChildGoogleOutput, titleRewriteRulesJson, isActive, sortOrder, pollIntervalMinutes, qualityProfile, updatedAt, sourceId] = values;
+      const hasUidFallbackColumns = sql.includes('uid_fallback_enabled');
+      const [name, displayName, ownerType, sourceCategory, url, icon, prefix, includeInChildIcs, includeInFamilyIcs, includeInChildGoogleOutput, titleRewriteRulesJson, uidFallbackEnabledOrIsActive, maybeIsActive, maybeSortOrder, maybePollIntervalMinutes, maybeQualityProfile, maybeUpdatedAt, sourceId] = values;
+      const uidFallbackEnabled = hasUidFallbackColumns ? uidFallbackEnabledOrIsActive : 0;
+      const isActive = hasUidFallbackColumns ? maybeIsActive : uidFallbackEnabledOrIsActive;
+      const sortOrder = hasUidFallbackColumns ? maybeSortOrder : maybeIsActive;
+      const pollIntervalMinutes = hasUidFallbackColumns ? maybePollIntervalMinutes : maybeSortOrder;
+      const qualityProfile = hasUidFallbackColumns ? maybeQualityProfile : maybePollIntervalMinutes;
+      const updatedAt = hasUidFallbackColumns ? maybeUpdatedAt : maybeQualityProfile;
       const source = this.sources.find((row) => row.id === sourceId);
       if (source) {
         Object.assign(source, {
@@ -943,6 +991,7 @@ class FakeDb {
           include_in_family_ics: includeInFamilyIcs,
           include_in_child_google_output: includeInChildGoogleOutput,
           title_rewrite_rules_json: titleRewriteRulesJson,
+          uid_fallback_enabled: uidFallbackEnabled,
           is_active: isActive,
           sort_order: sortOrder,
           poll_interval_minutes: pollIntervalMinutes,
@@ -985,7 +1034,22 @@ class FakeDb {
         })
         .sort((a, b) => String(a.owner_type).localeCompare(String(b.owner_type)) || Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
     }
-    if (sql.includes('FROM sources') && sql.includes('ORDER BY') && sql.includes('owner_type')) return this.sources;
+    if (sql.includes('FROM sources') && sql.includes('ORDER BY') && sql.includes('owner_type')) {
+      const hasUidFallbackColumns = sql.includes('uid_fallback_enabled');
+      const hasTitleRulesColumn = sql.includes('title_rewrite_rules_json');
+      return this.sources.map((source) => {
+        const clone = { ...source };
+        if (!hasUidFallbackColumns) {
+          delete clone.uid_fallback_enabled;
+          delete clone.uid_fallback_checked_at;
+          delete clone.uid_fallback_report_json;
+        }
+        if (!hasTitleRulesColumn) {
+          delete clone.title_rewrite_rules_json;
+        }
+        return clone;
+      });
+    }
     if (sql.includes('FROM source_target_links') && sql.includes('WHERE source_id = ?')) {
       return this.sourceTargetLinks
         .filter((row) => row.source_id === values[0] && row.is_enabled === 1)
@@ -1346,11 +1410,14 @@ class FakeDb {
           });
       }
       const target = values[0];
+      const lookbackCutoff = values[2] || null;
       return this.outputRules
         .filter((row) => {
           const outputTarget = this.outputTargets.find((entry) => entry.id === row.target_id);
           const slug = outputTarget?.slug || row.target_key;
-          return slug === target && row.include_state === 'included';
+          if (!(slug === target && row.include_state === 'included')) return false;
+          const instance = this.eventInstances.find((candidate) => candidate.id === row.event_instance_id);
+          return !lookbackCutoff || String(instance?.occurrence_end_at || '') >= String(lookbackCutoff);
         })
         .map((rule) => {
           const event = this.canonicalEvents.find((row) => row.id === rule.canonical_event_id);
@@ -1381,6 +1448,7 @@ class FakeDb {
       return { count: this.canonicalEvents.length };
     }
     if (sql.includes('SELECT COUNT(*) AS count FROM sources')) {
+      this.sourceCountQueryRuns += 1;
       return { count: this.sources.length };
     }
     if (sql.includes('SELECT canonical_events.id, canonical_events.source_id')) {
@@ -2161,6 +2229,37 @@ describe('family-scheduling worker', () => {
     expect(response.status).toBe(401);
   });
 
+  it('returns a generic 500 message to non-admin callers', async () => {
+    const originalDb = env.APP_DB;
+    env.APP_DB = null;
+    const request = new Request('http://example.com/family.isc?token=test-token');
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    env.APP_DB = originalDb;
+
+    expect(response.status).toBe(500);
+    expect(body.error).toBe('Internal error');
+    expect(body.message).toBe('An internal error occurred.');
+  });
+
+  it('returns detailed 500 messages to authenticated admins', async () => {
+    const originalDb = env.APP_DB;
+    env.APP_DB = null;
+    const request = new Request('http://example.com/api/sources', {
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+    env.APP_DB = originalDb;
+
+    expect(response.status).toBe(500);
+    expect(body.message).toContain('APP_DB binding is required');
+  });
+
   it('serves legacy compatible family feed', async () => {
     const request = new Request('http://example.com/family.isc?token=test-token');
     const ctx = createExecutionContext();
@@ -2174,6 +2273,17 @@ describe('family-scheduling worker', () => {
     expect(body).toContain('SUMMARY:N: 🏀 Basketball Game');
   });
 
+  it('bootstraps legacy sources only once per db instance', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+
+    await createRepository(env);
+    await createRepository(env);
+
+    expect(db.sourceCountQueryRuns).toBe(1);
+  });
+
   it('serves admin shell on /admin', async () => {
     const request = new Request('http://example.com/admin', { headers: { 'x-user-role': 'admin' } });
     const ctx = createExecutionContext();
@@ -2185,6 +2295,84 @@ describe('family-scheduling worker', () => {
     expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
     expect(body).toContain('Admin Console');
     expect(env.ASSETS.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes uid fallback fields in source list responses', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_uid_list',
+      name: 'grayson-uid-list',
+      display_name: 'Grayson UID List',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-uid-list.ics',
+      icon: '🥍',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      uid_fallback_enabled: 1,
+      uid_fallback_checked_at: '2026-03-22T00:00:00.000Z',
+      uid_fallback_report_json: JSON.stringify({
+        status: 'unstable',
+        recommendation: 'enable_fallback',
+        message: 'UIDs changed for matching events',
+      }),
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const repo = new D1Repository(db, env);
+    const [source] = await repo.listSources();
+
+    expect(source.uid_fallback_enabled).toBe(1);
+    expect(source.uid_fallback_checked_at).toBe('2026-03-22T00:00:00.000Z');
+    expect(source.uid_fallback_report?.status).toBe('unstable');
+  });
+
+  it('includes title rewrite rules text in source list responses', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_title_rules_list',
+      name: 'grayson-title-rules-list',
+      display_name: 'Grayson Title Rules List',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-title-rules-list.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      title_rewrite_rules_json: JSON.stringify([{ pattern: 'u11a', flags: 'gi', replacement: 'Tigers' }]),
+      uid_fallback_enabled: 0,
+      uid_fallback_checked_at: null,
+      uid_fallback_report_json: null,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const repo = new D1Repository(db, env);
+    const [source] = await repo.listSources();
+
+    expect(source.title_rewrite_rules_text).toContain('/u11a/gi');
+    expect(source.title_rewrite_rules_text).toContain('=> Tigers');
   });
 
   it('serves the focused event admin shell on /admin/events', async () => {
@@ -2567,6 +2755,42 @@ describe('family-scheduling worker', () => {
     });
 
     expect(db.canonicalEvents[0].title).toBe('U11A Practice');
+  });
+
+  it('preserves source title rewrite rules when an update omits them', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_title_rules_preserve',
+      name: 'grayson-tigers-preserve',
+      display_name: 'Grayson Tigers Preserve',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/tigers-preserve.ics',
+      icon: '',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: JSON.stringify([{ pattern: 'u11a', flags: 'gi', replacement: 'Tigers' }]),
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const repo = new D1Repository(db, env);
+    await repo.updateSource('src_title_rules_preserve', {
+      display_name: 'Grayson Tigers Preserve Updated',
+    });
+
+    expect(db.sources[0].title_rewrite_rules_json).toContain('"pattern":"u11a"');
+    expect(db.sources[0].title_rewrite_rules_json).toContain('"replacement":"Tigers"');
   });
 
   it('rejects unsafe title rewrite rules', async () => {
@@ -3028,6 +3252,74 @@ describe('family-scheduling worker', () => {
     expect(env.JOBS_QUEUE.sent).toHaveLength(0);
   });
 
+  it('force refresh reprocesses unchanged payloads so rebuilds can apply restored title rules', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_force_rebuild_rules',
+      name: 'grayson-bw',
+      display_name: 'Grayson BW',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-bw.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: '[]',
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:grayson-bw-1',
+      'SUMMARY:WCHC 2016 REDS vs Semi-final',
+      'DTSTART:20990405T181000Z',
+      'DTEND:20990405T191000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(ics, {
+          status: 200,
+          headers: { etag: '"bw-etag"', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' },
+        })
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    const first = await repo.ingestSource('src_force_rebuild_rules');
+    expect(first.fetchState).toBe('changed');
+    expect(db.canonicalEvents).toHaveLength(1);
+    expect(db.canonicalEvents[0].title).toBe('WCHC 2016 REDS vs Semi-final');
+
+    db.sources[0].title_rewrite_rules_json = JSON.stringify([
+      { pattern: 'WCHC 2016 REDS', flags: 'g', replacement: 'BW' },
+    ]);
+
+    const second = await repo.ingestSource('src_force_rebuild_rules');
+    expect(second.fetchState).toBe('unchanged_payload');
+    expect(db.canonicalEvents[0].title).toBe('WCHC 2016 REDS vs Semi-final');
+
+    const forced = await repo.ingestSource('src_force_rebuild_rules', { forceRefresh: true });
+    expect(forced.fetchState).toBe('changed');
+    expect(forced.dataChanged).toBe(true);
+    expect(db.canonicalEvents[0].title).toBe('BW vs Semi-final');
+  });
+
   it('skips google sync when payload changes but effective source state does not', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     env.DEFAULT_LOOKBACK_DAYS = '36500';
@@ -3477,6 +3769,128 @@ describe('family-scheduling worker', () => {
     expect(db.canonicalEvents).toHaveLength(1);
     expect(db.eventInstances).toHaveLength(2);
     expect(db.eventInstances.some((instance) => instance.recurrence_instance_key === '2026-06-11T01:00:00.000Z' && instance.occurrence_start_at === '2026-06-11T03:00:00.000Z')).toBe(true);
+  });
+
+  it('keeps standalone events stable when the upstream UID changes between fetches', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_uid_churn_test',
+      name: 'grayson-uid-churn',
+      display_name: 'Grayson UID Churn',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://api3.rampinteractive.com/teamapp/Calendar/GetCalendar/America-Vancouver/4576902/1',
+      icon: '🥍',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      uid_fallback_enabled: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let fetchCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        fetchCount += 1;
+        const uid = fetchCount === 1 ? 'uid-first' : 'uid-second';
+        return new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            `UID:${uid}`,
+            'SUMMARY:Lacrosse Practice',
+            'DTSTART:20260322T130000Z',
+            'DTEND:20260322T150000Z',
+            'LOCATION:Bullen Park Box',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: `"etag-${fetchCount}"`, 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        );
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    const first = await repo.ingestSource('src_uid_churn_test');
+    const second = await repo.ingestSource('src_uid_churn_test');
+
+    expect(first.dataChanged).toBe(true);
+    expect(second.fetchState).toBe('changed');
+    expect(second.dataChanged).toBe(false);
+    expect(db.canonicalEvents).toHaveLength(1);
+    expect(db.sourceEvents).toHaveLength(1);
+    expect(db.eventInstances).toHaveLength(1);
+  });
+
+  it('diagnoses UID churn and stores a fallback recommendation', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_uid_diagnose_test',
+      name: 'grayson-uid-diagnose',
+      display_name: 'Grayson UID Diagnose',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-uid-diagnose.ics',
+      icon: '🥍',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      uid_fallback_enabled: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let fetchCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        fetchCount += 1;
+        const uid = fetchCount === 1 ? 'uid-first' : 'uid-second';
+        return new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            `UID:${uid}`,
+            'SUMMARY:Lacrosse Practice',
+            'DTSTART:20260322T130000Z',
+            'DTEND:20260322T150000Z',
+            'LOCATION:Bullen Park Box',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: `"etag-${fetchCount}"`, 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        );
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    const diagnostic = await repo.diagnoseSourceIdentity('src_uid_diagnose_test');
+
+    expect(diagnostic.report.status).toBe('unstable');
+    expect(diagnostic.report.recommendation).toBe('enable_fallback');
+    expect(diagnostic.report.changed_uid_count).toBe(1);
+    expect(db.sources[0].uid_fallback_report_json).toContain('"status":"unstable"');
+    expect(db.sources[0].uid_fallback_checked_at).toBeTruthy();
   });
 
   it('skips ingesting single events older than the past retention window', async () => {

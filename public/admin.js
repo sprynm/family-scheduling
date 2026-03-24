@@ -32,6 +32,8 @@ const statusEl = document.getElementById('status');
     const sourceNameInput = document.getElementById('source-name');
     const sourceUrlInput = document.getElementById('source-url');
     const sourceTitleRulesInput = document.getElementById('source-title-rules');
+    const sourceUidFallbackInput = document.getElementById('source-uid-fallback');
+    const sourceDiagnosticEl = document.getElementById('source-diagnostic');
     const sourceIcsOutputsEl = document.getElementById('source-ics-outputs');
     const sourceGoogleOutputsEl = document.getElementById('source-google-outputs');
     const noGoogleHint = document.getElementById('no-google-hint');
@@ -53,6 +55,7 @@ const statusEl = document.getElementById('status');
     const jobsBody = document.getElementById('jobs-body');
 
     const sourceRuleState = new Map();
+    let sourceTitleRulesDirty = false;
     let openDrawerInstId = null;
     let openModifiedOverrideId = null;
     let allInstances = [];
@@ -234,8 +237,80 @@ const statusEl = document.getElementById('status');
       ];
     }
 
+    function buildUidFallbackSummary(source) {
+      const report = source.uid_fallback_report || null;
+      const enabled = Number(source.uid_fallback_enabled || 0) === 1;
+      if (!report) {
+        return enabled ? 'UID fallback: enabled.' : '';
+      }
+      const mode = enabled ? 'enabled' : 'off';
+      const label = report.status === 'unstable'
+        ? 'unstable'
+        : report.status === 'stable'
+          ? 'stable'
+          : 'inconclusive';
+      const recommendation = report.recommendation === 'enable_fallback'
+        ? 'fallback recommended'
+        : report.recommendation === 'keep_normal'
+          ? 'normal matching recommended'
+          : 'review required';
+      return `UID fallback: ${mode}. Last check: ${label}. ${recommendation}. ${report.message || ''}`.trim();
+    }
+
+    function applySourceFormState({ id = '', name = '', url = '', titleRulesText = '', uidFallbackEnabled = false, uidFallbackReport = null, links = [] }, { focus = false, scroll = false } = {}) {
+      sourceNameInput.value = name;
+      sourceUrlInput.value = url;
+      sourceTitleRulesInput.value = titleRulesText;
+      sourceTitleRulesDirty = false;
+      sourceUidFallbackInput.checked = !!uidFallbackEnabled;
+      sourceDiagnosticEl.textContent = formatUidFallbackDiagnostic({ source_url: url, report: uidFallbackReport });
+      sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
+      });
+      sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
+      });
+      sourceRuleState.clear();
+      links.forEach((link) => {
+        const stateKey = link.target_id || link.target_key;
+        sourceRuleState.set(stateKey, { icon: link.icon || '', prefix: link.prefix || '' });
+      });
+      syncTargetRuleInputs();
+      if (id) {
+        sourceForm.setAttribute('data-editing-id', id);
+        document.getElementById('source-save').textContent = 'Update Source';
+      } else {
+        sourceForm.removeAttribute('data-editing-id');
+        document.getElementById('source-save').textContent = 'Add Source';
+      }
+      if (focus) sourceNameInput.focus();
+      if (scroll) sourceForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function formatUidFallbackDiagnostic(diagnostic) {
+      if (!diagnostic || !diagnostic.report) return '';
+      const report = diagnostic.report;
+      const lines = [
+        `Identity test for ${diagnostic.source_url || 'source URL'}`,
+        `Fetch 1 events: ${Number(report.first_count || 0)}`,
+        `Fetch 2 events: ${Number(report.second_count || 0)}`,
+        `Matching events: ${Number(report.matched_count || 0)}`,
+        `UID changes: ${Number(report.changed_uid_count || 0)}`,
+        `Status: ${report.status || 'unknown'}`,
+        `Recommendation: ${report.recommendation || 'unknown'}`,
+      ];
+      if (report.message) lines.push(`Finding: ${report.message}`);
+      if (Array.isArray(report.sample) && report.sample.length) {
+        lines.push('Sample mismatches:');
+        for (const sample of report.sample.slice(0, 3)) {
+          lines.push(`- ${sample.summary} @ ${sample.startAt} -> ${sample.first_uid} / ${sample.second_uid}`);
+        }
+      }
+      return lines.join('\n');
+    }
+
     function buildSourceStatus(source) {
-      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob'].includes(source.last_parse_status);
+      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob', 'not_modified', 'unchanged_payload'].includes(source.last_parse_status);
       const latestJob = source.latest_job || null;
       const latestJobError = extractJobErrorMessage(latestJob);
       const googleFailure = extractGoogleSyncFailure(source);
@@ -282,6 +357,24 @@ const statusEl = document.getElementById('status');
       }
 
       if (parseOk) {
+        if (source.last_parse_status === 'not_modified') {
+          return {
+            tone: 'ok',
+            label: 'ok',
+            detail: 'Upstream returned 304 Not Modified.',
+            metrics,
+          };
+        }
+
+        if (source.last_parse_status === 'unchanged_payload') {
+          return {
+            tone: 'ok',
+            label: 'ok',
+            detail: 'Upstream payload was unchanged.',
+            metrics,
+          };
+        }
+
         return { tone: 'ok', label: 'ok', detail: '', metrics };
       }
 
@@ -309,6 +402,7 @@ const statusEl = document.getElementById('status');
     }
 
     async function loadDashboard() {
+      const editingId = sourceForm.getAttribute('data-editing-id') || '';
       refreshBtn.disabled = true;
       rebuildBtn.disabled = true;
       if (autoRefreshTimer) {
@@ -398,7 +492,11 @@ const statusEl = document.getElementById('status');
                   : status.tone === 'warn'
                     ? 'color:#9a6700'
                     : 'color:#a00';
-            const detailStyle = status.tone === 'pending' || status.tone === 'warn' ? 'color:#9a6700' : 'color:#7a1c1c';
+            const detailStyle = status.tone === 'pending' || status.tone === 'warn'
+              ? 'color:#9a6700'
+              : status.tone === 'error'
+                ? 'color:#7a1c1c'
+                : 'color:#4b5563';
             const sourceCell = '<div>' +
               '<div style="font-weight:600">' + escapeHtml(s.display_name || s.name || '') + '</div>' +
               '<div class="hint" style="margin-top:0.15rem">' + escapeHtml(s.owner_type || '') + '</div>' +
@@ -412,14 +510,16 @@ const statusEl = document.getElementById('status');
               '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
               '<div>' + (hasGoogleTarget ? 'Deferred: ' + Number(syncCounts.deferred || 0) : 'Deferred: n/a') + '</div>' +
               '</div>';
-            const statusCell = '<div>' +
-              '<span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span>' +
-              '<div class="hint" style="max-width:28rem; white-space:normal; color:#4b5563; margin-top:0.15rem">' +
-                '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
-                '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+            const fallbackSummary = buildUidFallbackSummary(s);
+            const statusBody = '<div class="hint status-stack-body">' +
+              '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
+              '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+              (fallbackSummary ? '<div>' + escapeHtml(fallbackSummary) + '</div>' : '') +
               '</div>' +
-              (status.detail ? '<div class="hint" style="max-width:28rem; white-space:normal; ' + detailStyle + '; margin-top:0.15rem" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '') +
-              '</div>';
+              (status.detail ? '<div class="hint status-stack-detail" style="' + detailStyle + '" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '');
+            const statusCell = status.tone === 'ok'
+              ? '<details class="status-stack status-stack-ok"><summary><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><span class="hint">details</span></summary><div class="status-stack-panel">' + statusBody + '</div></details>'
+              : '<div class="status-stack"><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><div class="status-stack-panel">' + statusBody + '</div></div>';
             return '<tr>' +
             '<td>' + sourceCell + '</td>' +
             '<td>' + eventsCell + '</td>' +
@@ -427,7 +527,7 @@ const statusEl = document.getElementById('status');
             '<td>' + statusCell + '</td>' +
             '<td><div class="actions">' +
             '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
-            '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
+            '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-uid-fallback="' + (Number(s.uid_fallback_enabled || 0) ? '1' : '0') + '" data-source-uid-fallback-report="' + encodeURIComponent(JSON.stringify(s.uid_fallback_report || null)) + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
             '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
             '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
             '</div></td></tr>';
@@ -458,27 +558,17 @@ const statusEl = document.getElementById('status');
             const name = btn.getAttribute('data-source-name') || '';
             const url = btn.getAttribute('data-source-url') || '';
             const titleRulesText = decodeURIComponent(btn.getAttribute('data-source-title-rules') || '');
+            const uidFallbackEnabled = btn.getAttribute('data-source-uid-fallback') === '1';
+            let uidFallbackReport = null;
+            try {
+              uidFallbackReport = JSON.parse(decodeURIComponent(btn.getAttribute('data-source-uid-fallback-report') || 'null'));
+            } catch {}
             let links = [];
             try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
-            sourceNameInput.value = name;
-            sourceUrlInput.value = url;
-            sourceTitleRulesInput.value = titleRulesText;
-            sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
-            });
-            sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-              cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
-            });
-            sourceRuleState.clear();
-            links.forEach((link) => {
-              const stateKey = link.target_id || link.target_key;
-              sourceRuleState.set(stateKey, { icon: link.icon || '', prefix: link.prefix || '' });
-            });
-            syncTargetRuleInputs();
-            sourceForm.setAttribute('data-editing-id', id);
-            document.getElementById('source-save').textContent = 'Update Source';
-            sourceNameInput.focus();
-            sourceForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            applySourceFormState(
+              { id, name, url, titleRulesText, uidFallbackEnabled, uidFallbackReport, links },
+              { focus: true, scroll: true }
+            );
           });
         });
 
@@ -580,6 +670,21 @@ const statusEl = document.getElementById('status');
           ).join(''),
           3
         );
+
+        if (editingId) {
+          const source = sources.find((s) => s.id === editingId);
+          if (source) {
+            applySourceFormState({
+              id: source.id,
+              name: source.display_name || source.name || '',
+              url: source.url || '',
+              titleRulesText: source.title_rewrite_rules_text || '',
+              uidFallbackEnabled: Number(source.uid_fallback_enabled || 0) === 1,
+              uidFallbackReport: source.uid_fallback_report || null,
+              links: Array.isArray(source.target_links) ? source.target_links : [],
+            });
+          }
+        }
 
         if (activeJobs.length) {
           setStatus('Loaded. ' + activeJobs.length + ' job' + (activeJobs.length === 1 ? '' : 's') + ' still running.', false);
@@ -826,11 +931,17 @@ const statusEl = document.getElementById('status');
     // --- Source form ---
     sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
     sourceGoogleOutputsEl.addEventListener('change', syncTargetRuleInputs);
+    sourceTitleRulesInput.addEventListener('input', () => {
+      sourceTitleRulesDirty = true;
+    });
 
     function resetSourceForm() {
       sourceNameInput.value = '';
       sourceUrlInput.value = '';
       sourceTitleRulesInput.value = '';
+      sourceTitleRulesDirty = false;
+      sourceUidFallbackInput.checked = false;
+      sourceDiagnosticEl.textContent = '';
       sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
       sourceGoogleOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => { cb.checked = false; });
       sourceRuleState.clear();
@@ -876,26 +987,56 @@ const statusEl = document.getElementById('status');
           include_in_family_ics: selectedIcsSlugs.includes('family'),
           include_in_child_google_output: selectedGoogle.length > 0,
           title_rewrite_rules_text: sourceTitleRulesInput.value,
+          uid_fallback_enabled: sourceUidFallbackInput.checked,
           target_links: targetLinks,
         };
+        if (editingId && !sourceTitleRulesDirty) {
+          delete body.title_rewrite_rules_text;
+        }
 
+        let savedSource = null;
         if (editingId) {
-          await fetchJson('/api/sources/' + encodeURIComponent(editingId), {
+          const response = await fetchJson('/api/sources/' + encodeURIComponent(editingId), {
             method: 'PATCH',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
           });
+          savedSource = response.source || null;
           setStatus('Source updated.', false);
         } else {
-          await fetchJson('/api/sources', {
+          const response = await fetchJson('/api/sources', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
           });
+          savedSource = response.source || null;
           setStatus('Source saved. Queue a rebuild to ingest it now.', false);
         }
 
-        resetSourceForm();
+        if (savedSource && savedSource.id) {
+          sourceForm.setAttribute('data-editing-id', savedSource.id);
+          setStatus('Source saved. Running UID stability test...', false);
+          try {
+            const diagnosticPayload = await fetchJson('/api/sources/' + encodeURIComponent(savedSource.id) + '/diagnose', {
+              method: 'POST',
+            });
+            const diagnosticText = formatUidFallbackDiagnostic(diagnosticPayload.diagnostic);
+            sourceDiagnosticEl.textContent = diagnosticText;
+            if (Number(savedSource.uid_fallback_enabled || 0) === 1) {
+              setStatus('Source saved. UID fallback is enabled and the diagnostics report is now visible below.', false);
+            } else if (diagnosticPayload.diagnostic?.report?.status === 'unstable') {
+              setStatus('Source saved. UID churn detected. Review the report below and enable UID fallback if you want stable matching.', true);
+            } else if (diagnosticPayload.diagnostic?.report?.status === 'stable') {
+              setStatus('Source saved. UID stability test passed.', false);
+            } else {
+              setStatus('Source saved. UID stability test completed with an inconclusive result.', false);
+            }
+          } catch (diagnosticErr) {
+            setStatus('Source saved, but UID stability test failed: ' + (diagnosticErr.message || String(diagnosticErr)), true);
+          }
+          await loadDashboard();
+          return;
+        }
         await loadDashboard();
       } catch (err) {
         setStatus('Save failed: ' + (err.message || String(err)), true);
