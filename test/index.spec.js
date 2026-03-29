@@ -720,6 +720,36 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = CASE id')) {
+      const chunkSize = (values.length - 3) / 5;
+      const titleValues = values.slice(0, chunkSize * 2);
+      const rawTitleValues = values.slice(chunkSize * 2, chunkSize * 4);
+      const icon = values[chunkSize * 4];
+      const prefix = values[chunkSize * 4 + 1];
+      const updatedAt = values[chunkSize * 4 + 2];
+      const eventIds = values.slice(chunkSize * 4 + 3);
+
+      const titleById = new Map();
+      const rawTitleById = new Map();
+      for (let i = 0; i < titleValues.length; i += 2) {
+        titleById.set(titleValues[i], titleValues[i + 1]);
+      }
+      for (let i = 0; i < rawTitleValues.length; i += 2) {
+        rawTitleById.set(rawTitleValues[i], rawTitleValues[i + 1]);
+      }
+
+      this.canonicalEvents
+        .filter((event) => eventIds.includes(event.id))
+        .forEach((event) => {
+          event.title = titleById.get(event.id) ?? event.title;
+          event.source_title_raw = rawTitleById.get(event.id) ?? event.source_title_raw;
+          event.source_icon = icon;
+          event.source_prefix = prefix;
+          event.updated_at = updatedAt;
+        });
+      return;
+    }
+
     if (sql.includes('UPDATE canonical_events SET source_deleted =')) {
       const [updatedAt, sourceId] = values;
       const sourceDeleted = sql.includes('SET source_deleted = 1') ? 1 : 0;
@@ -1539,6 +1569,11 @@ beforeEach(() => {
       }
       if (url.pathname === '/admin-events.html') {
         return new Response('<!doctype html><html><head><meta name="robots" content="noindex, nofollow"></head><body><h1>Modify Events</h1></body></html>', {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.pathname === '/admin-feeds.html') {
+        return new Response('<!doctype html><html><head><meta name="robots" content="noindex, nofollow"></head><body><h1>ICS Feed Debugger</h1></body></html>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
@@ -2387,6 +2422,143 @@ describe('family-scheduling worker', () => {
     expect(body).toContain('Modify Events');
   });
 
+  it('serves the ics debug admin shell on /admin/feeds', async () => {
+    const request = new Request('http://example.com/admin/feeds', { headers: { 'x-user-role': 'admin' } });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    expect(body).toContain('ICS Feed Debugger');
+  });
+
+  it('returns feed preview rows for authenticated admins', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    env.PUBLIC_HOST = 'https://feeds.example.com';
+    env.TOKEN = 'preview-token';
+    db.outputTargets.push(
+      {
+        id: 'outt_family',
+        target_type: 'ics',
+        slug: 'family',
+        display_name: 'Family Combined Feed',
+        calendar_id: null,
+        ownership_mode: 'system',
+        is_system: 1,
+        is_active: 1,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+    db.sources.push({
+      id: 'src_preview',
+      name: 'grayson-hockey',
+      display_name: 'Grayson Hockey',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-preview.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_preview',
+      source_id: 'src_preview',
+      target_id: 'outt_family',
+      target_key: 'family',
+      target_type: 'ics',
+      icon: '🏒',
+      prefix: 'G:',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push({
+      id: 'ce_preview',
+      source_id: 'src_preview',
+      identity_key: 'preview-key',
+      event_kind: 'single',
+      title: 'Practice',
+      source_title_raw: 'Practice',
+      source_icon: '🏒',
+      source_prefix: 'G:',
+      description: 'Bring both jerseys',
+      location: 'North Rink',
+      start_at: '2099-03-10T01:00:00.000Z',
+      end_at: '2099-03-10T02:30:00.000Z',
+      timezone: 'UTC',
+      status: 'confirmed',
+      rrule: null,
+      series_until: null,
+      source_deleted: 0,
+      needs_review: 0,
+      source_changed_since_overlay: 0,
+      last_source_change_at: '2099-03-10T00:00:00.000Z',
+      created_at: '2099-03-10T00:00:00.000Z',
+      updated_at: '2099-03-10T00:00:00.000Z',
+    });
+    db.eventInstances.push({
+      id: 'ei_preview',
+      canonical_event_id: 'ce_preview',
+      occurrence_start_at: '2099-03-10T01:00:00.000Z',
+      occurrence_end_at: '2099-03-10T02:30:00.000Z',
+      recurrence_instance_key: '2099-03-10T01:00:00.000Z',
+      provider_recurrence_id: null,
+      status: 'confirmed',
+      source_deleted: 0,
+      needs_review: 0,
+      created_at: '2099-03-10T00:00:00.000Z',
+      updated_at: '2099-03-10T00:00:00.000Z',
+    });
+    db.outputRules.push({
+      id: 'or_preview',
+      canonical_event_id: 'ce_preview',
+      event_instance_id: 'ei_preview',
+      target_id: 'outt_family',
+      target_key: 'family',
+      include_state: 'included',
+      derived_reason: 'seed',
+      created_at: '2099-03-10T00:00:00.000Z',
+      updated_at: '2099-03-10T00:00:00.000Z',
+    });
+
+    const request = new Request('http://example.com/api/feed-preview?target=family&lookback=14', {
+      headers: { 'x-user-role': 'admin' },
+    });
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.feedUrl).toBe('https://feeds.example.com/family.ics?token=preview-token');
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0]).toMatchObject({
+      canonicalEventId: 'ce_preview',
+      eventInstanceId: 'ei_preview',
+      uid: 'ei_preview@family-scheduling',
+      summary: 'G: 🏒 Practice',
+      description: 'Bring both jerseys',
+      location: 'North Rink',
+      status: 'confirmed',
+    });
+  });
+
   it('redirects the root path to /admin', async () => {
     const request = new Request('http://example.com/');
     const ctx = createExecutionContext();
@@ -2826,6 +2998,87 @@ describe('family-scheduling worker', () => {
     await expect(repo.updateSource('src_unsafe_rules', {
       title_rewrite_rules_text: '/(a+)+$/ => Tigers',
     })).rejects.toThrow(/unsafe regex/i);
+  });
+
+  it('chunks source config title backfills so large source updates do not exceed D1 bind limits', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+
+    class LimitedBindDb extends FakeDb {
+      run(sql, values) {
+        if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = CASE id') && values.length > 120) {
+          throw new Error('D1_ERROR: too many SQL variables at offset 818: SQLITE_ERROR');
+        }
+        return super.run(sql, values);
+      }
+    }
+
+    const db = new LimitedBindDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_large_update',
+      name: 'large-update',
+      display_name: 'Large Update',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/large.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: '[]',
+      uid_fallback_enabled: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    for (let i = 0; i < 30; i += 1) {
+      db.canonicalEvents.push({
+        id: `evt_large_${i}`,
+        source_id: 'src_large_update',
+        source_event_id: `sev_large_${i}`,
+        title: `Team U11A ${i}`,
+        source_title_raw: `Team U11A ${i}`,
+        details_json: '{}',
+        timezone: 'America/Vancouver',
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2026-03-03T00:00:00.000Z',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
+      db.eventInstances.push({
+        id: `inst_large_${i}`,
+        canonical_event_id: `evt_large_${i}`,
+        occurrence_start_at: '2026-03-10T17:00:00.000Z',
+        occurrence_end_at: '2026-03-10T18:00:00.000Z',
+        recurrence_instance_key: `2026-03-10T17:00:00.000Z#${i}`,
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
+    }
+
+    const repo = new D1Repository(db, env);
+    await repo.updateSource('src_large_update', {
+      display_name: 'Large Update Renamed',
+      title_rewrite_rules_text: 'U11A => Tigers',
+    });
+
+    expect(db.sources[0].display_name).toBe('Large Update Renamed');
+    expect(db.canonicalEvents[0].title).toBe('Team Tigers 0');
+    expect(db.outputRules).toHaveLength(30);
   });
 
   it('creates and updates sources through the admin API with per-target rules', async () => {
@@ -3427,138 +3680,144 @@ describe('family-scheduling worker', () => {
   });
 
   it('prunes old sync job history while keeping current queued and running jobs', async () => {
-    env.SEED_SAMPLE_DATA = 'false';
-    env.PRUNE_AFTER_DAYS = '30';
-    env.JOB_HISTORY_RETAIN_DAYS_COMPLETED = '7';
-    env.JOB_HISTORY_RETAIN_DAYS_FAILED = '30';
-    const db = new FakeDb();
-    env.APP_DB = db;
-    db.sourceSnapshots.push(
-      {
-        id: 'snap_old',
-        source_id: 'src_prune',
-        fetched_at: '2026-01-15T00:00:00.000Z',
-        http_status: 200,
-        etag: null,
-        last_modified: null,
-        payload_blob_ref: 'snapshots/src_prune/snap_old.ics',
-        payload_hash: 'hash-old',
-        parse_status: 'parsed',
-        parse_error_summary: null,
-      },
-      {
-        id: 'snap_recent',
-        source_id: 'src_prune',
-        fetched_at: '2026-03-18T00:00:00.000Z',
-        http_status: 200,
-        etag: null,
-        last_modified: null,
-        payload_blob_ref: null,
-        payload_hash: 'hash-recent',
-        parse_status: 'parsed',
-        parse_error_summary: null,
-      }
-    );
-    db.syncJobs.push(
-      {
-        id: 'job_completed_old',
-        job_type: 'sync_google_target',
-        scope_type: 'source_target',
-        scope_id: 'scope_old_completed',
-        status: 'completed',
-        started_at: '2026-03-01T00:00:00.000Z',
-        finished_at: '2026-03-01T00:05:00.000Z',
-        summary_json: null,
-        error_json: null,
-        attempt_count: 0,
-        last_error_kind: null,
-      },
-      {
-        id: 'job_completed_recent',
-        job_type: 'sync_google_target',
-        scope_type: 'source_target',
-        scope_id: 'scope_recent_completed',
-        status: 'completed',
-        started_at: '2026-03-18T00:00:00.000Z',
-        finished_at: '2026-03-18T00:05:00.000Z',
-        summary_json: null,
-        error_json: null,
-        attempt_count: 0,
-        last_error_kind: null,
-      },
-      {
-        id: 'job_failed_old',
-        job_type: 'ingest_source',
-        scope_type: 'source',
-        scope_id: 'scope_old_failed',
-        status: 'failed',
-        started_at: '2026-02-01T00:00:00.000Z',
-        finished_at: '2026-02-01T00:01:00.000Z',
-        summary_json: null,
-        error_json: '{"message":"old failed"}',
-        attempt_count: 1,
-        last_error_kind: 'network_error',
-      },
-      {
-        id: 'job_failed_recent',
-        job_type: 'ingest_source',
-        scope_type: 'source',
-        scope_id: 'scope_recent_failed',
-        status: 'failed',
-        started_at: '2026-03-18T00:00:00.000Z',
-        finished_at: '2026-03-18T00:01:00.000Z',
-        summary_json: null,
-        error_json: '{"message":"recent failed"}',
-        attempt_count: 1,
-        last_error_kind: 'network_error',
-      },
-      {
-        id: 'job_queued_current',
-        job_type: 'ingest_source',
-        scope_type: 'source',
-        scope_id: 'scope_queued',
-        status: 'queued',
-        started_at: '2026-03-19T00:00:00.000Z',
-        finished_at: null,
-        summary_json: null,
-        error_json: null,
-        attempt_count: 0,
-        last_error_kind: null,
-      },
-      {
-        id: 'job_running_current',
-        job_type: 'sync_google_target',
-        scope_type: 'source_target',
-        scope_id: 'scope_running',
-        status: 'running',
-        started_at: '2026-03-19T00:00:00.000Z',
-        finished_at: null,
-        summary_json: null,
-        error_json: null,
-        attempt_count: 0,
-        last_error_kind: null,
-      }
-    );
-    env.SNAPSHOTS = {
-      delete: vi.fn(async () => undefined),
-    };
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-20T00:00:00.000Z'));
+    try {
+      env.SEED_SAMPLE_DATA = 'false';
+      env.PRUNE_AFTER_DAYS = '30';
+      env.JOB_HISTORY_RETAIN_DAYS_COMPLETED = '7';
+      env.JOB_HISTORY_RETAIN_DAYS_FAILED = '30';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      db.sourceSnapshots.push(
+        {
+          id: 'snap_old',
+          source_id: 'src_prune',
+          fetched_at: '2026-01-15T00:00:00.000Z',
+          http_status: 200,
+          etag: null,
+          last_modified: null,
+          payload_blob_ref: 'snapshots/src_prune/snap_old.ics',
+          payload_hash: 'hash-old',
+          parse_status: 'parsed',
+          parse_error_summary: null,
+        },
+        {
+          id: 'snap_recent',
+          source_id: 'src_prune',
+          fetched_at: '2026-03-18T00:00:00.000Z',
+          http_status: 200,
+          etag: null,
+          last_modified: null,
+          payload_blob_ref: null,
+          payload_hash: 'hash-recent',
+          parse_status: 'parsed',
+          parse_error_summary: null,
+        }
+      );
+      db.syncJobs.push(
+        {
+          id: 'job_completed_old',
+          job_type: 'sync_google_target',
+          scope_type: 'source_target',
+          scope_id: 'scope_old_completed',
+          status: 'completed',
+          started_at: '2026-03-01T00:00:00.000Z',
+          finished_at: '2026-03-01T00:05:00.000Z',
+          summary_json: null,
+          error_json: null,
+          attempt_count: 0,
+          last_error_kind: null,
+        },
+        {
+          id: 'job_completed_recent',
+          job_type: 'sync_google_target',
+          scope_type: 'source_target',
+          scope_id: 'scope_recent_completed',
+          status: 'completed',
+          started_at: '2026-03-18T00:00:00.000Z',
+          finished_at: '2026-03-18T00:05:00.000Z',
+          summary_json: null,
+          error_json: null,
+          attempt_count: 0,
+          last_error_kind: null,
+        },
+        {
+          id: 'job_failed_old',
+          job_type: 'ingest_source',
+          scope_type: 'source',
+          scope_id: 'scope_old_failed',
+          status: 'failed',
+          started_at: '2026-02-01T00:00:00.000Z',
+          finished_at: '2026-02-01T00:01:00.000Z',
+          summary_json: null,
+          error_json: '{"message":"old failed"}',
+          attempt_count: 1,
+          last_error_kind: 'network_error',
+        },
+        {
+          id: 'job_failed_recent',
+          job_type: 'ingest_source',
+          scope_type: 'source',
+          scope_id: 'scope_recent_failed',
+          status: 'failed',
+          started_at: '2026-03-18T00:00:00.000Z',
+          finished_at: '2026-03-18T00:01:00.000Z',
+          summary_json: null,
+          error_json: '{"message":"recent failed"}',
+          attempt_count: 1,
+          last_error_kind: 'network_error',
+        },
+        {
+          id: 'job_queued_current',
+          job_type: 'ingest_source',
+          scope_type: 'source',
+          scope_id: 'scope_queued',
+          status: 'queued',
+          started_at: '2026-03-19T00:00:00.000Z',
+          finished_at: null,
+          summary_json: null,
+          error_json: null,
+          attempt_count: 0,
+          last_error_kind: null,
+        },
+        {
+          id: 'job_running_current',
+          job_type: 'sync_google_target',
+          scope_type: 'source_target',
+          scope_id: 'scope_running',
+          status: 'running',
+          started_at: '2026-03-19T00:00:00.000Z',
+          finished_at: null,
+          summary_json: null,
+          error_json: null,
+          attempt_count: 0,
+          last_error_kind: null,
+        }
+      );
+      env.SNAPSHOTS = {
+        delete: vi.fn(async () => undefined),
+      };
 
-    const repo = new D1Repository(db, env);
-    const summary = await repo.pruneStaleData();
+      const repo = new D1Repository(db, env);
+      const summary = await repo.pruneStaleData();
 
-    expect(summary.snapshotRowsDeleted).toBe(1);
-    expect(summary.snapshotBlobKeysDeleted).toBe(1);
-    expect(summary.completedJobsDeleted).toBe(1);
-    expect(summary.failedJobsDeleted).toBe(1);
-    expect(summary.completedJobRetainDays).toBe(7);
-    expect(summary.failedJobRetainDays).toBe(30);
-    expect(db.sourceSnapshots.map((row) => row.id)).toEqual(['snap_recent']);
-    expect(db.syncJobs.map((row) => row.id)).toEqual([
-      'job_completed_recent',
-      'job_failed_recent',
-      'job_queued_current',
-      'job_running_current',
-    ]);
+      expect(summary.snapshotRowsDeleted).toBe(1);
+      expect(summary.snapshotBlobKeysDeleted).toBe(1);
+      expect(summary.completedJobsDeleted).toBe(1);
+      expect(summary.failedJobsDeleted).toBe(1);
+      expect(summary.completedJobRetainDays).toBe(7);
+      expect(summary.failedJobRetainDays).toBe(30);
+      expect(db.sourceSnapshots.map((row) => row.id)).toEqual(['snap_recent']);
+      expect(db.syncJobs.map((row) => row.id)).toEqual([
+        'job_completed_recent',
+        'job_failed_recent',
+        'job_queued_current',
+        'job_running_current',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('applies fallback sport icon detection when source icon is not configured', async () => {

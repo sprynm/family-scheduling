@@ -8,6 +8,17 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+const DB_BATCH_SIZE = 100;
+// `syncSourceConfig()` title backfills use 5 bind variables per event plus 3 fixed
+// values. Keep chunks small so D1 never hits SQLite variable limits on large sources.
+const SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE = 20;
+
+async function runStatementsInChunks(db, statements, chunkSize = DB_BATCH_SIZE) {
+  for (let i = 0; i < statements.length; i += chunkSize) {
+    await db.batch(statements.slice(i, i + chunkSize));
+  }
+}
+
 function makeOpaqueId(prefix, value = '') {
   const seed = `${prefix}:${value}:${Math.random()}:${Date.now()}`;
   return `${prefix}_${crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
@@ -2111,7 +2122,7 @@ export class D1Repository {
     };
   }
 
-  async generateFeed({ target, calendarName, lookbackDays = 7 }) {
+  async listFeedPreview({ target, lookbackDays = 7 }) {
     const lookbackCutoff = new Date();
     lookbackCutoff.setUTCDate(lookbackCutoff.getUTCDate() - lookbackDays);
     const result = await this.db.prepare(
@@ -2148,17 +2159,34 @@ export class D1Repository {
     ).bind(target, target, lookbackCutoff.toISOString()).all();
 
     const rows = result.results || [];
-    const events = rows
+    return rows.map((row) => ({
+      canonicalEventId: row.canonical_event_id,
+      eventInstanceId: row.event_instance_id,
+      uid: `${row.event_instance_id}@family-scheduling`,
+      startAt: row.occurrence_start_at,
+      endAt: row.occurrence_end_at,
+      summary: decorateEventSummary({
+        target,
+        title: row.title,
+        sourceIcon: row.source_icon,
+        sourcePrefix: row.source_prefix,
+      }),
+      sourceTitle: row.title,
+      description: row.description,
+      location: row.location,
+      status: row.status,
+      sourceIcon: row.source_icon,
+      sourcePrefix: row.source_prefix,
+    }));
+  }
+
+  async generateFeed({ target, calendarName, lookbackDays = 7 }) {
+    const events = (await this.listFeedPreview({ target, lookbackDays }))
       .map((row) => ({
-        uid: `${row.event_instance_id}@family-scheduling`,
-        startAt: row.occurrence_start_at,
-        endAt: row.occurrence_end_at,
-        summary: decorateEventSummary({
-          target,
-          title: row.title,
-          sourceIcon: row.source_icon,
-          sourcePrefix: row.source_prefix,
-        }),
+        uid: row.uid,
+        startAt: row.startAt,
+        endAt: row.endAt,
+        summary: row.summary,
         description: row.description,
         location: row.location,
         status: row.status,
@@ -2421,53 +2449,57 @@ export class D1Repository {
        WHERE source_id = ?`
     ).bind(source.id).all();
     const existingEvents = existingEventsResult.results || [];
-    const statements = [];
+    const headerStatements = [];
 
     if (existingEvents.length) {
-      // Keep source config edits set-based so title-rule backfills do not become N+1 updates.
-      const titleCaseParts = [];
-      const titleCaseValues = [];
-      const rawTitleCaseParts = [];
-      const rawTitleCaseValues = [];
-      const eventIds = [];
+      // Keep source config edits set-based, but split large sources into small chunks so
+      // D1 never builds one oversized CASE/IN statement.
+      for (let i = 0; i < existingEvents.length; i += SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE) {
+        const eventsChunk = existingEvents.slice(i, i + SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE);
+        const titleCaseParts = [];
+        const titleCaseValues = [];
+        const rawTitleCaseParts = [];
+        const rawTitleCaseValues = [];
+        const eventIds = [];
 
-      for (const event of existingEvents) {
-        const rawTitle = String(event.source_title_raw || event.title || '');
-        titleCaseParts.push('WHEN ? THEN ?');
-        titleCaseValues.push(event.id, applyTitleRewriteRules(rawTitle, rules));
-        rawTitleCaseParts.push('WHEN ? THEN ?');
-        rawTitleCaseValues.push(event.id, rawTitle);
-        eventIds.push(event.id);
+        for (const event of eventsChunk) {
+          const rawTitle = String(event.source_title_raw || event.title || '');
+          titleCaseParts.push('WHEN ? THEN ?');
+          titleCaseValues.push(event.id, applyTitleRewriteRules(rawTitle, rules));
+          rawTitleCaseParts.push('WHEN ? THEN ?');
+          rawTitleCaseValues.push(event.id, rawTitle);
+          eventIds.push(event.id);
+        }
+
+        headerStatements.push(
+          this.db.prepare(
+            `UPDATE canonical_events
+             SET title = CASE id ${titleCaseParts.join(' ')} ELSE title END,
+                 source_title_raw = CASE id ${rawTitleCaseParts.join(' ')} ELSE source_title_raw END,
+                 source_icon = ?,
+                 source_prefix = ?,
+                 updated_at = ?
+             WHERE id IN (${eventIds.map(() => '?').join(', ')})`
+          ).bind(
+            ...titleCaseValues,
+            ...rawTitleCaseValues,
+            source.icon || '',
+            source.prefix || '',
+            timestamp,
+            ...eventIds
+          )
+        );
       }
-
-      statements.push(
-        this.db.prepare(
-          `UPDATE canonical_events
-           SET title = CASE id ${titleCaseParts.join(' ')} ELSE title END,
-               source_title_raw = CASE id ${rawTitleCaseParts.join(' ')} ELSE source_title_raw END,
-               source_icon = ?,
-               source_prefix = ?,
-               updated_at = ?
-           WHERE id IN (${eventIds.map(() => '?').join(', ')})`
-        ).bind(
-          ...titleCaseValues,
-          ...rawTitleCaseValues,
-          source.icon || '',
-          source.prefix || '',
-          timestamp,
-          ...eventIds
-        )
-      );
     }
 
-    statements.push(
+    headerStatements.push(
       this.db.prepare(
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
       ).bind(source.id)
     );
 
     if (!Number(source.is_active)) {
-      statements.push(
+      headerStatements.push(
         this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
         this.db.prepare(
           `UPDATE event_instances
@@ -2475,12 +2507,12 @@ export class D1Repository {
            WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
         ).bind(timestamp, source.id)
       );
-      await this.db.batch(statements);
+      await runStatementsInChunks(this.db, headerStatements);
       await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'cleanup' });
       return;
     }
 
-    statements.push(
+    headerStatements.push(
       this.db.prepare(`UPDATE canonical_events SET source_deleted = 0, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
       this.db.prepare(
         `UPDATE event_instances
@@ -2488,12 +2520,14 @@ export class D1Repository {
          WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
       ).bind(timestamp, source.id)
     );
+    await runStatementsInChunks(this.db, headerStatements);
 
     const targets = await this.resolveTargetsForSource(source);
     const instances = await this.listSourceInstances(source.id);
+    const outputRuleStatements = [];
     for (const instance of instances) {
       for (const target of targets) {
-        statements.push(
+        outputRuleStatements.push(
           this.db.prepare(
             `INSERT INTO output_rules (
               id, canonical_event_id, event_instance_id, target_id, target_key, include_state, derived_reason, created_at, updated_at
@@ -2518,7 +2552,7 @@ export class D1Repository {
       }
     }
 
-    await this.db.batch(statements);
+    await runStatementsInChunks(this.db, outputRuleStatements);
     await this.reapplyActiveOverridesForSource(source.id);
     await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'sync' });
   }

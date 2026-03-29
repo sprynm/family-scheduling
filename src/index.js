@@ -121,6 +121,9 @@ function getAdminAssetPath(pathname) {
   if (pathname === '/admin/events' || pathname === '/admin/events/') {
     return '/admin-events.html';
   }
+  if (pathname === '/admin/feeds' || pathname === '/admin/feeds/') {
+    return '/admin-feeds.html';
+  }
   return '/admin.html';
 }
 
@@ -188,7 +191,14 @@ export default {
         return Response.redirect(`${url.origin}/admin`, 302);
       }
 
-      if (pathname === '/admin' || pathname === '/admin/' || pathname === '/admin/events' || pathname === '/admin/events/') {
+      if (
+        pathname === '/admin' ||
+        pathname === '/admin/' ||
+        pathname === '/admin/events' ||
+        pathname === '/admin/events/' ||
+        pathname === '/admin/feeds' ||
+        pathname === '/admin/feeds/'
+      ) {
         const authError = await requireRole(request, env, ADMIN_ROLES);
         if (authError) return authError;
         return serveAdminAsset(request, env);
@@ -215,6 +225,27 @@ export default {
         if (authError) return authError;
         const repo = await createRepository(env);
         return json(await repo.getFeedContract(request.url));
+      }
+
+      if (pathname === '/api/feed-preview' && request.method === 'GET') {
+        const authError = await requireRole(request, env, ADMIN_ROLES);
+        if (authError) return authError;
+        const target = String(url.searchParams.get('target') || '').trim().toLowerCase();
+        if (!target || !['family', 'grayson', 'naomi'].includes(target)) {
+          return json({ error: 'Bad request', message: 'target must be family, grayson, or naomi' }, { status: 400 });
+        }
+        const repo = await createRepository(env);
+        const contract = await repo.getFeedContract(request.url);
+        const calendarName = getCalendarName(env, target, url.searchParams.get('name'));
+        const lookbackDays = Number(url.searchParams.get('lookback') || env.DEFAULT_LOOKBACK_DAYS || 7);
+        const events = await repo.listFeedPreview({ target, lookbackDays });
+        return json({
+          target,
+          calendarName,
+          lookbackDays,
+          feedUrl: (contract.contracts || []).find((item) => item.target === target)?.url || null,
+          events,
+        });
       }
 
       if (pathname === '/api/sources' && request.method === 'GET') {

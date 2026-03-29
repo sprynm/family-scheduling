@@ -3,6 +3,7 @@ const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
 const ICON_OPTIONS = [
   { value: '', label: 'None' },
   { value: '🏒', label: '🏒 Hockey' },
+  { value: '🏈', label: '🏈 Football' },
   { value: '🏀', label: '🏀 Basketball' },
   { value: '🏐', label: '🏐 Volleyball' },
   { value: '⚾', label: '⚾ Baseball' },

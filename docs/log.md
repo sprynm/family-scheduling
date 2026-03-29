@@ -189,3 +189,24 @@ At closeout of a unit of work, insights should be compacted into:
 - `listSources()` is effectively a form-state contract, while the top-level fetch catch is effectively a public error boundary; both need to be reviewed as API contracts, not helper details.
 - Bootstrap paths that are cheap once can still matter when they run on every feed request.
 - The review was directionally strong: the highest-value fixes were not architectural rewrites, but small contract corrections at boundaries.
+
+## 2026-03-29
+
+### Session Notes
+
+- Added an operator-facing ICS debug surface so feed problems can be inspected without downloading raw `.ics` files or mentally reconstructing the emitted rows from database state.
+- Kept the new screen tied to the real compatibility-feed path rather than building a parallel formatter, so the debug table reflects exactly what the live feed would emit.
+
+### Work Completed
+
+- Added `/admin/feeds` as a dedicated ICS debug page with feed selection, lookback override, optional calendar-name override, live feed URL actions, and a compact emitted-row table.
+- Added protected `GET /api/feed-preview` for admin/editor roles, returning the exact event rows behind the selected built-in ICS feed along with the resolved live feed URL.
+- Refactored feed generation so repository preview rows and `.ics` rendering share the same SQL-backed source data and decoration logic.
+- Added regression coverage for the new admin asset route and feed-preview API.
+- Hardened the existing prune-history test by fixing its system time, removing date-sensitive flakiness from the suite.
+- Ran the full `vitest` suite successfully.
+
+### Discoveries
+
+- For this app, “debug” tooling is only trustworthy if it reuses the actual output query path; otherwise operator confidence drops because the screen becomes an approximation.
+- The shared admin stylesheet can support another page cleanly as long as the new surface stays dense and avoids introducing a second visual system.

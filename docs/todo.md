@@ -105,6 +105,9 @@ Completed. Override create/delete now recomputes the affected instance scope imm
 ### Tighten `/admin/events` mobile interaction
 Completed. The event page now deduplicates instance rows, toggles drawers in place instead of rerendering the full list, removes the dead outer `.catch()`, and simplifies source labels to user-facing names.
 
+### Add ICS feed debugging page
+Completed. `/admin/feeds` now provides a compact operator-facing debugger for the built-in ICS feeds, backed by a protected preview API that reuses the real feed-generation query path and exposes the exact emitted rows plus the live subscription URL.
+
 ### Reduce repository bootstrap overhead after cutover
 Completed. Repository bootstrap now uses an isolate-level success guard, legacy target backfill is set-based instead of N+1, and `listInstances` no longer uses the `&&` side-effect pattern.
 

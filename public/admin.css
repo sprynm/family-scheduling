@@ -120,7 +120,7 @@
     }
     .page-nav {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 0;
       margin: 8px 0 10px;
       padding: 0 0 10px;
@@ -171,7 +171,7 @@
     .form-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
     .field-group { display: grid; gap: 4px; }
     .field-label { font-size: 0.78rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-    input[type="text"], input[type="url"], input[type="search"], textarea, select:not(.checkbox-wrap select) {
+    input[type="text"], input[type="url"], input[type="search"], input[type="number"], textarea, select:not(.checkbox-wrap select) {
       border: 1px solid var(--line);
       background: rgba(8, 17, 31, 0.88);
       color: var(--ink);
@@ -188,6 +188,7 @@
     input[type="text"]:focus,
     input[type="url"]:focus,
     input[type="search"]:focus,
+    input[type="number"]:focus,
     textarea:focus,
     select:focus {
       outline: none;
@@ -197,6 +198,7 @@
     input[type="text"] { min-width: 160px; }
     input[type="url"] { min-width: 280px; }
     input[type="search"] { min-width: 200px; }
+    input[type="number"] { min-width: 120px; }
     select { min-width: 140px; }
     /* checkbox output picker */
     .checkbox-wrap {
@@ -343,6 +345,104 @@
     .inst-drawer .override-item-info { flex: 1; }
     .inst-drawer .override-item-meta { font-size: 0.78rem; color: var(--muted); }
     .hidden { display: none !important; }
+    .feed-debug-main {
+      max-width: 1320px;
+    }
+    .feed-debug-toolbar {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      gap: 10px;
+      align-items: end;
+      margin-top: 10px;
+    }
+    .feed-debug-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .feed-debug-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .feed-metric-text {
+      font-size: 0.94rem;
+      line-height: 1.3;
+      white-space: normal;
+    }
+    .feed-debug-contract {
+      display: grid;
+      gap: 6px;
+      margin-top: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      background: rgba(10, 18, 32, 0.9);
+      border-radius: 10px;
+    }
+    .feed-contract-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .feed-debug-contract code {
+      color: var(--ink);
+      white-space: nowrap;
+      overflow-x: auto;
+    }
+    .feed-debug-table-wrap {
+      margin-top: 14px;
+    }
+    .feed-debug-table {
+      table-layout: fixed;
+    }
+    .feed-debug-table th,
+    .feed-debug-table td {
+      vertical-align: top;
+      white-space: normal;
+      padding-top: 8px;
+      padding-bottom: 8px;
+    }
+    .feed-cell-time,
+    .feed-cell-uid {
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: #bfd0ef;
+    }
+    .feed-cell-summary {
+      min-width: 280px;
+    }
+    .feed-summary-primary {
+      color: var(--ink);
+      font-weight: 700;
+    }
+    .feed-summary-secondary {
+      margin-top: 4px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .feed-status-tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      background: rgba(47, 125, 246, 0.1);
+      color: #9cc3ff;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.68rem;
+      font-weight: 700;
+    }
+    .button-link[aria-disabled="true"] {
+      pointer-events: none;
+      opacity: 0.55;
+    }
 
     .event-main {
       max-width: 720px;
@@ -533,6 +633,16 @@
       .event-filter-grid {
         grid-template-columns: 1fr;
       }
+      .feed-debug-toolbar {
+        grid-template-columns: 1fr 1fr;
+      }
+      .feed-debug-actions,
+      .feed-debug-summary {
+        grid-column: 1 / -1;
+      }
+      .feed-debug-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     @media (max-width: 640px) {
@@ -553,6 +663,18 @@
       .toolbar button,
       .button-link,
       .page-nav-link {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .feed-debug-toolbar,
+      .feed-debug-summary {
+        grid-template-columns: 1fr;
+      }
+      .feed-debug-actions {
+        justify-content: stretch;
+      }
+      .feed-debug-actions button,
+      .feed-debug-actions .button-link {
         width: 100%;
         box-sizing: border-box;
       }

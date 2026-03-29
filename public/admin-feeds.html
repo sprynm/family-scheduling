@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Debug ICS Feeds | Family Scheduling</title>
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body class="feed-debug-page">
+  <main class="feed-debug-main">
+    <div class="card hero-card">
+      <p class="eyebrow">Family Scheduling</p>
+      <div class="page-nav">
+        <a href="/admin" class="page-nav-link">Configure</a>
+        <a href="/admin/events" class="page-nav-link">Modify Events</a>
+        <a href="/admin/feeds" class="page-nav-link active">Debug ICS</a>
+      </div>
+      <h1>ICS Feed Debugger</h1>
+      <p class="section-desc">Select a built-in feed to inspect the exact event rows the compatibility ICS endpoint would emit right now.</p>
+      <div id="feed-debug-status" class="status">Loading...</div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Feed Preview</h2>
+      </div>
+      <div class="feed-debug-toolbar">
+        <div class="field-group">
+          <span class="field-label">Feed</span>
+          <select id="feed-target">
+            <option value="family">Family</option>
+            <option value="grayson">Grayson</option>
+            <option value="naomi">Naomi</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <span class="field-label">Lookback Days</span>
+          <input id="feed-lookback" type="number" min="1" max="365" step="1" value="7">
+        </div>
+        <div class="field-group">
+          <span class="field-label">Calendar Name</span>
+          <input id="feed-name" type="text" placeholder="Uses default feed name">
+        </div>
+        <div class="feed-debug-actions">
+          <button id="feed-load" class="primary" type="button">Load Preview</button>
+          <a id="feed-open-link" class="button-link" href="#" target="_blank" rel="noreferrer">Open ICS</a>
+          <button id="feed-copy-link" type="button">Copy URL</button>
+        </div>
+      </div>
+
+      <div class="feed-debug-summary">
+        <div class="metric-card">
+          <p class="metric-label">Feed</p>
+          <p class="metric" id="feed-summary-target">-</p>
+        </div>
+        <div class="metric-card">
+          <p class="metric-label">Rows</p>
+          <p class="metric" id="feed-summary-count">-</p>
+        </div>
+        <div class="metric-card">
+          <p class="metric-label">Calendar Name</p>
+          <p class="metric feed-metric-text" id="feed-summary-name">-</p>
+        </div>
+        <div class="metric-card">
+          <p class="metric-label">Lookback</p>
+          <p class="metric feed-metric-text" id="feed-summary-lookback">-</p>
+        </div>
+      </div>
+
+      <div class="feed-debug-contract">
+        <span class="feed-contract-label">Live URL</span>
+        <code id="feed-url-text">-</code>
+      </div>
+
+      <div class="table-wrap feed-debug-table-wrap">
+        <table class="feed-debug-table">
+          <thead>
+            <tr>
+              <th>Start</th>
+              <th>End</th>
+              <th>Summary</th>
+              <th>Location</th>
+              <th>Status</th>
+              <th>UID</th>
+            </tr>
+          </thead>
+          <tbody id="feed-preview-body">
+            <tr><td colspan="6" style="color:#aaa;font-style:italic">Select a feed to inspect.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+  <script src="/admin-feeds.js" defer></script>
+</body>
+</html>
