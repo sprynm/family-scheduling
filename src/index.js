@@ -477,6 +477,7 @@ export default {
               jobType: 'sync_google_target',
               scopeType: 'source_target',
               scopeId: job.scopeId,
+              dedupe: false,
               payload: {
                 sourceId: job.sourceId,
                 targetId: job.targetId,

@@ -210,3 +210,25 @@ At closeout of a unit of work, insights should be compacted into:
 
 - For this app, “debug” tooling is only trustworthy if it reuses the actual output query path; otherwise operator confidence drops because the screen becomes an approximation.
 - The shared admin stylesheet can support another page cleanly as long as the new surface stays dense and avoids introducing a second visual system.
+
+## 2026-04-01
+
+### Session Notes
+
+- Investigated why duplicate Google events remained after rebuilding a source even though the new UID fallback logic and rewrite normalization were already deployed.
+- Confirmed the deployed code was fixing new identities correctly, but large Google cleanup runs were stopping after the first queue chunk.
+
+### Work Completed
+
+- Fixed `sync_google_target` continuation scheduling so follow-up cleanup chunks are not deduped against the currently running job.
+- Added regression coverage for multi-chunk Google cleanup after source disable, alongside the earlier UID-fallback and source-update regressions.
+- Ran the full `vitest` suite successfully.
+- Deployed the worker successfully via Wrangler.
+- Current version: `d015c2b4-0928-41a8-93c9-dc54c3b1e236`.
+- Published URL: `https://family-scheduling.lance-e35.workers.dev`.
+- Post-deploy smoke check confirmed `/` redirects to `/admin` and tokenless feed access still returns `401`.
+
+### Discoveries
+
+- The remaining duplicate Google events were not evidence that rebuild cleanup was conceptually missing; they were caused by continuation jobs being suppressed by the generic queue dedupe guard.
+- The live Ramp source still contains historical duplicate Google links, so one more rebuild is needed under the new deployment to let the full cleanup chain complete.

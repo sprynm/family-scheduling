@@ -19,6 +19,65 @@ async function runStatementsInChunks(db, statements, chunkSize = DB_BATCH_SIZE) 
   }
 }
 
+function isTooManySqlVariablesError(error) {
+  return /too many SQL variables/i.test(String(error?.message || error || ''));
+}
+
+function buildSourceConfigTitleBackfillStatements(db, source, existingEvents, rules, timestamp, chunkSize) {
+  const statements = [];
+  for (let i = 0; i < existingEvents.length; i += chunkSize) {
+    const eventsChunk = existingEvents.slice(i, i + chunkSize);
+    const titleCaseParts = [];
+    const titleCaseValues = [];
+    const rawTitleCaseParts = [];
+    const rawTitleCaseValues = [];
+    const eventIds = [];
+
+    for (const event of eventsChunk) {
+      const rawTitle = normalizeEventText(event.source_title_raw || event.title || '');
+      titleCaseParts.push('WHEN ? THEN ?');
+      titleCaseValues.push(event.id, applyTitleRewriteRules(rawTitle, rules));
+      rawTitleCaseParts.push('WHEN ? THEN ?');
+      rawTitleCaseValues.push(event.id, rawTitle);
+      eventIds.push(event.id);
+    }
+
+    statements.push(
+      db.prepare(
+        `UPDATE canonical_events
+         SET title = CASE id ${titleCaseParts.join(' ')} ELSE title END,
+             source_title_raw = CASE id ${rawTitleCaseParts.join(' ')} ELSE source_title_raw END,
+             source_icon = ?,
+             source_prefix = ?,
+             updated_at = ?
+         WHERE id IN (${eventIds.map(() => '?').join(', ')})`
+      ).bind(
+        ...titleCaseValues,
+        ...rawTitleCaseValues,
+        source.icon || '',
+        source.prefix || '',
+        timestamp,
+        ...eventIds
+      )
+    );
+  }
+  return statements;
+}
+
+async function applySourceConfigTitleBackfills(db, source, existingEvents, rules, timestamp, chunkSize = SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE) {
+  if (!existingEvents.length) return;
+  const safeChunkSize = Math.max(1, Math.floor(chunkSize));
+  const statements = buildSourceConfigTitleBackfillStatements(db, source, existingEvents, rules, timestamp, safeChunkSize);
+  try {
+    await runStatementsInChunks(db, statements);
+  } catch (error) {
+    if (!isTooManySqlVariablesError(error) || safeChunkSize === 1) {
+      throw error;
+    }
+    await applySourceConfigTitleBackfills(db, source, existingEvents, rules, timestamp, Math.max(1, Math.floor(safeChunkSize / 2)));
+  }
+}
+
 function makeOpaqueId(prefix, value = '') {
   const seed = `${prefix}:${value}:${Math.random()}:${Date.now()}`;
   return `${prefix}_${crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16)}`;
@@ -201,6 +260,21 @@ function compareEventsForIngest(a, b) {
   return Number(Boolean(a.recurrenceId)) - Number(Boolean(b.recurrenceId));
 }
 
+function normalizeEventText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function buildStandaloneFallbackKey(sourceId, event, rawTitle = normalizeEventText(event.summary || '(untitled event)')) {
+  return [
+    sourceId,
+    rawTitle,
+    String(event.startAt || ''),
+    String(event.endAt || ''),
+    normalizeEventText(event.timezone || ''),
+    normalizeEventText(event.location || ''),
+  ].join(':');
+}
+
 function buildGoogleSyncKey(row) {
   return `${row.target_id || row.target_key}:${row.event_instance_id}`;
 }
@@ -219,13 +293,13 @@ function isDeferredRateLimitMessage(message) {
 
 function buildIdentitySignature(event) {
   return JSON.stringify({
-    summary: String(event.summary || ''),
-    description: String(event.description || ''),
-    location: String(event.location || ''),
+    summary: normalizeEventText(event.summary || ''),
+    description: normalizeEventText(event.description || ''),
+    location: normalizeEventText(event.location || ''),
     startAt: String(event.startAt || ''),
     endAt: String(event.endAt || ''),
-    timezone: String(event.timezone || ''),
-    status: String(event.status || ''),
+    timezone: normalizeEventText(event.timezone || ''),
+    status: normalizeEventText(event.status || ''),
     rrule: String(event.rrule || ''),
     recurrenceId: String(event.recurrenceId || ''),
   });
@@ -235,8 +309,8 @@ function sortIdentityEvents(events) {
   return [...events].sort((a, b) =>
     String(a.startAt || '').localeCompare(String(b.startAt || '')) ||
     String(a.endAt || '').localeCompare(String(b.endAt || '')) ||
-    String(a.summary || '').localeCompare(String(b.summary || '')) ||
-    String(a.location || '').localeCompare(String(b.location || '')) ||
+    normalizeEventText(a.summary || '').localeCompare(normalizeEventText(b.summary || '')) ||
+    normalizeEventText(a.location || '').localeCompare(normalizeEventText(b.location || '')) ||
     String(a.uid || '').localeCompare(String(b.uid || ''))
   );
 }
@@ -468,15 +542,15 @@ function titleRewriteRulesToText(rules) {
 }
 
 function applyTitleRewriteRules(title, rules) {
-  let nextTitle = String(title || '');
+  let nextTitle = normalizeEventText(title || '');
   for (const rule of normalizeTitleRewriteRules(rules)) {
     try {
       nextTitle = nextTitle.replace(new RegExp(rule.pattern, rule.flags), rule.replacement);
     } catch {
-      return String(title || '');
+      return normalizeEventText(title || '');
     }
   }
-  return nextTitle.trim() || String(title || '');
+  return normalizeEventText(nextTitle) || normalizeEventText(title || '');
 }
 
 export class D1Repository {
@@ -2449,48 +2523,8 @@ export class D1Repository {
        WHERE source_id = ?`
     ).bind(source.id).all();
     const existingEvents = existingEventsResult.results || [];
+    await applySourceConfigTitleBackfills(this.db, source, existingEvents, rules, timestamp);
     const headerStatements = [];
-
-    if (existingEvents.length) {
-      // Keep source config edits set-based, but split large sources into small chunks so
-      // D1 never builds one oversized CASE/IN statement.
-      for (let i = 0; i < existingEvents.length; i += SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE) {
-        const eventsChunk = existingEvents.slice(i, i + SOURCE_CONFIG_TITLE_UPDATE_CHUNK_SIZE);
-        const titleCaseParts = [];
-        const titleCaseValues = [];
-        const rawTitleCaseParts = [];
-        const rawTitleCaseValues = [];
-        const eventIds = [];
-
-        for (const event of eventsChunk) {
-          const rawTitle = String(event.source_title_raw || event.title || '');
-          titleCaseParts.push('WHEN ? THEN ?');
-          titleCaseValues.push(event.id, applyTitleRewriteRules(rawTitle, rules));
-          rawTitleCaseParts.push('WHEN ? THEN ?');
-          rawTitleCaseValues.push(event.id, rawTitle);
-          eventIds.push(event.id);
-        }
-
-        headerStatements.push(
-          this.db.prepare(
-            `UPDATE canonical_events
-             SET title = CASE id ${titleCaseParts.join(' ')} ELSE title END,
-                 source_title_raw = CASE id ${rawTitleCaseParts.join(' ')} ELSE source_title_raw END,
-                 source_icon = ?,
-                 source_prefix = ?,
-                 updated_at = ?
-             WHERE id IN (${eventIds.map(() => '?').join(', ')})`
-          ).bind(
-            ...titleCaseValues,
-            ...rawTitleCaseValues,
-            source.icon || '',
-            source.prefix || '',
-            timestamp,
-            ...eventIds
-          )
-        );
-      }
-    }
 
     headerStatements.push(
       this.db.prepare(
@@ -2511,15 +2545,6 @@ export class D1Repository {
       await this.enqueueGoogleSyncJobsForSource(source.id, { mode: 'cleanup' });
       return;
     }
-
-    headerStatements.push(
-      this.db.prepare(`UPDATE canonical_events SET source_deleted = 0, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
-      this.db.prepare(
-        `UPDATE event_instances
-         SET source_deleted = 0, updated_at = ?
-         WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
-      ).bind(timestamp, source.id)
-    );
     await runStatementsInChunks(this.db, headerStatements);
 
     const targets = await this.resolveTargetsForSource(source);
@@ -2952,18 +2977,18 @@ export class D1Repository {
     const events = parseICS(body).sort(compareEventsForIngest);
     const useUidFallback = Number(source.uid_fallback_enabled || 0) === 1;
 
-    for (const [eventIndex, event] of events.entries()) {
+    for (const event of events) {
       totalEvents += 1;
       if (event.rrule == null && !isIsoOnOrAfter(event.endAt, pastCutoffIso)) {
         continue;
       }
       const canonicalProviderKey = `${sourceId}:${event.uid}:`;
       const providerKey = `${sourceId}:${event.uid}:${event.recurrenceId || ''}`;
-      const rawTitle = String(event.summary || '(untitled event)');
+      const rawTitle = normalizeEventText(event.summary || '(untitled event)');
       const rewrittenTitle = applyTitleRewriteRules(rawTitle, titleRewriteRules);
-      const fallbackKey = `${sourceId}:${rawTitle}:${event.startAt}:${event.endAt}:${event.timezone}:${event.location}`;
+      const fallbackKey = buildStandaloneFallbackKey(sourceId, event, rawTitle);
       const identitySeed = useUidFallback && !event.rrule && !event.recurrenceId
-        ? `${sourceId}:uid_fallback:${eventIndex}`
+        ? fallbackKey
         : event.uid
         ? (event.recurrenceId ? canonicalProviderKey : providerKey)
         : fallbackKey;
@@ -2972,7 +2997,7 @@ export class D1Repository {
       const sourceEventId = stableId(
         'sev',
         useUidFallback && !event.rrule && !event.recurrenceId
-          ? `${sourceId}:uid_fallback:${eventIndex}`
+          ? fallbackKey
           : providerKey || fallbackKey
       );
       const instances = expandRecurringEvent(event, {

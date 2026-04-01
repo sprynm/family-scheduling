@@ -2929,6 +2929,60 @@ describe('family-scheduling worker', () => {
     expect(db.canonicalEvents[0].title).toBe('U11A Practice');
   });
 
+  it('normalizes multiline source titles before applying rewrite rules', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_title_rules_multiline',
+      name: 'grayson-tigers-multiline',
+      display_name: 'Grayson Tigers Multiline',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/tigers-multiline.ics',
+      icon: '',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      title_rewrite_rules_json: JSON.stringify([{ pattern: 'U11A Grayson Long', flags: 'g', replacement: 'LAX' }]),
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          [
+            'BEGIN:VCALENDAR',
+            'BEGIN:VEVENT',
+            'UID:tigers-multiline-1',
+            'SUMMARY:U11A\\nGrayson Long\\nPractice',
+            'DTSTART:20990101T180000Z',
+            'DTEND:20990101T190000Z',
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_title_rules_multiline');
+
+    expect(db.canonicalEvents).toHaveLength(1);
+    expect(db.canonicalEvents[0].source_title_raw).toBe('U11A Grayson Long Practice');
+    expect(db.canonicalEvents[0].title).toBe('LAX Practice');
+  });
+
   it('preserves source title rewrite rules when an update omits them', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     const db = new FakeDb();
@@ -3005,8 +3059,8 @@ describe('family-scheduling worker', () => {
 
     class LimitedBindDb extends FakeDb {
       run(sql, values) {
-        if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = CASE id') && values.length > 120) {
-          throw new Error('D1_ERROR: too many SQL variables at offset 818: SQLITE_ERROR');
+        if (sql.includes('UPDATE canonical_events') && sql.includes('SET title = CASE id') && values.length > 100) {
+          throw new Error('D1_ERROR: too many SQL variables at offset 883: SQLITE_ERROR');
         }
         return super.run(sql, values);
       }
@@ -4092,6 +4146,199 @@ describe('family-scheduling worker', () => {
     expect(db.eventInstances).toHaveLength(1);
   });
 
+  it('keeps UID fallback identities stable when standalone event order changes between fetches', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_uid_reorder_test',
+      name: 'grayson-uid-reorder',
+      display_name: 'Grayson UID Reorder',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-uid-reorder.ics',
+      icon: '🥍',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      uid_fallback_enabled: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    let fetchCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        fetchCount += 1;
+        const events = fetchCount === 1
+          ? [
+              ['uid-a-1', 'Practice Alpha', '20260322T130000Z', '20260322T140000Z', 'Box 1'],
+              ['uid-b-1', 'Practice Beta', '20260322T150000Z', '20260322T160000Z', 'Box 2'],
+            ]
+          : [
+              ['uid-b-2', 'Practice Beta', '20260322T150000Z', '20260322T160000Z', 'Box 2'],
+              ['uid-a-2', 'Practice Alpha', '20260322T130000Z', '20260322T140000Z', 'Box 1'],
+            ];
+        return new Response(
+          [
+            'BEGIN:VCALENDAR',
+            ...events.flatMap(([uid, summary, start, end, location]) => [
+              'BEGIN:VEVENT',
+              `UID:${uid}`,
+              `SUMMARY:${summary}`,
+              `DTSTART:${start}`,
+              `DTEND:${end}`,
+              `LOCATION:${location}`,
+              'END:VEVENT',
+            ]),
+            'END:VCALENDAR',
+          ].join('\r\n'),
+          { status: 200, headers: { etag: `"etag-${fetchCount}"`, 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+        );
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_uid_reorder_test');
+    const canonicalIdsBefore = db.canonicalEvents.map((event) => event.id).sort();
+    const sourceEventIdsBefore = db.sourceEvents.map((event) => event.id).sort();
+
+    await repo.ingestSource('src_uid_reorder_test');
+
+    expect(db.canonicalEvents.map((event) => event.id).sort()).toEqual(canonicalIdsBefore);
+    expect(db.sourceEvents.map((event) => event.id).sort()).toEqual(sourceEventIdsBefore);
+    expect(db.canonicalEvents).toHaveLength(2);
+    expect(db.eventInstances).toHaveLength(2);
+    expect(db.canonicalEvents.every((event) => event.source_deleted === 0)).toBe(true);
+  });
+
+  it('does not resurrect stale source rows when updating an active source', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_update_no_resurrect',
+      name: 'grayson-update-no-resurrect',
+      display_name: 'Grayson Update No Resurrect',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-update-no-resurrect.ics',
+      icon: '🥍',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      title_rewrite_rules_json: JSON.stringify([{ pattern: 'Practice', flags: 'g', replacement: 'Session' }]),
+      uid_fallback_enabled: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push(
+      {
+        id: 'evt_active_keep',
+        source_id: 'src_update_no_resurrect',
+        identity_key: 'identity-active',
+        event_kind: 'single',
+        title: 'Practice Alpha',
+        source_title_raw: 'Practice Alpha',
+        source_icon: '🥍',
+        source_prefix: 'G:',
+        description: '',
+        location: 'Box 1',
+        start_at: '2026-03-22T13:00:00.000Z',
+        end_at: '2026-03-22T14:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2026-03-03T00:00:00.000Z',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'evt_stale_hidden',
+        source_id: 'src_update_no_resurrect',
+        identity_key: 'identity-stale',
+        event_kind: 'single',
+        title: 'Practice Beta',
+        source_title_raw: 'Practice Beta',
+        source_icon: '🥍',
+        source_prefix: 'G:',
+        description: '',
+        location: 'Box 2',
+        start_at: '2026-03-22T15:00:00.000Z',
+        end_at: '2026-03-22T16:00:00.000Z',
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 1,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2026-03-03T00:00:00.000Z',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+    db.eventInstances.push(
+      {
+        id: 'inst_active_keep',
+        canonical_event_id: 'evt_active_keep',
+        occurrence_start_at: '2026-03-22T13:00:00.000Z',
+        occurrence_end_at: '2026-03-22T14:00:00.000Z',
+        recurrence_instance_key: '2026-03-22T13:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      },
+      {
+        id: 'inst_stale_hidden',
+        canonical_event_id: 'evt_stale_hidden',
+        occurrence_start_at: '2026-03-22T15:00:00.000Z',
+        occurrence_end_at: '2026-03-22T16:00:00.000Z',
+        recurrence_instance_key: '2026-03-22T15:00:00.000Z',
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 1,
+        needs_review: 0,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      }
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.updateSource('src_update_no_resurrect', {
+      display_name: 'Grayson Update No Resurrect Renamed',
+      title_rewrite_rules_text: '/Practice/g => Session',
+    });
+
+    expect(db.canonicalEvents.find((event) => event.id === 'evt_active_keep')?.title).toBe('Session Alpha');
+    expect(db.canonicalEvents.find((event) => event.id === 'evt_stale_hidden')?.title).toBe('Session Beta');
+    expect(db.canonicalEvents.find((event) => event.id === 'evt_stale_hidden')?.source_deleted).toBe(1);
+    expect(db.eventInstances.find((instance) => instance.id === 'inst_stale_hidden')?.source_deleted).toBe(1);
+    expect(db.outputRules.every((rule) => rule.canonical_event_id !== 'evt_stale_hidden')).toBe(true);
+  });
+
   it('diagnoses UID churn and stores a fallback recommendation', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     const db = new FakeDb();
@@ -4847,6 +5094,133 @@ describe('family-scheduling worker', () => {
     await repo.disableSource('src_google_disable');
     await drainQueue(env);
 
+    expect(db.googleEventLinks).toHaveLength(0);
+  });
+
+  it('continues scheduling follow-up google cleanup chunks until all stale events are deleted', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_cleanup_chunks',
+      target_type: 'google',
+      slug: 'family_clubs',
+      display_name: 'Family Clubs',
+      calendar_id: 'family-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_google_cleanup_chunks',
+      name: 'family-google-cleanup-chunks',
+      display_name: 'Family Google Cleanup Chunks',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-google-cleanup-chunks.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_google_cleanup_chunks',
+      source_id: 'src_google_cleanup_chunks',
+      target_id: 'outt_google_cleanup_chunks',
+      target_key: 'family_clubs',
+      target_type: 'google',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    for (let i = 0; i < 12; i += 1) {
+      db.canonicalEvents.push({
+        id: `evt_google_cleanup_chunks_${i}`,
+        source_id: 'src_google_cleanup_chunks',
+        identity_key: `identity_cleanup_${i}`,
+        event_kind: 'single',
+        title: `Family Event ${i}`,
+        source_icon: '',
+        source_prefix: '',
+        description: '',
+        location: '',
+        start_at: `2099-03-${String(10 + i).padStart(2, '0')}T01:00:00.000Z`,
+        end_at: `2099-03-${String(10 + i).padStart(2, '0')}T02:00:00.000Z`,
+        timezone: 'UTC',
+        status: 'confirmed',
+        rrule: null,
+        series_until: null,
+        source_deleted: 0,
+        needs_review: 0,
+        source_changed_since_overlay: 0,
+        last_source_change_at: '2026-03-03T00:00:00.000Z',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
+      db.eventInstances.push({
+        id: `inst_google_cleanup_chunks_${i}`,
+        canonical_event_id: `evt_google_cleanup_chunks_${i}`,
+        occurrence_start_at: `2099-03-${String(10 + i).padStart(2, '0')}T01:00:00.000Z`,
+        occurrence_end_at: `2099-03-${String(10 + i).padStart(2, '0')}T02:00:00.000Z`,
+        recurrence_instance_key: `2099-03-${String(10 + i).padStart(2, '0')}T01:00:00.000Z`,
+        provider_recurrence_id: null,
+        status: 'confirmed',
+        source_deleted: 0,
+        needs_review: 0,
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
+      db.googleEventLinks.push({
+        id: `gel_google_cleanup_chunks_${i}`,
+        target_id: 'outt_google_cleanup_chunks',
+        target_key: 'family_clubs',
+        canonical_event_id: `evt_google_cleanup_chunks_${i}`,
+        event_instance_id: `inst_google_cleanup_chunks_${i}`,
+        google_event_id: `google-event-cleanup-${i}`,
+        google_etag: `etag-cleanup-${i}`,
+        last_synced_hash: `hash-cleanup-${i}`,
+        last_synced_at: '2026-03-03T00:00:00.000Z',
+        sync_status: 'synced',
+        last_error: null,
+      });
+    }
+
+    const deleteCalls = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        if (String(url) === 'https://oauth2.googleapis.com/token') {
+          return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (String(url).startsWith('https://www.googleapis.com/calendar/v3/calendars/family-clubs%40group.calendar.google.com/events/') && options.method === 'DELETE') {
+          deleteCalls.push(String(url));
+          return new Response('', { status: 204 });
+        }
+        throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.disableSource('src_google_cleanup_chunks');
+    await drainQueue(env);
+
+    expect(deleteCalls).toHaveLength(12);
     expect(db.googleEventLinks).toHaveLength(0);
   });
 
