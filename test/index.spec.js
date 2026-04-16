@@ -516,7 +516,7 @@ class FakeDb {
           });
         }
       } else {
-        const isSeedInsert = values.length === 11;
+        const isSeedInsert = values.length === 12;
         const [
           id,
           sourceId,
@@ -1463,6 +1463,7 @@ class FakeDb {
             description: event.description,
             location: event.location,
             status: event.status,
+            timezone: event.timezone || 'UTC',
             event_instance_id: instance.id,
             occurrence_start_at: instance.occurrence_start_at,
             occurrence_end_at: instance.occurrence_end_at,
@@ -3436,12 +3437,12 @@ describe('family-scheduling worker', () => {
     const familyFeed = await repo.generateFeed({
       target: 'family',
       calendarName: 'Family Combined',
-      lookbackDays: 30,
+      lookbackDays: 36500,
     });
     const naomiFeed = await repo.generateFeed({
       target: 'naomi',
       calendarName: 'Naomi Combined',
-      lookbackDays: 30,
+      lookbackDays: 36500,
     });
 
     expect(familyFeed).toContain('SUMMARY:N: 🏐 Volleyball Game');
@@ -3876,6 +3877,7 @@ describe('family-scheduling worker', () => {
 
   it('applies fallback sport icon detection when source icon is not configured', async () => {
     env.SEED_SAMPLE_DATA = 'false';
+    env.INGEST_PAST_RETENTION_DAYS = '36500';
     const db = new FakeDb();
     env.APP_DB = db;
     db.sources.push({
@@ -3931,12 +3933,12 @@ describe('family-scheduling worker', () => {
     const familyFeed = await repo.generateFeed({
       target: 'family',
       calendarName: 'Family Combined',
-      lookbackDays: 30,
+      lookbackDays: 36500,
     });
     const naomiFeed = await repo.generateFeed({
       target: 'naomi',
       calendarName: 'Naomi Combined',
-      lookbackDays: 30,
+      lookbackDays: 36500,
     });
 
     expect(familyFeed).toContain('SUMMARY:N: 🏀 Basketball Practice');
@@ -3945,6 +3947,7 @@ describe('family-scheduling worker', () => {
 
   it('renders per-target rule decoration from source_target_links', async () => {
     env.SEED_SAMPLE_DATA = 'false';
+    env.INGEST_PAST_RETENTION_DAYS = '36500';
     const db = new FakeDb();
     env.APP_DB = db;
     db.sources.push({
@@ -4016,8 +4019,8 @@ describe('family-scheduling worker', () => {
 
     const repo = new D1Repository(db, env);
     await repo.ingestSource('src_rule_test');
-    const familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
-    const graysonFeed = await repo.generateFeed({ target: 'grayson', calendarName: 'Grayson Combined', lookbackDays: 30 });
+    const familyFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 36500 });
+    const graysonFeed = await repo.generateFeed({ target: 'grayson', calendarName: 'Grayson Combined', lookbackDays: 36500 });
 
     expect(familyFeed).toContain('SUMMARY:G: 🏒 Hockey Practice');
     expect(graysonFeed).toContain('SUMMARY:🏒 Hockey Practice');
@@ -5478,6 +5481,7 @@ describe('family-scheduling worker', () => {
   it('sends floating-time events to Google using the calendar timezone without forcing UTC', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     env.DEFAULT_LOOKBACK_DAYS = '36500';
+    env.INGEST_PAST_RETENTION_DAYS = '36500';
     env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
     const db = new FakeDb();
     env.APP_DB = db;
@@ -5588,6 +5592,169 @@ describe('family-scheduling worker', () => {
       },
     });
     expect(postedGoogleEvent.start.dateTime.endsWith('Z')).toBe(false);
+  });
+
+  it('keeps recurring floating-time events in their source timezone for ICS and Google output', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
+    env.INGEST_PAST_RETENTION_DAYS = '36500';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_family_timezone',
+      target_type: 'ics',
+      slug: 'family',
+      display_name: 'Family Feed',
+      calendar_id: null,
+      ownership_mode: null,
+      is_system: 1,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.outputTargets.push({
+      id: 'outt_google_timezone',
+      target_type: 'google',
+      slug: 'naomi_school',
+      display_name: 'Naomi School',
+      calendar_id: 'naomi-school@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_timezone_recurring',
+      name: 'naomi-recurring-timezone',
+      display_name: 'Naomi Recurring Timezone',
+      provider_type: 'ics',
+      owner_type: 'naomi',
+      source_category: 'school',
+      url: 'https://example.com/naomi-recurring-timezone.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_family_timezone',
+      source_id: 'src_timezone_recurring',
+      target_id: 'outt_family_timezone',
+      target_key: 'family',
+      target_type: 'ics',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_timezone_recurring',
+      source_id: 'src_timezone_recurring',
+      target_id: 'outt_google_timezone',
+      target_key: 'naomi_school',
+      target_type: 'google',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+
+    const postedGoogleEvents = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        if (String(url) === 'https://example.com/naomi-recurring-timezone.ics') {
+          return new Response(
+            [
+              'BEGIN:VCALENDAR',
+              'VERSION:2.0',
+              'X-WR-TIMEZONE:America/New_York',
+              'BEGIN:VEVENT',
+              'UID:naomi-recurring-timezone-1',
+              'SUMMARY:Morning Practice',
+              'DTSTART:20260310T090000',
+              'DTEND:20260310T100000',
+              'RRULE:FREQ=DAILY;COUNT=2',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ].join('\r\n'),
+            {
+              status: 200,
+              headers: {
+                etag: 'float-recurring-123',
+                'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT',
+              },
+            }
+          );
+        }
+        if (String(url) === 'https://oauth2.googleapis.com/token') {
+          return new Response(JSON.stringify({ access_token: 'google-token' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/naomi-school%40group.calendar.google.com/events' && options.method === 'POST') {
+          const payload = JSON.parse(String(options.body || '{}'));
+          postedGoogleEvents.push(payload);
+          return new Response(JSON.stringify({ id: `google-school-${postedGoogleEvents.length}`, etag: '"etag-1"' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    const result = await repo.ingestSource('src_timezone_recurring');
+    expect(result.googleSync.queued_jobs).toBe(1);
+
+    const familyFeed = await repo.generateFeed({
+      target: 'family',
+      calendarName: 'Family Combined',
+      lookbackDays: 36500,
+    });
+
+    expect(familyFeed).toContain('DTSTART;TZID=America/New_York:20260310T090000');
+    expect(familyFeed).toContain('DTSTART;TZID=America/New_York:20260311T090000');
+
+    await drainQueue(env);
+
+    expect(postedGoogleEvents).toHaveLength(2);
+    expect(postedGoogleEvents[0]).toMatchObject({
+      start: {
+        dateTime: '2026-03-10T09:00:00.000',
+        timeZone: 'America/New_York',
+      },
+      end: {
+        dateTime: '2026-03-10T10:00:00.000',
+        timeZone: 'America/New_York',
+      },
+    });
+    expect(postedGoogleEvents[1]).toMatchObject({
+      start: {
+        dateTime: '2026-03-11T09:00:00.000',
+        timeZone: 'America/New_York',
+      },
+      end: {
+        dateTime: '2026-03-11T10:00:00.000',
+        timeZone: 'America/New_York',
+      },
+    });
   });
 
   it('stops additional google writes after rate limiting and defers remaining events', async () => {

@@ -232,3 +232,24 @@ At closeout of a unit of work, insights should be compacted into:
 
 - The remaining duplicate Google events were not evidence that rebuild cleanup was conceptually missing; they were caused by continuation jobs being suppressed by the generic queue dedupe guard.
 - The live Ramp source still contains historical duplicate Google links, so one more rebuild is needed under the new deployment to let the full cleanup chain complete.
+
+## 2026-04-16
+
+### Session Notes
+
+- Investigated a published family ICS feed that was rendering some school-time events in the wrong local time even though the upstream source ICS looked correct.
+- Traced the shift to the publish path, not the source parser: the generated family feed was flattening timezone-aware values into UTC during serialization.
+
+### Work Completed
+
+- Preserved event timezones through feed preview and ICS generation so non-UTC events now emit `TZID`-qualified values instead of being forced to UTC.
+- Updated recurring floating-time expansion so source-local wall-clock times remain stable when a source declares a timezone.
+- Kept Google sync payloads aligned with the source timezone instead of passing through the stored timestamp unchanged.
+- Fixed the test double for canonical-event inserts so seed/sample rows continue to parse correctly.
+- Added regression coverage for timezone-preserving recurring ICS output and Google sync payloads.
+- Ran the full `vitest` suite successfully.
+
+### Discoveries
+
+- The bug was a publish-time conversion problem, not a parse-time corruption problem.
+- Stable event UIDs mean calendar clients should update the event content on refresh rather than duplicating it, assuming the source reuses the same instance IDs.

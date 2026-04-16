@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { TARGETS, TARGET_LABELS } from './constants.js';
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, isGoogleRateLimitError, updateGoogleCalendarEvent } from './google-calendar.js';
-import { buildICS, expandRecurringEvent, parseICS } from './ics.js';
+import { buildICS, expandRecurringEvent, formatEventDateTimeValue, parseICS } from './ics.js';
 import { decorateEventSummary } from './presentation.js';
 
 function nowIso() {
@@ -1720,6 +1720,8 @@ export class D1Repository {
   }
 
   buildGoogleCalendarEvent(row) {
+    const start = formatEventDateTimeValue(row.occurrence_start_at, row.timezone, { style: 'google' });
+    const end = formatEventDateTimeValue(row.occurrence_end_at, row.timezone, { style: 'google' });
     return {
       summary: decorateEventSummary({
         target: row.target_key,
@@ -1730,14 +1732,18 @@ export class D1Repository {
       description: row.description || '',
       location: row.location || '',
       status: row.status === 'cancelled' ? 'cancelled' : 'confirmed',
-      start: {
-        dateTime: row.occurrence_start_at,
-        timeZone: row.timezone || 'UTC',
-      },
-      end: {
-        dateTime: row.occurrence_end_at,
-        timeZone: row.timezone || 'UTC',
-      },
+      start: start?.type === 'date'
+        ? { date: start.value }
+        : {
+            dateTime: start?.value || row.occurrence_start_at,
+            timeZone: start?.timeZone || row.timezone || 'UTC',
+          },
+      end: end?.type === 'date'
+        ? { date: end.value }
+        : {
+            dateTime: end?.value || row.occurrence_end_at,
+            timeZone: end?.timeZone || row.timezone || 'UTC',
+          },
       extendedProperties: {
         private: {
           familySchedulingCanonicalEventId: row.canonical_event_id,
@@ -2203,6 +2209,7 @@ export class D1Repository {
       `SELECT
         canonical_events.id AS canonical_event_id,
         canonical_events.title,
+        canonical_events.timezone,
         COALESCE(NULLIF(source_target_links.icon, ''), canonical_events.source_icon, sources.icon, '') AS source_icon,
         COALESCE(NULLIF(source_target_links.prefix, ''), canonical_events.source_prefix, sources.prefix, '') AS source_prefix,
         canonical_events.description,
@@ -2239,6 +2246,7 @@ export class D1Repository {
       uid: `${row.event_instance_id}@family-scheduling`,
       startAt: row.occurrence_start_at,
       endAt: row.occurrence_end_at,
+      timezone: row.timezone || 'UTC',
       summary: decorateEventSummary({
         target,
         title: row.title,
@@ -2260,6 +2268,7 @@ export class D1Repository {
         uid: row.uid,
         startAt: row.startAt,
         endAt: row.endAt,
+        timezone: row.timezone,
         summary: row.summary,
         description: row.description,
         location: row.location,

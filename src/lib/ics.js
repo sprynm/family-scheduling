@@ -1,4 +1,4 @@
-import { RRule } from 'rrule';
+import { datetime, RRule } from 'rrule';
 
 function unfoldLines(text) {
   return String(text || '')
@@ -27,6 +27,97 @@ function unescapeText(value) {
     .replace(/\\,/g, ',')
     .replace(/\\;/g, ';')
     .replace(/\\\\/g, '\\');
+}
+
+function normalizeTimeZone(timeZone) {
+  const value = String(timeZone || '').trim();
+  return value || 'UTC';
+}
+
+function parseDateTimeParts(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z)?$/);
+  if (!match) return null;
+  return {
+    year: match[1],
+    month: match[2],
+    day: match[3],
+    hour: match[4],
+    minute: match[5],
+    second: match[6],
+    millisecond: match[7] || '000',
+    isUtc: Boolean(match[8]),
+  };
+}
+
+function partsFromInstantInTimeZone(date, timeZone) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: normalizeTimeZone(timeZone),
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  const parts = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type === 'literal') continue;
+    parts[part.type] = part.value;
+  }
+  return {
+    year: parts.year || '1970',
+    month: parts.month || '01',
+    day: parts.day || '01',
+    hour: parts.hour || '00',
+    minute: parts.minute || '00',
+    second: parts.second || '00',
+    millisecond: '000',
+  };
+}
+
+function formatDateTimeParts(parts, style) {
+  if (style === 'google') {
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.000`;
+  }
+  return `${parts.year}${parts.month}${parts.day}T${parts.hour}${parts.minute}${parts.second}`;
+}
+
+function formatFloatingIsoFromDate(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.000`;
+}
+
+export function formatEventDateTimeValue(value, timeZone, { style = 'ics' } = {}) {
+  const raw = String(value || '');
+  if (!raw) return null;
+
+  const parsed = parseDateTimeParts(raw);
+  if (!parsed) {
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return null;
+    return {
+      type: 'dateTime',
+      value: style === 'google' ? date.toISOString() : formatIcsDate(date),
+      timeZone: 'UTC',
+    };
+  }
+
+  const zone = normalizeTimeZone(timeZone);
+  let parts = parsed;
+  let useUtcSuffix = zone === 'UTC' || parsed.isUtc;
+
+  if (zone !== 'UTC' && parsed.isUtc) {
+    parts = partsFromInstantInTimeZone(new Date(raw), zone);
+    useUtcSuffix = false;
+  }
+
+  const valueText = `${formatDateTimeParts(parts, style)}${useUtcSuffix ? 'Z' : ''}`;
+  return {
+    type: 'dateTime',
+    value: valueText,
+    timeZone: zone,
+  };
 }
 
 function parseDateValue(raw, tzid, fallbackTz) {
@@ -129,7 +220,17 @@ export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 
     ];
   }
 
-  const start = new Date(event.startAt);
+  const startParts = parseDateTimeParts(event.startAt);
+  const start = startParts
+    ? datetime(
+        Number(startParts.year),
+        Number(startParts.month),
+        Number(startParts.day),
+        Number(startParts.hour),
+        Number(startParts.minute),
+        Number(startParts.second)
+      )
+    : new Date(event.startAt);
   const durationMs = inferDurationMs(event);
   const windowStart = new Date(now);
   windowStart.setUTCDate(windowStart.getUTCDate() - lookbackDays);
@@ -137,15 +238,17 @@ export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 
   windowEnd.setUTCDate(windowEnd.getUTCDate() + horizonDays);
 
   const ruleOptions = RRule.parseString(event.rrule);
+  const tzid = normalizeTimeZone(event.timezone);
   const rule = new RRule({ ...ruleOptions, dtstart: start });
   const occurrences = rule.between(windowStart, windowEnd, true);
 
   return occurrences.map((occurrence) => {
     const occurrenceEnd = new Date(occurrence.getTime() + durationMs);
+    const isUtcSeries = tzid === 'UTC';
     return {
-      recurrenceInstanceKey: occurrence.toISOString(),
-      occurrenceStartAt: occurrence.toISOString(),
-      occurrenceEndAt: occurrenceEnd.toISOString(),
+      recurrenceInstanceKey: isUtcSeries ? occurrence.toISOString() : formatFloatingIsoFromDate(occurrence),
+      occurrenceStartAt: isUtcSeries ? occurrence.toISOString() : formatFloatingIsoFromDate(occurrence),
+      occurrenceEndAt: isUtcSeries ? occurrenceEnd.toISOString() : formatFloatingIsoFromDate(occurrenceEnd),
     };
   });
 }
@@ -185,8 +288,22 @@ export function buildICS({ calendarName, description, events }) {
     lines.push('BEGIN:VEVENT');
     lines.push(`UID:${event.uid}`);
     lines.push(`DTSTAMP:${formatIcsDate(new Date())}`);
-    lines.push(`DTSTART:${formatIcsDate(new Date(event.startAt))}`);
-    lines.push(`DTEND:${formatIcsDate(new Date(event.endAt))}`);
+    const start = formatEventDateTimeValue(event.startAt, event.timezone, { style: 'ics' });
+    const end = formatEventDateTimeValue(event.endAt, event.timezone, { style: 'ics' });
+    if (start?.type === 'date') {
+      lines.push(`DTSTART;VALUE=DATE:${start.value}`);
+    } else if (start?.timeZone && start.timeZone !== 'UTC') {
+      lines.push(`DTSTART;TZID=${start.timeZone}:${start.value}`);
+    } else if (start?.value) {
+      lines.push(`DTSTART:${start.value}`);
+    }
+    if (end?.type === 'date') {
+      lines.push(`DTEND;VALUE=DATE:${end.value}`);
+    } else if (end?.timeZone && end.timeZone !== 'UTC') {
+      lines.push(`DTEND;TZID=${end.timeZone}:${end.value}`);
+    } else if (end?.value) {
+      lines.push(`DTEND:${end.value}`);
+    }
     lines.push(`SUMMARY:${escapeText(event.summary)}`);
     if (event.description) lines.push(`DESCRIPTION:${escapeText(event.description)}`);
     if (event.location) lines.push(`LOCATION:${escapeText(event.location)}`);
