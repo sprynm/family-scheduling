@@ -4,3 +4,4 @@ CLOUDFLARE_ACCESS_TEAM_DOMAIN=https://yourteam.cloudflareaccess.com
 ADMIN_EMAILS=lance.long@gmail.com
 EDITOR_EMAILS=lance.long@gmail.com,nursesmiff@gmail.com
 ALLOW_DEV_ROLE_HEADER=true
+DEFAULT_FLOATING_TIMEZONE=America/Vancouver

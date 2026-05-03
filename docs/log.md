@@ -11,6 +11,27 @@ At closeout of a unit of work, insights should be compacted into:
 - plan.md
 - external knowledge base if appropriate
 
+## 2026-05-03
+
+### Session Notes
+
+- Investigated a production report where `family.ics` subscriptions were showing some event times eight hours early even though the admin Debug ICS view looked correct.
+- Confirmed the mismatch was in the published feed path: preview rows were rendering local floating timestamps in the browser, while the downloaded ICS serialization path still let clients reinterpret those timestamps inconsistently.
+
+### Work Completed
+
+- Added a configurable floating-time fallback timezone with a default of `America/Vancouver` and threaded it through ingest, feed generation, diagnostics, and Google sync formatting.
+- Changed compatibility feed serialization so timed events publish as absolute UTC instants instead of relying on `TZID` or floating local output.
+- Documented the intentional DST fall-back bias and invalid-TZID fail-fast behavior in the timezone conversion helpers.
+- Added regression coverage for floating-time fallback feed output and updated the override-remap tests to freeze system time instead of weakening ingest retention.
+- Deployed the worker successfully via Wrangler. Current version: `1b779f69-0457-4ec8-b18f-9e3cb4185d0a`. Published URL: `https://family-scheduling.lance-e35.workers.dev`.
+- Ran the full `vitest` suite successfully.
+
+### Discoveries
+
+- The earlier “Debug ICS looks right, subscription is wrong” symptom came from two different render paths: browser-local preview formatting versus client-dependent ICS timezone parsing.
+- The two older override tests that started failing were date-sensitive fixtures. On 2026-05-03 their March 2026 events were older than the default `INGEST_PAST_RETENTION_DAYS=30`, so freezing test time was the correct fix rather than broadening retention.
+
 ## 2026-03-11
 
 ### Session Notes

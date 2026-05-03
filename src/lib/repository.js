@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { TARGETS, TARGET_LABELS } from './constants.js';
+import { DEFAULT_FLOATING_TIMEZONE, TARGETS, TARGET_LABELS } from './constants.js';
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, isGoogleRateLimitError, updateGoogleCalendarEvent } from './google-calendar.js';
 import { buildICS, expandRecurringEvent, formatEventDateTimeValue, parseICS } from './ics.js';
 import { decorateEventSummary } from './presentation.js';
@@ -117,6 +117,11 @@ function deriveDefaultGoogleInclusion(sourceCategory, ownerType) {
   if (ownerType === 'family') return 0;
   if (sourceCategory === 'personal') return 0;
   return 1;
+}
+
+function getFloatingTimeZoneFallback(env) {
+  const configured = String(env?.DEFAULT_FLOATING_TIMEZONE || '').trim();
+  return configured || DEFAULT_FLOATING_TIMEZONE;
 }
 
 function buildLegacyDisplayName(ownerType, url, index) {
@@ -1720,8 +1725,15 @@ export class D1Repository {
   }
 
   buildGoogleCalendarEvent(row) {
-    const start = formatEventDateTimeValue(row.occurrence_start_at, row.timezone, { style: 'google' });
-    const end = formatEventDateTimeValue(row.occurrence_end_at, row.timezone, { style: 'google' });
+    const floatingTimeZoneFallback = getFloatingTimeZoneFallback(this.env);
+    const start = formatEventDateTimeValue(row.occurrence_start_at, row.timezone, {
+      style: 'google',
+      floatingTimeZoneFallback,
+    });
+    const end = formatEventDateTimeValue(row.occurrence_end_at, row.timezone, {
+      style: 'google',
+      floatingTimeZoneFallback,
+    });
     return {
       summary: decorateEventSummary({
         target: row.target_key,
@@ -2263,6 +2275,7 @@ export class D1Repository {
   }
 
   async generateFeed({ target, calendarName, lookbackDays = 7 }) {
+    const floatingTimeZoneFallback = getFloatingTimeZoneFallback(this.env);
     const events = (await this.listFeedPreview({ target, lookbackDays }))
       .map((row) => ({
         uid: row.uid,
@@ -2279,6 +2292,7 @@ export class D1Repository {
       calendarName,
       description: `${TARGET_LABELS[target]} generated compatibility feed`,
       events,
+      floatingTimeZoneFallback,
     });
   }
 
@@ -2604,7 +2618,9 @@ export class D1Repository {
       if (!response.ok) {
         throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
       }
-      return parseICS(body);
+      return parseICS(body, {
+        defaultFloatingTimeZone: getFloatingTimeZoneFallback(this.env),
+      });
     };
 
     const firstEvents = await fetchSnapshot();
@@ -2983,7 +2999,9 @@ export class D1Repository {
       throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
     }
 
-    const events = parseICS(body).sort(compareEventsForIngest);
+    const events = parseICS(body, {
+      defaultFloatingTimeZone: getFloatingTimeZoneFallback(this.env),
+    }).sort(compareEventsForIngest);
     const useUidFallback = Number(source.uid_fallback_enabled || 0) === 1;
 
     for (const event of events) {

@@ -4842,141 +4842,153 @@ describe('family-scheduling worker', () => {
   });
 
   it('reapplies active skip overrides after ingest rebuilds output rules', async () => {
-    env.SEED_SAMPLE_DATA = 'false';
-    const db = new FakeDb();
-    env.APP_DB = db;
-    db.sources.push({
-      id: 'src_override_rebuild',
-      name: 'naomi-stormfest',
-      display_name: 'Naomi Stormfest',
-      provider_type: 'ics',
-      owner_type: 'naomi',
-      source_category: 'sports',
-      url: 'https://example.com/stormfest.ics',
-      icon: '',
-      prefix: 'N:',
-      fetch_url_secret_ref: null,
-      include_in_child_ics: 1,
-      include_in_family_ics: 1,
-      include_in_child_google_output: 0,
-      is_active: 1,
-      sort_order: 0,
-      poll_interval_minutes: 30,
-      quality_profile: 'standard',
-      created_at: '2026-03-03T00:00:00.000Z',
-      updated_at: '2026-03-03T00:00:00.000Z',
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-20T00:00:00.000Z'));
+    try {
+      env.SEED_SAMPLE_DATA = 'false';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      db.sources.push({
+        id: 'src_override_rebuild',
+        name: 'naomi-stormfest',
+        display_name: 'Naomi Stormfest',
+        provider_type: 'ics',
+        owner_type: 'naomi',
+        source_category: 'sports',
+        url: 'https://example.com/stormfest.ics',
+        icon: '',
+        prefix: 'N:',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 1,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 0,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
 
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        new Response(
-          [
-            'BEGIN:VCALENDAR',
-            'BEGIN:VEVENT',
-            'UID:stormfest-1',
-            'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
-            'DTSTART:20260320T174527',
-            'DTEND:20260320T190027',
-            'END:VEVENT',
-            'END:VCALENDAR',
-          ].join('\r\n'),
-          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          new Response(
+            [
+              'BEGIN:VCALENDAR',
+              'BEGIN:VEVENT',
+              'UID:stormfest-1',
+              'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
+              'DTSTART:20260320T174527',
+              'DTEND:20260320T190027',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ].join('\r\n'),
+            { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+          )
         )
-      )
-    );
+      );
 
-    const repo = new D1Repository(db, env);
-    await repo.ensureSupportTables();
-    await repo.ingestSource('src_override_rebuild');
+      const repo = new D1Repository(db, env);
+      await repo.ensureSupportTables();
+      await repo.ingestSource('src_override_rebuild');
 
-    const event = db.canonicalEvents[0];
-    const instance = db.eventInstances[0];
-    await repo.createOverride({
-      eventId: event.id,
-      eventInstanceId: instance.id,
-      overrideType: 'skip',
-      payload: {},
-      actorRole: 'editor',
-    });
+      const event = db.canonicalEvents[0];
+      const instance = db.eventInstances[0];
+      await repo.createOverride({
+        eventId: event.id,
+        eventInstanceId: instance.id,
+        overrideType: 'skip',
+        payload: {},
+        actorRole: 'editor',
+      });
 
-    expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
+      expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
 
-    await repo.ingestSource('src_override_rebuild');
+      await repo.ingestSource('src_override_rebuild');
 
-    expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
-    expect(db.outputRules.every((rule) => rule.derived_reason === 'override:skip')).toBe(true);
+      expect(db.outputRules.every((rule) => rule.include_state === 'excluded')).toBe(true);
+      expect(db.outputRules.every((rule) => rule.derived_reason === 'override:skip')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps single-event skip overrides when the upstream time changes', async () => {
-    env.SEED_SAMPLE_DATA = 'false';
-    const db = new FakeDb();
-    env.APP_DB = db;
-    db.sources.push({
-      id: 'src_override_remap',
-      name: 'naomi-stormfest-remap',
-      display_name: 'Naomi Stormfest Remap',
-      provider_type: 'ics',
-      owner_type: 'naomi',
-      source_category: 'sports',
-      url: 'https://example.com/stormfest-remap.ics',
-      icon: '',
-      prefix: 'N:',
-      fetch_url_secret_ref: null,
-      include_in_child_ics: 1,
-      include_in_family_ics: 1,
-      include_in_child_google_output: 0,
-      is_active: 1,
-      sort_order: 0,
-      poll_interval_minutes: 30,
-      quality_profile: 'standard',
-      created_at: '2026-03-03T00:00:00.000Z',
-      updated_at: '2026-03-03T00:00:00.000Z',
-    });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-20T00:00:00.000Z'));
+    try {
+      env.SEED_SAMPLE_DATA = 'false';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      db.sources.push({
+        id: 'src_override_remap',
+        name: 'naomi-stormfest-remap',
+        display_name: 'Naomi Stormfest Remap',
+        provider_type: 'ics',
+        owner_type: 'naomi',
+        source_category: 'sports',
+        url: 'https://example.com/stormfest-remap.ics',
+        icon: '',
+        prefix: 'N:',
+        fetch_url_secret_ref: null,
+        include_in_child_ics: 1,
+        include_in_family_ics: 1,
+        include_in_child_google_output: 0,
+        is_active: 1,
+        sort_order: 0,
+        poll_interval_minutes: 30,
+        quality_profile: 'standard',
+        created_at: '2026-03-03T00:00:00.000Z',
+        updated_at: '2026-03-03T00:00:00.000Z',
+      });
 
-    let startStamp = '20260320T174527';
-    let endStamp = '20260320T190027';
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        new Response(
-          [
-            'BEGIN:VCALENDAR',
-            'BEGIN:VEVENT',
-            'UID:stormfest-remap-1',
-            'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
-            `DTSTART:${startStamp}`,
-            `DTEND:${endStamp}`,
-            'END:VEVENT',
-            'END:VCALENDAR',
-          ].join('\r\n'),
-          { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+      let startStamp = '20260320T174527';
+      let endStamp = '20260320T190027';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          new Response(
+            [
+              'BEGIN:VCALENDAR',
+              'BEGIN:VEVENT',
+              'UID:stormfest-remap-1',
+              'SUMMARY:C/R Stormfest 2026 - Reign U13C at Oceanside',
+              `DTSTART:${startStamp}`,
+              `DTEND:${endStamp}`,
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ].join('\r\n'),
+            { status: 200, headers: { etag: 'abc123', 'last-modified': 'Mon, 03 Mar 2026 00:00:00 GMT' } }
+          )
         )
-      )
-    );
+      );
 
-    const repo = new D1Repository(db, env);
-    await repo.ensureSupportTables();
-    await repo.ingestSource('src_override_remap');
+      const repo = new D1Repository(db, env);
+      await repo.ensureSupportTables();
+      await repo.ingestSource('src_override_remap');
 
-    const event = db.canonicalEvents[0];
-    const originalInstanceId = db.eventInstances[0].id;
-    await repo.createOverride({
-      eventId: event.id,
-      eventInstanceId: originalInstanceId,
-      overrideType: 'skip',
-      payload: {},
-      actorRole: 'editor',
-    });
+      const event = db.canonicalEvents[0];
+      const originalInstanceId = db.eventInstances[0].id;
+      await repo.createOverride({
+        eventId: event.id,
+        eventInstanceId: originalInstanceId,
+        overrideType: 'skip',
+        payload: {},
+        actorRole: 'editor',
+      });
 
-    startStamp = '20260320T184527';
-    endStamp = '20260320T200027';
-    await repo.ingestSource('src_override_remap');
+      startStamp = '20260320T184527';
+      endStamp = '20260320T200027';
+      await repo.ingestSource('src_override_remap');
 
-    const movedInstance = db.eventInstances.find((row) => !row.source_deleted);
-    expect(movedInstance.id).not.toBe(originalInstanceId);
-    expect(db.eventOverrides[0].event_instance_id).toBe(movedInstance.id);
-    expect(db.outputRules.filter((rule) => rule.event_instance_id === movedInstance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
+      const movedInstance = db.eventInstances.find((row) => !row.source_deleted);
+      expect(movedInstance.id).not.toBe(originalInstanceId);
+      expect(db.eventOverrides[0].event_instance_id).toBe(movedInstance.id);
+      expect(db.outputRules.filter((rule) => rule.event_instance_id === movedInstance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('deletes stale google output events when a source is disabled', async () => {
@@ -5594,7 +5606,106 @@ describe('family-scheduling worker', () => {
     expect(postedGoogleEvent.start.dateTime.endsWith('Z')).toBe(false);
   });
 
-  it('keeps recurring floating-time events in their source timezone for ICS and Google output', async () => {
+  it('renders floating-time family feed events as UTC using the configured fallback timezone', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.DEFAULT_LOOKBACK_DAYS = '36500';
+    env.INGEST_PAST_RETENTION_DAYS = '36500';
+    env.DEFAULT_FLOATING_TIMEZONE = 'America/Vancouver';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_family_floating_fallback',
+      target_type: 'ics',
+      slug: 'family',
+      display_name: 'Family Feed',
+      calendar_id: null,
+      ownership_mode: null,
+      is_system: 1,
+      is_active: 1,
+      created_at: '2026-01-03T00:00:00.000Z',
+      updated_at: '2026-01-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_family_floating_fallback',
+      name: 'family-floating-fallback',
+      display_name: 'Family Floating Fallback',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/family-floating-fallback.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-01-03T00:00:00.000Z',
+      updated_at: '2026-01-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push({
+      id: 'stl_family_floating_fallback',
+      source_id: 'src_family_floating_fallback',
+      target_id: 'outt_family_floating_fallback',
+      target_key: 'family',
+      target_type: 'ics',
+      icon: '',
+      prefix: '',
+      sort_order: 0,
+      is_enabled: 1,
+      created_at: '2026-01-03T00:00:00.000Z',
+      updated_at: '2026-01-03T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, options = {}) => {
+        if (String(url) === 'https://example.com/family-floating-fallback.ics') {
+          return new Response(
+            [
+              'BEGIN:VCALENDAR',
+              'VERSION:2.0',
+              'BEGIN:VEVENT',
+              'UID:family-floating-fallback-1',
+              'SUMMARY:School Assembly',
+              'DTSTART:20260112T090000',
+              'DTEND:20260112T100000',
+              'END:VEVENT',
+              'END:VCALENDAR',
+            ].join('\r\n'),
+            {
+              status: 200,
+              headers: {
+                etag: 'float-fallback-123',
+                'last-modified': 'Mon, 03 Jan 2026 00:00:00 GMT',
+              },
+            }
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+      })
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_family_floating_fallback');
+
+    expect(db.canonicalEvents[0]?.timezone).toBe('America/Vancouver');
+
+    const familyFeed = await repo.generateFeed({
+      target: 'family',
+      calendarName: 'Family Combined',
+      lookbackDays: 36500,
+    });
+
+    expect(familyFeed).toContain('DTSTART:20260112T170000Z');
+    expect(familyFeed).toContain('DTEND:20260112T180000Z');
+    expect(familyFeed).not.toContain('DTSTART:20260112T090000Z');
+  });
+
+  it('renders recurring floating-time events as UTC in ICS and local time for Google output', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     env.DEFAULT_LOOKBACK_DAYS = '36500';
     env.INGEST_PAST_RETENTION_DAYS = '36500';
@@ -5729,8 +5840,8 @@ describe('family-scheduling worker', () => {
       lookbackDays: 36500,
     });
 
-    expect(familyFeed).toContain('DTSTART;TZID=America/New_York:20260310T090000');
-    expect(familyFeed).toContain('DTSTART;TZID=America/New_York:20260311T090000');
+    expect(familyFeed).toContain('DTSTART:20260310T130000Z');
+    expect(familyFeed).toContain('DTSTART:20260311T130000Z');
 
     await drainQueue(env);
 

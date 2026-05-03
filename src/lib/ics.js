@@ -34,6 +34,18 @@ function normalizeTimeZone(timeZone) {
   return value || 'UTC';
 }
 
+function buildNumericDateTimeParts(parts) {
+  if (!parts) return null;
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
+}
+
 function parseDateTimeParts(value) {
   const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z)?$/);
   if (!match) return null;
@@ -83,12 +95,116 @@ function formatDateTimeParts(parts, style) {
   return `${parts.year}${parts.month}${parts.day}T${parts.hour}${parts.minute}${parts.second}`;
 }
 
+const TIMEZONE_FORMATTER_CACHE = new Map();
+
+function getTimeZoneFormatter(timeZone) {
+  const zone = normalizeTimeZone(timeZone);
+  if (!TIMEZONE_FORMATTER_CACHE.has(zone)) {
+    // Let Intl reject unsupported TZIDs here instead of silently coercing them.
+    // If we later add upstream timezone validation, centralize that behavior at this boundary.
+    TIMEZONE_FORMATTER_CACHE.set(
+      zone,
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: zone,
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    );
+  }
+  return TIMEZONE_FORMATTER_CACHE.get(zone);
+}
+
+function formatInTimeZoneParts(timestamp, timeZone) {
+  const formatter = getTimeZoneFormatter(timeZone);
+  if (!formatter) return null;
+  const parts = formatter.formatToParts(new Date(timestamp));
+  const values = {};
+  for (const part of parts) {
+    if (part.type === 'literal') continue;
+    values[part.type] = part.value;
+  }
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+  };
+}
+
+function datePartsToEpochUtc(parts) {
+  if (!parts) return Number.NaN;
+  return Date.UTC(
+    parts.year,
+    (parts.month || 1) - 1,
+    parts.day || 1,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0
+  );
+}
+
+function zonedDateTimeToEpoch(parts, timeZone) {
+  const targetPseudo = datePartsToEpochUtc(parts);
+  let guess = targetPseudo;
+  // Ambiguous local times during DST fall-back map to two valid instants.
+  // This converges to whichever instant Intl resolves first for the repeated wall-clock hour.
+  // We accept that bias here because compatibility feeds only need a stable absolute instant.
+  for (let i = 0; i < 3; i += 1) {
+    const zonedParts = formatInTimeZoneParts(guess, timeZone);
+    if (!zonedParts) break;
+    const zonedPseudo = datePartsToEpochUtc(zonedParts);
+    const delta = targetPseudo - zonedPseudo;
+    guess += delta;
+    if (Math.abs(delta) < 60000) break;
+  }
+  return guess;
+}
+
 function formatFloatingIsoFromDate(date) {
   const pad = (value) => String(value).padStart(2, '0');
   return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}.000`;
 }
 
-export function formatEventDateTimeValue(value, timeZone, { style = 'ics' } = {}) {
+function resolveFloatingTimeZone(rawValue, timeZone, floatingTimeZoneFallback) {
+  const zone = normalizeTimeZone(timeZone);
+  const parsed = parseDateTimeParts(rawValue);
+  if (!parsed || parsed.isUtc || zone !== 'UTC') {
+    return zone;
+  }
+  return normalizeTimeZone(floatingTimeZoneFallback);
+}
+
+function toAbsoluteDate(value, timeZone, { floatingTimeZoneFallback = 'UTC' } = {}) {
+  const raw = String(value || '');
+  if (!raw) return null;
+
+  const parsed = parseDateTimeParts(raw);
+  if (!parsed) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  if (parsed.isUtc) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const numericParts = buildNumericDateTimeParts(parsed);
+  const zone = resolveFloatingTimeZone(raw, timeZone, floatingTimeZoneFallback);
+  if (zone === 'UTC') {
+    return new Date(datePartsToEpochUtc(numericParts));
+  }
+  return new Date(zonedDateTimeToEpoch(numericParts, zone));
+}
+
+export function formatEventDateTimeValue(value, timeZone, { style = 'ics', timedStyle = 'preserve', floatingTimeZoneFallback = 'UTC' } = {}) {
   const raw = String(value || '');
   if (!raw) return null;
 
@@ -103,7 +219,17 @@ export function formatEventDateTimeValue(value, timeZone, { style = 'ics' } = {}
     };
   }
 
-  const zone = normalizeTimeZone(timeZone);
+  if (timedStyle === 'utc') {
+    const date = toAbsoluteDate(raw, timeZone, { floatingTimeZoneFallback });
+    if (!date || Number.isNaN(date.getTime())) return null;
+    return {
+      type: 'dateTime',
+      value: style === 'google' ? date.toISOString() : formatIcsDate(date),
+      timeZone: 'UTC',
+    };
+  }
+
+  const zone = resolveFloatingTimeZone(raw, timeZone, floatingTimeZoneFallback);
   let parts = parsed;
   let useUtcSuffix = zone === 'UTC' || parsed.isUtc;
 
@@ -120,7 +246,7 @@ export function formatEventDateTimeValue(value, timeZone, { style = 'ics' } = {}
   };
 }
 
-function parseDateValue(raw, tzid, fallbackTz) {
+function parseDateValue(raw, tzid, fallbackTz, defaultFloatingTimeZone = 'UTC') {
   if (!raw) return null;
   if (/^\d{8}$/.test(raw)) {
     return { iso: `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T00:00:00.000Z`, tzid: tzid || 'UTC', isDateOnly: true };
@@ -132,14 +258,14 @@ function parseDateValue(raw, tzid, fallbackTz) {
   if (/^\d{8}T\d{6}$/.test(raw)) {
     // Floating local time — no Z suffix so the consumer can treat it as wall-clock
     const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(9, 11)}:${raw.slice(11, 13)}:${raw.slice(13, 15)}.000`;
-    return { iso, tzid: tzid || fallbackTz || 'UTC', isDateOnly: false };
+    return { iso, tzid: tzid || fallbackTz || defaultFloatingTimeZone || 'UTC', isDateOnly: false };
   }
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return null;
   return { iso: date.toISOString(), tzid: tzid || 'UTC', isDateOnly: false };
 }
 
-export function parseICS(text) {
+export function parseICS(text, { defaultFloatingTimeZone = 'UTC' } = {}) {
   const unfolded = unfoldLines(text);
   const lines = unfolded.split(/\r?\n/);
   const events = [];
@@ -178,10 +304,10 @@ export function parseICS(text) {
     if (name === 'LOCATION') current.location = unescapeText(value);
     if (name === 'STATUS') current.status = value.toLowerCase();
     if (name === 'RRULE') current.rrule = value;
-    if (name === 'DTSTART') current.dtstart = parseDateValue(value, params.TZID, calendarTimezone);
-    if (name === 'DTEND') current.dtend = parseDateValue(value, params.TZID, calendarTimezone);
-    if (name === 'RECURRENCE-ID') current.recurrenceId = parseDateValue(value, params.TZID, calendarTimezone)?.iso || value;
-    if (name === 'LAST-MODIFIED') current.lastModified = parseDateValue(value, params.TZID, calendarTimezone)?.iso || value;
+    if (name === 'DTSTART') current.dtstart = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+    if (name === 'DTEND') current.dtend = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+    if (name === 'RECURRENCE-ID') current.recurrenceId = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone)?.iso || value;
+    if (name === 'LAST-MODIFIED') current.lastModified = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone)?.iso || value;
   }
 
   return events
@@ -273,7 +399,7 @@ function foldLine(line) {
   return parts.join('\r\n');
 }
 
-export function buildICS({ calendarName, description, events }) {
+export function buildICS({ calendarName, description, events, floatingTimeZoneFallback = 'UTC' }) {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -288,19 +414,26 @@ export function buildICS({ calendarName, description, events }) {
     lines.push('BEGIN:VEVENT');
     lines.push(`UID:${event.uid}`);
     lines.push(`DTSTAMP:${formatIcsDate(new Date())}`);
-    const start = formatEventDateTimeValue(event.startAt, event.timezone, { style: 'ics' });
-    const end = formatEventDateTimeValue(event.endAt, event.timezone, { style: 'ics' });
+    // Compatibility feeds emit timed events as absolute UTC instants rather than TZID-qualified
+    // local times. This trades original timezone fidelity for more consistent subscriber behavior
+    // across clients that disagree on floating/TZID handling.
+    const start = formatEventDateTimeValue(event.startAt, event.timezone, {
+      style: 'ics',
+      timedStyle: 'utc',
+      floatingTimeZoneFallback,
+    });
+    const end = formatEventDateTimeValue(event.endAt, event.timezone, {
+      style: 'ics',
+      timedStyle: 'utc',
+      floatingTimeZoneFallback,
+    });
     if (start?.type === 'date') {
       lines.push(`DTSTART;VALUE=DATE:${start.value}`);
-    } else if (start?.timeZone && start.timeZone !== 'UTC') {
-      lines.push(`DTSTART;TZID=${start.timeZone}:${start.value}`);
     } else if (start?.value) {
       lines.push(`DTSTART:${start.value}`);
     }
     if (end?.type === 'date') {
       lines.push(`DTEND;VALUE=DATE:${end.value}`);
-    } else if (end?.timeZone && end.timeZone !== 'UTC') {
-      lines.push(`DTEND;TZID=${end.timeZone}:${end.value}`);
     } else if (end?.value) {
       lines.push(`DTEND:${end.value}`);
     }

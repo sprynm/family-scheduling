@@ -52,6 +52,7 @@
     "CALENDAR_NAME_FAMILY": "Family Combined",
     "CALENDAR_NAME_GRAYSON": "Grayson Combined",
     "CALENDAR_NAME_NAOMI": "Naomi Combined",
+    "DEFAULT_FLOATING_TIMEZONE": "America/Vancouver",
     "DEFAULT_LOOKBACK_DAYS": "7",
     "RECURRENCE_HORIZON_DAYS": "180",
     "INGEST_PAST_RETENTION_DAYS": "30",
