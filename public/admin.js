@@ -1,4 +1,5 @@
 const COPY_RESET_MS = 1500;
+const JOB_POLL_MS = 4000;
 const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
 const ICON_OPTIONS = [
   { value: '', label: 'None' },
@@ -54,6 +55,7 @@ const statusEl = document.getElementById('status');
     const metricJobs = document.getElementById('metric-jobs');
     const metricTargets = document.getElementById('metric-targets');
     const jobsBody = document.getElementById('jobs-body');
+    const jobStatusEl = document.getElementById('job-status');
 
     const sourceRuleState = new Map();
     let sourceTitleRulesDirty = false;
@@ -62,6 +64,8 @@ const statusEl = document.getElementById('status');
     let allInstances = [];
     let activeOverrides = [];
     let autoRefreshTimer = null;
+    let dashboardGeneration = 0;
+    let renderedJobsHtml = null;
 
     function setStatus(message, isError) {
       statusEl.textContent = message;
@@ -402,7 +406,42 @@ const statusEl = document.getElementById('status');
       return response.json();
     }
 
+    function renderJobs(jobs) {
+      metricJobs.textContent = String(jobs.length);
+      const rowsHtml = jobs.slice(0, 20).map((j) =>
+        '<tr><td>' + escapeHtml(j.job_type) + '</td><td>' + escapeHtml(j.scope_type || 'system') + '</td><td>' + escapeHtml(j.status) + (j.error_json ? '<div class="hint" style="max-width:24rem; white-space:normal; color:#7a1c1c">' + escapeHtml((() => { try { return JSON.parse(j.error_json || '{}').message || ''; } catch { return ''; } })()) + '</div>' : '') + '</td></tr>'
+      ).join('');
+      if (rowsHtml !== renderedJobsHtml) {
+        renderRows(jobsBody, rowsHtml, 3);
+        renderedJobsHtml = rowsHtml;
+      }
+      const activeCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+      jobStatusEl.textContent = activeCount
+        ? activeCount + ' job' + (activeCount === 1 ? '' : 's') + ' queued or running. Updates automatically.'
+        : 'No queued or running jobs. Use Refresh to update source and event details.';
+      return activeCount;
+    }
+
+    function scheduleJobPoll(generation) {
+      autoRefreshTimer = setTimeout(() => pollJobs(generation), JOB_POLL_MS);
+    }
+
+    async function pollJobs(generation) {
+      autoRefreshTimer = null;
+      try {
+        const payload = await fetchJson('/api/jobs');
+        if (generation !== dashboardGeneration) return;
+        // Background progress must never rebuild configuration forms or drawers.
+        if (renderJobs(payload.jobs || [])) scheduleJobPoll(generation);
+      } catch (err) {
+        if (generation !== dashboardGeneration) return;
+        jobStatusEl.textContent = 'Job status update failed: ' + (err.message || String(err)) + '. Retrying automatically.';
+        scheduleJobPoll(generation);
+      }
+    }
+
     async function loadDashboard() {
+      const generation = ++dashboardGeneration;
       const editingId = sourceForm.getAttribute('data-editing-id') || '';
       refreshBtn.disabled = true;
       rebuildBtn.disabled = true;
@@ -426,10 +465,8 @@ const statusEl = document.getElementById('status');
         const outputs = targetsPayload.targets || [];
         const icsTargets = outputs.filter((target) => target.target_type === 'ics' && Number(target.is_system));
         const googleTargets = outputs.filter((target) => target.target_type === 'google');
-        const activeJobs = jobs.filter((job) => job.status === 'queued' || job.status === 'running');
         metricSources.textContent = String(sources.length);
         metricEvents.textContent = String(events.length);
-        metricJobs.textContent = String(jobs.length);
         metricTargets.textContent = String(googleTargets.length);
 
         sourceIcsOutputsEl.innerHTML = icsTargets
@@ -663,14 +700,7 @@ const statusEl = document.getElementById('status');
           });
         });
 
-        // jobs
-        renderRows(
-          jobsBody,
-          jobs.slice(0, 20).map((j) =>
-            '<tr><td>' + (j.job_type || '') + '</td><td>' + (j.scope_type || 'system') + '</td><td>' + (j.status || '') + (j.error_json ? '<div class="hint" style="max-width:24rem; white-space:normal; color:#7a1c1c">' + escapeHtml((() => { try { return JSON.parse(j.error_json || '{}').message || ''; } catch { return ''; } })()) + '</div>' : '') + '</td></tr>'
-          ).join(''),
-          3
-        );
+        const activeJobCount = renderJobs(jobs);
 
         if (editingId) {
           const source = sources.find((s) => s.id === editingId);
@@ -687,14 +717,8 @@ const statusEl = document.getElementById('status');
           }
         }
 
-        if (activeJobs.length) {
-          setStatus('Loaded. ' + activeJobs.length + ' job' + (activeJobs.length === 1 ? '' : 's') + ' still running.', false);
-          autoRefreshTimer = setTimeout(() => {
-            loadDashboard();
-          }, 4000);
-        } else {
-          setStatus('Loaded.', false);
-        }
+        setStatus('Loaded.', false);
+        if (activeJobCount && generation === dashboardGeneration) scheduleJobPoll(generation);
       } catch (err) {
         setStatus('Load failed: ' + (err.message || String(err)), true);
       } finally {

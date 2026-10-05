@@ -11,6 +11,17 @@ At closeout of a unit of work, insights should be compacted into:
 - plan.md
 - external knowledge base if appropriate
 
+## 2026-10-05
+
+### Admin background polling
+
+- Replaced automatic full-dashboard reloads with job-only polling. Queued/running jobs no longer overwrite unsaved source fields, output selections, title rules, or event drawers.
+- Moved progress and polling failures into Recent Jobs. Polling stops when no jobs remain active; use Refresh to update source and event details.
+- Ignore old poll responses after an explicit dashboard refresh, and avoid replacing unchanged job rows.
+- Local browser fixtures in Firefox and Chrome confirmed repeated polls request only `/api/jobs` and preserve unsaved configuration. Firefox also confirmed polling failures retry without resetting forms and completion updates job status without reloading the dashboard.
+- JavaScript syntax and diff checks passed. Existing Worker suite: 73/74 tests passed; the unchanged effective-source-state test uses a June 10 event now outside the ingest retention window and fails its first queued-job assertion.
+- Notion execution task: https://www.notion.so/3f067220cae38105b9c0d2eedc2d7183. Production release approved; final delivery evidence is recorded in the task. Authenticated live admin data was unavailable in the test browser.
+
 ## 2026-05-03
 
 ### Session Notes
