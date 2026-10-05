@@ -1,5 +1,7 @@
 const COPY_RESET_MS = 1500;
 const JOB_POLL_MS = 4000;
+const JOB_POLL_MAX_MS = 60000;
+const JOB_POLL_MAX_FAILURES = 5;
 const SYSTEM_TARGET_SLUGS = new Set(['family', 'grayson', 'naomi']);
 const ICON_OPTIONS = [
   { value: '', label: 'None' },
@@ -401,7 +403,9 @@ const statusEl = document.getElementById('status');
         } catch {
           message = response.status + ' ' + response.statusText;
         }
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        throw error;
       }
       return response.json();
     }
@@ -416,28 +420,200 @@ const statusEl = document.getElementById('status');
         renderedJobsHtml = rowsHtml;
       }
       const activeCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
-      jobStatusEl.textContent = activeCount
+      setJobStatus(activeCount
         ? activeCount + ' job' + (activeCount === 1 ? '' : 's') + ' queued or running. Updates automatically.'
-        : 'No queued or running jobs. Use Refresh to update source and event details.';
+        : 'No queued or running jobs.');
       return activeCount;
     }
 
-    function scheduleJobPoll(generation) {
-      autoRefreshTimer = setTimeout(() => pollJobs(generation), JOB_POLL_MS);
+    function setJobStatus(message) {
+      if (jobStatusEl) jobStatusEl.textContent = message;
     }
 
-    async function pollJobs(generation) {
+    function scheduleJobPoll(generation, failures = 0) {
+      const delay = Math.min(JOB_POLL_MS * 2 ** failures, JOB_POLL_MAX_MS);
+      autoRefreshTimer = setTimeout(() => pollJobs(generation, failures), delay);
+    }
+
+    async function pollJobs(generation, failures) {
       autoRefreshTimer = null;
       try {
         const payload = await fetchJson('/api/jobs');
         if (generation !== dashboardGeneration) return;
         // Background progress must never rebuild configuration forms or drawers.
-        if (renderJobs(payload.jobs || [])) scheduleJobPoll(generation);
+        if (renderJobs(payload.jobs || [])) {
+          scheduleJobPoll(generation);
+          return;
+        }
       } catch (err) {
         if (generation !== dashboardGeneration) return;
-        jobStatusEl.textContent = 'Job status update failed: ' + (err.message || String(err)) + '. Retrying automatically.';
-        scheduleJobPoll(generation);
+        const message = err.message || String(err);
+        const nextFailures = failures + 1;
+        if (err.status === 401 || err.status === 403 || nextFailures >= JOB_POLL_MAX_FAILURES) {
+          setJobStatus('Job updates stopped: ' + message + '. Use Refresh to retry.');
+          return;
+        }
+        setJobStatus('Job status update failed: ' + message + '. Retrying automatically.');
+        scheduleJobPoll(generation, nextFailures);
+        return;
       }
+      await refreshSourceStatus(generation);
+    }
+
+    // Jobs finished: refresh read-only source status and metrics, leaving forms and drawers alone.
+    async function refreshSourceStatus(generation) {
+      try {
+        const sourcesPayload = await fetchJson('/api/sources');
+        if (generation !== dashboardGeneration) return;
+        const sources = sourcesPayload.sources || [];
+        renderSourceMetrics(sources);
+        renderSources(sources);
+      } catch (err) {
+        if (generation !== dashboardGeneration) return;
+        setJobStatus('Jobs finished, but source details could not refresh: ' + (err.message || String(err)) + '. Use Refresh to retry.');
+      }
+    }
+
+    // Event totals come from /api/sources; the /api/events list query scans every event.
+    function renderSourceMetrics(sources) {
+      metricSources.textContent = String(sources.length);
+      metricEvents.textContent = String(sources.reduce((sum, s) => sum + Number(s.event_count || 0), 0));
+    }
+
+    function renderSources(sources) {
+      const sortedSources = [...sources].sort((a, b) => {
+        const al = buildOutputLabels(a), bl = buildOutputLabels(b);
+        if (al !== bl) return al.localeCompare(bl);
+        return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''));
+      });
+      renderRows(
+        sourcesBody,
+        sortedSources.slice(0, 30).map((s) => {
+          const lastFetch = formatUiDate(s.last_fetched_at, { includeTime: true });
+          const status = buildSourceStatus(s);
+          const syncCounts = s.google_sync_counts || {};
+          const hasGoogleTarget = Array.isArray(s.target_links) && s.target_links.some((link) => link.target_type === 'google');
+          const statusStyle = status.tone === 'ok'
+            ? 'color:#1a7f37'
+            : status.tone === 'hint'
+              ? 'color:#6b7280'
+              : status.tone === 'pending'
+                ? 'color:#9a6700'
+                : status.tone === 'warn'
+                  ? 'color:#9a6700'
+                  : 'color:#a00';
+          const detailStyle = status.tone === 'pending' || status.tone === 'warn'
+            ? 'color:#9a6700'
+            : status.tone === 'error'
+              ? 'color:#7a1c1c'
+              : 'color:#4b5563';
+          const sourceCell = '<div>' +
+            '<div style="font-weight:600">' + escapeHtml(s.display_name || s.name || '') + '</div>' +
+            '<div class="hint" style="margin-top:0.15rem">' + escapeHtml(s.owner_type || '') + '</div>' +
+            '<div class="hint" style="margin-top:0.25rem; max-width:22rem; white-space:normal">' + escapeHtml(buildOutputLabels(s) || 'No outputs') + '</div>' +
+            '</div>';
+          const eventsCell = '<div>' +
+            '<div style="font-weight:600">' + Number(s.event_count || 0) + '</div>' +
+            '<div class="hint">from feed</div>' +
+            '</div>';
+          const syncDefCell = '<div>' +
+            '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
+            '<div>' + (hasGoogleTarget ? 'Deferred: ' + Number(syncCounts.deferred || 0) : 'Deferred: n/a') + '</div>' +
+            '</div>';
+          const fallbackSummary = buildUidFallbackSummary(s);
+          const statusBody = '<div class="hint status-stack-body">' +
+            '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
+            '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+            (fallbackSummary ? '<div>' + escapeHtml(fallbackSummary) + '</div>' : '') +
+            '</div>' +
+            (status.detail ? '<div class="hint status-stack-detail" style="' + detailStyle + '" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '');
+          const statusCell = status.tone === 'ok'
+            ? '<details class="status-stack status-stack-ok"><summary><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><span class="hint">details</span></summary><div class="status-stack-panel">' + statusBody + '</div></details>'
+            : '<div class="status-stack"><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><div class="status-stack-panel">' + statusBody + '</div></div>';
+          return '<tr>' +
+          '<td>' + sourceCell + '</td>' +
+          '<td>' + eventsCell + '</td>' +
+          '<td>' + syncDefCell + '</td>' +
+          '<td>' + statusCell + '</td>' +
+          '<td><div class="actions">' +
+          '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
+          '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-uid-fallback="' + (Number(s.uid_fallback_enabled || 0) ? '1' : '0') + '" data-source-uid-fallback-report="' + encodeURIComponent(JSON.stringify(s.uid_fallback_report || null)) + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
+          '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
+          '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
+          '</div></td></tr>';
+        }).join(''),
+        5
+      );
+
+      document.querySelectorAll('.rebuild-source').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-source-id');
+          if (!id) return;
+          btn.disabled = true;
+          setStatus('Queueing rebuild...', false);
+          try {
+            const p = await fetchJson('/api/sources/' + encodeURIComponent(id) + '/rebuild', { method: 'POST' });
+            setStatus('Rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
+            await loadDashboard();
+          } catch (err) {
+            setStatus('Rebuild failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+      });
+
+      document.querySelectorAll('.change-source').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-source-id');
+          const name = btn.getAttribute('data-source-name') || '';
+          const url = btn.getAttribute('data-source-url') || '';
+          const titleRulesText = decodeURIComponent(btn.getAttribute('data-source-title-rules') || '');
+          const uidFallbackEnabled = btn.getAttribute('data-source-uid-fallback') === '1';
+          let uidFallbackReport = null;
+          try {
+            uidFallbackReport = JSON.parse(decodeURIComponent(btn.getAttribute('data-source-uid-fallback-report') || 'null'));
+          } catch {}
+          let links = [];
+          try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
+          applySourceFormState(
+            { id, name, url, titleRulesText, uidFallbackEnabled, uidFallbackReport, links },
+            { focus: true, scroll: true }
+          );
+        });
+      });
+
+      document.querySelectorAll('.disable-source').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-source-id');
+          if (!id) return;
+          btn.disabled = true;
+          try {
+            await fetchJson('/api/sources/' + encodeURIComponent(id), { method: 'DELETE' });
+            setStatus('Source disabled.', false);
+            await loadDashboard();
+          } catch (err) {
+            setStatus('Disable failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+      });
+
+      document.querySelectorAll('.delete-source').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-source-id');
+          if (!id) return;
+          if (!confirm('Permanently delete this source and all its events? This cannot be undone.')) return;
+          btn.disabled = true;
+          try {
+            await fetchJson('/api/sources/' + encodeURIComponent(id) + '?permanent=true', { method: 'DELETE' });
+            setStatus('Source deleted.', false);
+            await loadDashboard();
+          } catch (err) {
+            setStatus('Delete failed: ' + (err.message || String(err)), true);
+            btn.disabled = false;
+          }
+        });
+      });
     }
 
     async function loadDashboard() {
@@ -451,22 +627,21 @@ const statusEl = document.getElementById('status');
       }
       setStatus('Loading...', false);
       try {
-        const [sourcesPayload, eventsPayload, jobsPayload, targetsPayload, contractsPayload] = await Promise.all([
+        const [sourcesPayload, jobsPayload, targetsPayload, contractsPayload] = await Promise.all([
           fetchJson('/api/sources'),
-          fetchJson('/api/events?limit=15'),
           fetchJson('/api/jobs'),
           fetchJson('/api/targets'),
           fetchJson('/api/feed-contracts'),
         ]);
+        // A newer load owns the page; stale results must not overwrite it.
+        if (generation !== dashboardGeneration) return;
 
         const sources = sourcesPayload.sources || [];
-        const events = eventsPayload.events || [];
         const jobs = jobsPayload.jobs || [];
         const outputs = targetsPayload.targets || [];
         const icsTargets = outputs.filter((target) => target.target_type === 'ics' && Number(target.is_system));
         const googleTargets = outputs.filter((target) => target.target_type === 'google');
-        metricSources.textContent = String(sources.length);
-        metricEvents.textContent = String(events.length);
+        renderSourceMetrics(sources);
         metricTargets.textContent = String(googleTargets.length);
 
         sourceIcsOutputsEl.innerHTML = icsTargets
@@ -505,143 +680,11 @@ const statusEl = document.getElementById('status');
 
         // load modified events table
         await loadModifiedEvents();
+        if (generation !== dashboardGeneration) return;
 
         syncTargetRuleInputs();
 
-        // sources table
-        const sortedSources = [...sources].sort((a, b) => {
-          const al = buildOutputLabels(a), bl = buildOutputLabels(b);
-          if (al !== bl) return al.localeCompare(bl);
-          return String(a.display_name || a.name || '').localeCompare(String(b.display_name || b.name || ''));
-        });
-        renderRows(
-          sourcesBody,
-          sortedSources.slice(0, 30).map((s) => {
-            const lastFetch = formatUiDate(s.last_fetched_at, { includeTime: true });
-            const status = buildSourceStatus(s);
-            const syncCounts = s.google_sync_counts || {};
-            const hasGoogleTarget = Array.isArray(s.target_links) && s.target_links.some((link) => link.target_type === 'google');
-            const statusStyle = status.tone === 'ok'
-              ? 'color:#1a7f37'
-              : status.tone === 'hint'
-                ? 'color:#6b7280'
-                : status.tone === 'pending'
-                  ? 'color:#9a6700'
-                  : status.tone === 'warn'
-                    ? 'color:#9a6700'
-                    : 'color:#a00';
-            const detailStyle = status.tone === 'pending' || status.tone === 'warn'
-              ? 'color:#9a6700'
-              : status.tone === 'error'
-                ? 'color:#7a1c1c'
-                : 'color:#4b5563';
-            const sourceCell = '<div>' +
-              '<div style="font-weight:600">' + escapeHtml(s.display_name || s.name || '') + '</div>' +
-              '<div class="hint" style="margin-top:0.15rem">' + escapeHtml(s.owner_type || '') + '</div>' +
-              '<div class="hint" style="margin-top:0.25rem; max-width:22rem; white-space:normal">' + escapeHtml(buildOutputLabels(s) || 'No outputs') + '</div>' +
-              '</div>';
-            const eventsCell = '<div>' +
-              '<div style="font-weight:600">' + Number(s.event_count || 0) + '</div>' +
-              '<div class="hint">from feed</div>' +
-              '</div>';
-            const syncDefCell = '<div>' +
-              '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
-              '<div>' + (hasGoogleTarget ? 'Deferred: ' + Number(syncCounts.deferred || 0) : 'Deferred: n/a') + '</div>' +
-              '</div>';
-            const fallbackSummary = buildUidFallbackSummary(s);
-            const statusBody = '<div class="hint status-stack-body">' +
-              '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
-              '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
-              (fallbackSummary ? '<div>' + escapeHtml(fallbackSummary) + '</div>' : '') +
-              '</div>' +
-              (status.detail ? '<div class="hint status-stack-detail" style="' + detailStyle + '" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '');
-            const statusCell = status.tone === 'ok'
-              ? '<details class="status-stack status-stack-ok"><summary><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><span class="hint">details</span></summary><div class="status-stack-panel">' + statusBody + '</div></details>'
-              : '<div class="status-stack"><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><div class="status-stack-panel">' + statusBody + '</div></div>';
-            return '<tr>' +
-            '<td>' + sourceCell + '</td>' +
-            '<td>' + eventsCell + '</td>' +
-            '<td>' + syncDefCell + '</td>' +
-            '<td>' + statusCell + '</td>' +
-            '<td><div class="actions">' +
-            '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
-            '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-uid-fallback="' + (Number(s.uid_fallback_enabled || 0) ? '1' : '0') + '" data-source-uid-fallback-report="' + encodeURIComponent(JSON.stringify(s.uid_fallback_report || null)) + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
-            '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
-            '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
-            '</div></td></tr>';
-          }).join(''),
-          5
-        );
-
-        document.querySelectorAll('.rebuild-source').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.getAttribute('data-source-id');
-            if (!id) return;
-            btn.disabled = true;
-            setStatus('Queueing rebuild...', false);
-            try {
-              const p = await fetchJson('/api/sources/' + encodeURIComponent(id) + '/rebuild', { method: 'POST' });
-              setStatus('Rebuild queued. Job: ' + (p.job?.id || 'unknown'), false);
-              await loadDashboard();
-            } catch (err) {
-              setStatus('Rebuild failed: ' + (err.message || String(err)), true);
-              btn.disabled = false;
-            }
-          });
-        });
-
-        document.querySelectorAll('.change-source').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const id = btn.getAttribute('data-source-id');
-            const name = btn.getAttribute('data-source-name') || '';
-            const url = btn.getAttribute('data-source-url') || '';
-            const titleRulesText = decodeURIComponent(btn.getAttribute('data-source-title-rules') || '');
-            const uidFallbackEnabled = btn.getAttribute('data-source-uid-fallback') === '1';
-            let uidFallbackReport = null;
-            try {
-              uidFallbackReport = JSON.parse(decodeURIComponent(btn.getAttribute('data-source-uid-fallback-report') || 'null'));
-            } catch {}
-            let links = [];
-            try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
-            applySourceFormState(
-              { id, name, url, titleRulesText, uidFallbackEnabled, uidFallbackReport, links },
-              { focus: true, scroll: true }
-            );
-          });
-        });
-
-        document.querySelectorAll('.disable-source').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.getAttribute('data-source-id');
-            if (!id) return;
-            btn.disabled = true;
-            try {
-              await fetchJson('/api/sources/' + encodeURIComponent(id), { method: 'DELETE' });
-              setStatus('Source disabled.', false);
-              await loadDashboard();
-            } catch (err) {
-              setStatus('Disable failed: ' + (err.message || String(err)), true);
-              btn.disabled = false;
-            }
-          });
-        });
-
-        document.querySelectorAll('.delete-source').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.getAttribute('data-source-id');
-            if (!id) return;
-            if (!confirm('Permanently delete this source and all its events? This cannot be undone.')) return;
-            btn.disabled = true;
-            try {
-              await fetchJson('/api/sources/' + encodeURIComponent(id) + '?permanent=true', { method: 'DELETE' });
-              setStatus('Source deleted.', false);
-              await loadDashboard();
-            } catch (err) {
-              setStatus('Delete failed: ' + (err.message || String(err)), true);
-              btn.disabled = false;
-            }
-          });
-        });
+        renderSources(sources);
 
         // google outputs table
         renderRows(
@@ -718,12 +761,16 @@ const statusEl = document.getElementById('status');
         }
 
         setStatus('Loaded.', false);
-        if (activeJobCount && generation === dashboardGeneration) scheduleJobPoll(generation);
+        if (activeJobCount) scheduleJobPoll(generation);
       } catch (err) {
+        if (generation !== dashboardGeneration) return;
         setStatus('Load failed: ' + (err.message || String(err)), true);
+        setJobStatus('Job status unavailable. Use Refresh to retry.');
       } finally {
-        refreshBtn.disabled = false;
-        rebuildBtn.disabled = false;
+        if (generation === dashboardGeneration) {
+          refreshBtn.disabled = false;
+          rebuildBtn.disabled = false;
+        }
       }
     }
 

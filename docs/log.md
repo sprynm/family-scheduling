@@ -22,6 +22,24 @@ At closeout of a unit of work, insights should be compacted into:
 - JavaScript syntax and diff checks passed. Existing Worker suite: 73/74 tests passed; the unchanged effective-source-state test uses a June 10 event now outside the ingest retention window and fails its first queued-job assertion.
 - Notion execution task: https://www.notion.so/3f067220cae38105b9c0d2eedc2d7183. Production release approved; final delivery evidence is recorded in the task. Authenticated live admin data was unavailable in the test browser.
 
+### Admin polling review follow-up
+
+- Poll failures back off exponentially (4s up to 60s) and stop after 5 consecutive failures or immediately on 401/403; `fetchJson` errors now carry `status`.
+- Superseded `loadDashboard` calls bail out after each await, so a slow earlier load can no longer overwrite a newer render; a failed load clears the "Updates automatically" hint.
+- When the last active job finishes, polling refreshes the sources table and source/event metrics via `renderSources` (extracted from `loadDashboard`) without touching forms or drawers.
+- Dashboard no longer fetches `/api/events?limit=15`: it was only used for the Events metric (capped at 15) and read ~9,084 rows per call. The metric now sums `event_count` from `/api/sources`.
+- Verified with a Node VM harness (stubbed DOM, mocked fetch/timers): 401 stop, backoff 4s→60s then stop, backoff reset, completion refresh without forms, superseded-load guard, failed-load hint, no `/api/events` fetch. Not exercised in a real browser.
+
+### D1 free-tier read limit exhausted
+
+- Production hit D1's 5M rows/day read limit. `wrangler d1 insights --timePeriod 1d` showed ~12M rows read, almost all from ~900 full admin dashboard loads (`/api/events` 8.2M, `/api/sources` 2.0M, Google sync counts 1.5M), consistent with ~1 hour of the pre-fix 4s full-reload loop while a job stayed queued/running. Source deletes read ~11K rows.
+- Public ICS feeds query D1 live, so they fail until the limit resets at 00:00 UTC.
+- Remaining heavy query: `/api/sources` reads ~1,900 rows per call (snapshot and event-count subqueries).
+- Root cause of the endless polling: 8 `ingest_source` jobs stuck `queued` (attempt_count 0) since 2026-04-01..2026-06-03. Seven belonged to deleted sources; one to the active Family source (`src_59f9bcc378b8e8437590cb4d`), whose queue message was apparently lost. Prune never touches queued/running jobs, and `enqueueJob` dedupes against them, so the Family source likely could not queue a new ingest since 2026-06-03 (it has no retained snapshots).
+- 2026-10-05 ~23:40 UTC: marked those 8 jobs `failed` in production via `wrangler d1 execute --remote` (user approved). No queued/running jobs remain.
+- Prevention: `deleteSource` now fails the source's queued/running jobs (`source` and `source_target` scopes) in the same batch. Each cron run first calls `expireStaleJobs()`, which fails jobs still queued/running after `JOB_STALE_AFTER_HOURS` (default 24; the retry schedule finishes within ~4.3h), so a lost queue message cannot dedupe away future ingests. New tests cover both; suite 75/76 with the same date-dependent effective-source-state failure as before.
+- Note: vitest also collects the deploy snapshot copy in `.wrangler/release-ceb391e/test/`, so failures appear twice.
+
 ## 2026-05-03
 
 ### Session Notes

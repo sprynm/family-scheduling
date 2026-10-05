@@ -941,6 +941,29 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE sync_jobs') && sql.includes("last_error_kind = 'source_deleted'")) {
+      const [finishedAt, errorJson, sourceId, targetScopePattern] = values;
+      const targetScopePrefix = String(targetScopePattern).replace(/%$/, '');
+      for (const job of this.syncJobs) {
+        if (job.status !== 'queued' && job.status !== 'running') continue;
+        const matches = (job.scope_type === 'source' && job.scope_id === sourceId)
+          || (job.scope_type === 'source_target' && String(job.scope_id || '').startsWith(targetScopePrefix));
+        if (!matches) continue;
+        Object.assign(job, { status: 'failed', finished_at: finishedAt, last_error_kind: 'source_deleted', error_json: errorJson });
+      }
+      return;
+    }
+
+    if (sql.includes('UPDATE sync_jobs') && sql.includes("last_error_kind = 'stale'")) {
+      const [finishedAt, errorJson, cutoff] = values;
+      for (const job of this.syncJobs) {
+        if ((job.status === 'queued' || job.status === 'running') && String(job.started_at) < String(cutoff)) {
+          Object.assign(job, { status: 'failed', finished_at: finishedAt, last_error_kind: 'stale', error_json: errorJson });
+        }
+      }
+      return;
+    }
+
     if (sql.includes('UPDATE sync_jobs')) {
       const hasRetryMetadata = values.length >= 7;
       const [status, finishedAt, summaryJson, errorJson] = values;
@@ -3873,6 +3896,107 @@ describe('family-scheduling worker', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('expires stale queued and running jobs so dedupe no longer blocks new jobs', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-20T00:00:00.000Z'));
+    try {
+      env.SEED_SAMPLE_DATA = 'false';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      const job = (id, scopeId, status, startedAt) => ({
+        id,
+        job_type: 'ingest_source',
+        scope_type: 'source',
+        scope_id: scopeId,
+        status,
+        started_at: startedAt,
+        finished_at: null,
+        summary_json: null,
+        error_json: null,
+        attempt_count: 0,
+        last_error_kind: null,
+      });
+      db.syncJobs.push(
+        job('job_lost', 'src_lost', 'queued', '2026-03-10T00:00:00.000Z'),
+        job('job_hung', 'src_hung', 'running', '2026-03-18T23:00:00.000Z'),
+        job('job_recent', 'src_recent', 'queued', '2026-03-19T12:00:00.000Z'),
+        job('job_done', 'src_done', 'completed', '2026-03-01T00:00:00.000Z')
+      );
+
+      const repo = new D1Repository(db, env);
+      await repo.expireStaleJobs();
+
+      const byId = Object.fromEntries(db.syncJobs.map((row) => [row.id, row]));
+      expect(byId.job_lost.status).toBe('failed');
+      expect(byId.job_lost.last_error_kind).toBe('stale');
+      expect(byId.job_hung.status).toBe('failed');
+      expect(byId.job_recent.status).toBe('queued');
+      expect(byId.job_done.status).toBe('completed');
+
+      const next = await repo.enqueueJob({ jobType: 'ingest_source', scopeType: 'source', scopeId: 'src_lost' });
+      expect(next.deduped).toBe(false);
+      expect(next.id).not.toBe('job_lost');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails unfinished jobs for a source when the source is deleted', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_gone',
+      name: 'gone',
+      display_name: 'Gone',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/gone.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    const job = (id, scopeType, scopeId, status) => ({
+      id,
+      job_type: scopeType === 'source' ? 'ingest_source' : 'sync_google_target',
+      scope_type: scopeType,
+      scope_id: scopeId,
+      status,
+      started_at: '2026-03-19T00:00:00.000Z',
+      finished_at: null,
+      summary_json: null,
+      error_json: null,
+      attempt_count: 0,
+      last_error_kind: null,
+    });
+    db.syncJobs.push(
+      job('job_ingest', 'source', 'src_gone', 'queued'),
+      job('job_sync', 'source_target', 'src_gone|target_a|sync', 'running'),
+      job('job_other', 'source', 'src_gone_two', 'queued'),
+      job('job_finished', 'source', 'src_gone', 'completed')
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.deleteSource('src_gone');
+
+    const byId = Object.fromEntries(db.syncJobs.map((row) => [row.id, row]));
+    expect(byId.job_ingest.status).toBe('failed');
+    expect(byId.job_ingest.last_error_kind).toBe('source_deleted');
+    expect(byId.job_sync.status).toBe('failed');
+    expect(byId.job_other.status).toBe('queued');
+    expect(byId.job_finished.status).toBe('completed');
   });
 
   it('applies fallback sport icon detection when source icon is not configured', async () => {
