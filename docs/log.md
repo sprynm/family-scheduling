@@ -21,6 +21,7 @@ At closeout of a unit of work, insights should be compacted into:
 - Fix: the mark-deleted updates (ingest, disable, inactive config sync) now skip rows already marked (`AND source_deleted = 0` / `AND is_deleted_upstream = 0`). New regression test; it fails without the fix.
 - Remaining waste: active rows are still marked deleted and re-upserted on every changed payload (~400-500 rows per ingest). Skipping writes when the staged content fingerprint is unchanged would remove most of it.
 - To resume: deploy, then `wrangler queues resume-delivery family-scheduling-jobs` after the 00:00 UTC reset.
+- 2026-10-06 14:41 UTC: pushed `dab4076` and deployed version `a924415a` (APP_DB confirmed as production `5cadc788`). Queue still paused. Only 2 `ingest_source` jobs are queued (14:00 UTC cron); not flushed, because purging their messages would leave the rows queued and dedupe would block those sources until stale expiry.
 
 ### Admin background polling
 
