@@ -1224,14 +1224,14 @@ export class D1Repository {
     const timestamp = nowIso();
     await this.db.batch([
       this.db.prepare(`UPDATE sources SET is_active = 0, updated_at = ? WHERE id = ?`).bind(timestamp, sourceId),
-      this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, sourceId),
+      this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`).bind(timestamp, sourceId),
       this.db.prepare(
         `UPDATE event_instances
          SET source_deleted = 1, updated_at = ?
-         WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+         WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?) AND source_deleted = 0`
       ).bind(timestamp, sourceId),
       this.db.prepare(
-        `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ?`
+        `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ? AND is_deleted_upstream = 0`
       ).bind(timestamp, sourceId),
       this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
     ]);
@@ -2565,11 +2565,11 @@ export class D1Repository {
 
     if (!Number(source.is_active)) {
       headerStatements.push(
-        this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`).bind(timestamp, source.id),
+        this.db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`).bind(timestamp, source.id),
         this.db.prepare(
           `UPDATE event_instances
            SET source_deleted = 1, updated_at = ?
-           WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+           WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?) AND source_deleted = 0`
         ).bind(timestamp, source.id)
       );
       await runStatementsInChunks(this.db, headerStatements);
@@ -3084,15 +3084,15 @@ export class D1Repository {
     const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const statements = [
       this.db.prepare(
-        `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ?`
+        `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`
       ).bind(fetchedAt, sourceId),
       this.db.prepare(
         `UPDATE event_instances
          SET source_deleted = 1, updated_at = ?
-         WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
+         WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?) AND source_deleted = 0`
       ).bind(fetchedAt, sourceId),
       this.db.prepare(
-        `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ?`
+        `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ? AND is_deleted_upstream = 0`
       ).bind(fetchedAt, sourceId),
       this.db.prepare(
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`

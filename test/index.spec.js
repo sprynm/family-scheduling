@@ -753,8 +753,9 @@ class FakeDb {
     if (sql.includes('UPDATE canonical_events SET source_deleted =')) {
       const [updatedAt, sourceId] = values;
       const sourceDeleted = sql.includes('SET source_deleted = 1') ? 1 : 0;
+      const onlyActive = sql.includes('AND source_deleted = 0');
       this.canonicalEvents
-        .filter((event) => event.source_id === sourceId)
+        .filter((event) => event.source_id === sourceId && (!onlyActive || !Number(event.source_deleted)))
         .forEach((event) => {
           event.source_deleted = sourceDeleted;
           event.updated_at = updatedAt;
@@ -766,8 +767,9 @@ class FakeDb {
       const [updatedAt, sourceId] = values;
       const sourceDeleted = sql.includes('SET source_deleted = 1') ? 1 : 0;
       const canonicalIds = new Set(this.canonicalEvents.filter((event) => event.source_id === sourceId).map((event) => event.id));
+      const onlyActive = sql.includes('AND source_deleted = 0');
       this.eventInstances
-        .filter((instance) => canonicalIds.has(instance.canonical_event_id))
+        .filter((instance) => canonicalIds.has(instance.canonical_event_id) && (!onlyActive || !Number(instance.source_deleted)))
         .forEach((instance) => {
           instance.source_deleted = sourceDeleted;
           instance.updated_at = updatedAt;
@@ -777,8 +779,9 @@ class FakeDb {
 
     if (sql.includes('UPDATE source_events SET is_deleted_upstream = 1')) {
       const [lastSeenAt, sourceId] = values;
+      const onlyActive = sql.includes('AND is_deleted_upstream = 0');
       this.sourceEvents
-        .filter((row) => row.source_id === sourceId)
+        .filter((row) => row.source_id === sourceId && (!onlyActive || !Number(row.is_deleted_upstream)))
         .forEach((row) => {
           row.is_deleted_upstream = 1;
           row.last_seen_at = lastSeenAt;
@@ -3470,6 +3473,66 @@ describe('family-scheduling worker', () => {
 
     expect(familyFeed).toContain('SUMMARY:N: 🏐 Volleyball Game');
     expect(naomiFeed).toContain('SUMMARY:🏐 Volleyball Game');
+  });
+
+  it('does not rewrite already-deleted events on every ingest', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.sources.push({
+      id: 'src_history',
+      name: 'history',
+      display_name: 'History',
+      provider_type: 'ics',
+      owner_type: 'family',
+      source_category: 'shared',
+      url: 'https://example.com/history.ics',
+      icon: '',
+      prefix: '',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 0,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 0,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.canonicalEvents.push({
+      id: 'evt_long_gone',
+      source_id: 'src_history',
+      title: 'Old event',
+      source_deleted: 1,
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    db.sourceEvents.push({
+      id: 'se_long_gone',
+      source_id: 'src_history',
+      provider_uid: 'old-uid',
+      is_deleted_upstream: 1,
+      last_seen_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:current-1', 'SUMMARY:Current', 'DTSTART:20990310T010000Z', 'DTEND:20990310T023000Z', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n'),
+          { status: 200 }
+        )
+      )
+    );
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_history');
+
+    const oldEvent = db.canonicalEvents.find((row) => row.id === 'evt_long_gone');
+    expect(oldEvent.source_deleted).toBe(1);
+    expect(oldEvent.updated_at).toBe('2026-01-01T00:00:00.000Z');
+    expect(db.sourceEvents.find((row) => row.id === 'se_long_gone').last_seen_at).toBe('2026-01-01T00:00:00.000Z');
+    expect(db.canonicalEvents.some((row) => row.source_id === 'src_history' && row.title === 'Current' && !Number(row.source_deleted))).toBe(true);
   });
 
   it('skips ingest and google sync when the upstream source returns 304 not modified', async () => {

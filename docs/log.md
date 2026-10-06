@@ -13,6 +13,15 @@ At closeout of a unit of work, insights should be compacted into:
 
 ## 2026-10-05
 
+### D1 free-tier write limit exhausted (2026-10-06)
+
+- Writes were blocked by ~14:30 UTC with no admin use. `wrangler d1 insights --sort-by writes` showed `UPDATE canonical_events SET source_deleted = 1 ... WHERE source_id = ?` at 95,524 of ~112K rows written: 52 runs x ~1,837 rows.
+- Cause: every changed-payload ingest marks all of a source's events deleted, then re-upserts the current ones. Family holds 1,771 already-deleted events (66 active), so each ingest rewrote all of them. Google ICS payloads change every fetch, so this ran every 30 minutes. It only surfaced once the stuck Family job was cleared on 2026-10-05 and Family ingests resumed.
+- Stopped live ops: `wrangler queues pause-delivery family-scheduling-jobs` at ~14:35 UTC. The cron still fires but only reads and enqueues; one message per source accumulates (dedupe).
+- Fix: the mark-deleted updates (ingest, disable, inactive config sync) now skip rows already marked (`AND source_deleted = 0` / `AND is_deleted_upstream = 0`). New regression test; it fails without the fix.
+- Remaining waste: active rows are still marked deleted and re-upserted on every changed payload (~400-500 rows per ingest). Skipping writes when the staged content fingerprint is unchanged would remove most of it.
+- To resume: deploy, then `wrangler queues resume-delivery family-scheduling-jobs` after the 00:00 UTC reset.
+
 ### Admin background polling
 
 - Replaced automatic full-dashboard reloads with job-only polling. Queued/running jobs no longer overwrite unsaved source fields, output selections, title rules, or event drawers.
