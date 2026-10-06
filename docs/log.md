@@ -39,6 +39,7 @@ At closeout of a unit of work, insights should be compacted into:
 - 2026-10-05 ~23:40 UTC: marked those 8 jobs `failed` in production via `wrangler d1 execute --remote` (user approved). No queued/running jobs remain.
 - Prevention: `deleteSource` now fails the source's queued/running jobs (`source` and `source_target` scopes) in the same batch. Each cron run first calls `expireStaleJobs()`, which fails jobs still queued/running after `JOB_STALE_AFTER_HOURS` (default 24; the retry schedule finishes within ~4.3h), so a lost queue message cannot dedupe away future ingests. New tests cover both; suite 75/76 with the same date-dependent effective-source-state failure as before.
 - Note: vitest also collects the deploy snapshot copy in `.wrangler/release-ceb391e/test/`, so failures appear twice.
+- 2026-10-06 00:01 UTC: merged to main (90b0434) and deployed version `8654618a`. `wrangler deploy` printed the preview D1 id for APP_DB, but `wrangler versions view` confirms the production id `5cadc788`. The 00:00 UTC cron ingested the Family source (first snapshot since June), confirming the stuck job had blocked it.
 
 ## 2026-05-03
 
