@@ -1242,8 +1242,16 @@ export class D1Repository {
   async deleteSource(sourceId) {
     const existing = await this.getSourceById(sourceId);
     if (!existing) return null;
+    const timestamp = nowIso();
     // All deletes are independent (same sourceId / subquery) — batch for atomicity
     await this.db.batch([
+      // Unfinished jobs for a deleted source can never complete; leaving them queued keeps the admin polling.
+      this.db.prepare(
+        `UPDATE sync_jobs
+         SET status = 'failed', finished_at = ?, last_error_kind = 'source_deleted', error_json = ?
+         WHERE status IN ('queued', 'running')
+           AND ((scope_type = 'source' AND scope_id = ?) OR (scope_type = 'source_target' AND scope_id LIKE ?))`
+      ).bind(timestamp, JSON.stringify({ message: 'Source deleted', kind: 'source_deleted' }), sourceId, `${sourceId}|%`),
       this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
       this.db.prepare(`DELETE FROM event_overrides WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
       this.db.prepare(`DELETE FROM google_event_links WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
@@ -2664,6 +2672,23 @@ export class D1Repository {
       lastErrorKind || null,
       jobId
     ).run();
+  }
+
+  // A job whose queue message was lost stays queued forever, and dedupe then blocks new jobs for
+  // that scope. Retries finish within hours, so anything active past the cutoff is abandoned.
+  async expireStaleJobs() {
+    const staleAfterHours = parsePositiveInt(this.env.JOB_STALE_AFTER_HOURS, 24);
+    const cutoff = new Date(Date.now() - staleAfterHours * 60 * 60 * 1000).toISOString();
+    const result = await this.db.prepare(
+      `UPDATE sync_jobs
+       SET status = 'failed', finished_at = ?, last_error_kind = 'stale', error_json = ?
+       WHERE status IN ('queued', 'running') AND started_at < ?`
+    ).bind(
+      nowIso(),
+      JSON.stringify({ message: `Expired: still queued or running after ${staleAfterHours}h`, kind: 'stale' }),
+      cutoff
+    ).run();
+    return Number(result?.meta?.changes || 0);
   }
 
   async listActiveSources() {

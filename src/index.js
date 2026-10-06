@@ -546,6 +546,17 @@ export default {
   },
   async scheduled(controller, env) {
     const repo = await createRepository(env);
+    let staleExpired = 0;
+    try {
+      // Expire before enqueueing so a lost job cannot dedupe away this run's ingest.
+      staleExpired = await repo.expireStaleJobs();
+    } catch (error) {
+      logEvent('error', 'cron_stale_job_expiry_failed', {
+        cron: controller.cron,
+        scheduled_time: controller.scheduledTime,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     const sources = await repo.listActiveSources();
     const maxEnqueuesPerRun = parseOptionalPositiveInt(env.CRON_MAX_ENQUEUES_PER_RUN);
     const sendSpacingMs = parseOptionalPositiveInt(env.CRON_QUEUE_SEND_SPACING_MS);
@@ -553,6 +564,7 @@ export default {
       cron: controller.cron,
       scheduled_time: controller.scheduledTime,
       sources_due: sources.length,
+      stale_expired: staleExpired,
       enqueued: 0,
       deduped: 0,
       rate_limited: 0,
