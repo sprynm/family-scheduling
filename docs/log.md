@@ -42,6 +42,7 @@ At closeout of a unit of work, insights should be compacted into:
 - `/admin/feeds` still uses the old `admin.css` look.
 - Access gap fixed: Cloudflare Access covers `/admin/*` and `/api/*`, but static assets served `admin.html` at bare `/admin` (also `/admin-events`, `/admin-feeds`), and `/` redirected there, so the shell rendered for anyone. Now `assets.html_handling: none` plus `run_worker_first` for those page URLs, and the Worker redirects them under `/admin/`. The old login flow actually ended on the unprotected `/admin`: the Worker's `ASSETS.fetch('/admin.html')` got a 307 there from the default HTML handling.
 - Naomi's person colour changed from pink to green at her request.
+- Post-deploy outage: every `/api` request hung (0 ms CPU, canceled after 2-26 s on navigation; `wrangler tail` confirmed they reached the Worker with a valid Access JWT, and D1 answered direct queries in <1 ms). Cause: `createRepository` shared the in-flight `ensureSupportTables` / legacy bootstrap promise across requests in module scope; Workers binds I/O to the originating request, so once that request was cancelled the promise never settled and the isolate stayed stuck. The deploy forced fresh isolates to re-run setup, exposing it. Fix: each request runs any outstanding setup itself; only completion is cached. Rule: never share an in-flight promise or I/O object across requests in a Worker.
 
 ### D1 waste from historical feed data (investigation)
 
