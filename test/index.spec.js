@@ -2489,6 +2489,31 @@ describe('family-scheduling worker', () => {
     expect(db.sourceCountQueryRuns).toBe(1);
   });
 
+  it('does not block later requests on setup that another request abandoned', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    // The first request's setup never settles, as when Workers cancels the request that started it.
+    const originalPrepare = db.prepare.bind(db);
+    let stalled = false;
+    db.prepare = (sql) => {
+      const statement = originalPrepare(sql);
+      if (!stalled && sql.includes('CREATE TABLE IF NOT EXISTS')) {
+        stalled = true;
+        statement.run = () => new Promise(() => {});
+      }
+      return statement;
+    };
+
+    createRepository(env);
+    const second = await Promise.race([
+      createRepository(env).then(() => 'ready'),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 1000)),
+    ]);
+
+    expect(second).toBe('ready');
+  });
+
   it('serves admin shell on /admin/', async () => {
     const request = new Request('http://example.com/admin/', { headers: { 'x-user-role': 'admin' } });
     const ctx = createExecutionContext();

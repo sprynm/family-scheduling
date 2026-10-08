@@ -385,10 +385,12 @@ function buildUidStabilityReport(firstEvents, secondEvents) {
 }
 
 const GOOGLE_SYNC_JOB_CHUNK_SIZE = 10;
+// Only completed setup is cached per isolate. In-flight setup is never shared between requests:
+// Workers ties I/O to the request that started it, so if that request is cancelled the shared
+// promise never settles and every later request in the isolate hangs. Setup is idempotent, so
+// concurrent first requests simply each run it.
 const supportTablesReadyByDb = new WeakSet();
-const supportTablesInitByDb = new WeakMap();
 const legacyBootstrapReadyByDb = new WeakSet();
-const legacyBootstrapInitByDb = new WeakMap();
 
 function buildSourceTargetScopeId(sourceId, targetId, mode = 'sync') {
   return `${sourceId}|${targetId}|${mode}`;
@@ -3768,36 +3770,12 @@ export async function createRepository(env) {
   }
   const repo = new D1Repository(env.APP_DB, env);
   if (!supportTablesReadyByDb.has(env.APP_DB)) {
-    let initPromise = supportTablesInitByDb.get(env.APP_DB);
-    if (!initPromise) {
-      initPromise = repo.ensureSupportTables()
-        .then(() => {
-          supportTablesReadyByDb.add(env.APP_DB);
-          supportTablesInitByDb.delete(env.APP_DB);
-        })
-        .catch((error) => {
-          supportTablesInitByDb.delete(env.APP_DB);
-          throw error;
-        });
-      supportTablesInitByDb.set(env.APP_DB, initPromise);
-    }
-    await initPromise;
+    await repo.ensureSupportTables();
+    supportTablesReadyByDb.add(env.APP_DB);
   }
   if (!legacyBootstrapReadyByDb.has(env.APP_DB)) {
-    let bootstrapPromise = legacyBootstrapInitByDb.get(env.APP_DB);
-    if (!bootstrapPromise) {
-      bootstrapPromise = repo.bootstrapLegacySources()
-        .then(() => {
-          legacyBootstrapReadyByDb.add(env.APP_DB);
-          legacyBootstrapInitByDb.delete(env.APP_DB);
-        })
-        .catch((error) => {
-          legacyBootstrapInitByDb.delete(env.APP_DB);
-          throw error;
-        });
-      legacyBootstrapInitByDb.set(env.APP_DB, bootstrapPromise);
-    }
-    await bootstrapPromise;
+    await repo.bootstrapLegacySources();
+    legacyBootstrapReadyByDb.add(env.APP_DB);
   }
   if (String(env.SEED_SAMPLE_DATA || '').toLowerCase() === 'true') {
     await repo.seedSampleData();
