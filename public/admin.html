@@ -40,7 +40,7 @@
           <ul aria-labelledby="nav-output">
             <li>
               <a href="#outputs" class="nav-link" data-view-link="outputs">
-                <span class="nav-text">Calendars and feeds</span>
+                <span class="nav-text"><span class="nav-text-long">Calendars and feeds</span><span class="nav-text-short" aria-hidden="true">Outputs</span></span>
                 <span class="nav-count"><span id="metric-targets">-</span><span class="visually-hidden"> Google calendars</span></span>
               </a>
             </li>
@@ -68,7 +68,7 @@
         <div class="nav-group" data-role="tool">
           <p class="nav-group-label" id="nav-tools">Tools</p>
           <ul aria-labelledby="nav-tools">
-            <li><a href="/admin/events" class="nav-link nav-link-external">Mobile event tools</a></li>
+            <li><a href="/admin/events" class="nav-link nav-link-external">Family events (phone)</a></li>
             <li><a href="/admin/feeds" class="nav-link nav-link-external">ICS feed debugger</a></li>
           </ul>
         </div>
@@ -234,41 +234,19 @@
         <header class="view-header">
           <p class="view-role">Result</p>
           <h1 id="events-heading">Events</h1>
-          <p class="view-desc">Upcoming events after ingest. Skip, hide, flag or annotate a single event without touching its source.</p>
+          <p class="view-desc">Everything coming up, for everyone. Tap an event to mark it not going, maybe, or add a note. The same screen lives at <a href="/admin/events">/admin/events</a> for phones.</p>
         </header>
 
-        <div class="tabs" role="tablist" aria-label="Events">
-          <button type="button" role="tab" class="tab" id="tab-upcoming" aria-controls="panel-upcoming" data-tab="upcoming">Upcoming</button>
-          <button type="button" role="tab" class="tab" id="tab-changed" aria-controls="panel-changed" data-tab="changed">Changed events</button>
-        </div>
+        <div id="console-planner" data-event-planner></div>
 
-        <div class="tab-panel" role="tabpanel" id="panel-upcoming" aria-labelledby="tab-upcoming" data-panel="upcoming">
-          <div class="filter-bar">
-            <div class="field-group">
-              <label class="field-label" for="event-source-filter">Source</label>
-              <select id="event-source-filter">
-                <option value="">— pick a source —</option>
-              </select>
-            </div>
-            <div class="field-group">
-              <label class="field-label" for="event-output-filter">Output</label>
-              <select id="event-output-filter">
-                <option value="">All outputs</option>
-              </select>
-            </div>
-            <div class="field-group field-grow">
-              <label class="field-label" for="event-search">Search titles</label>
-              <input type="search" id="event-search" placeholder="Title keyword..." />
-            </div>
-          </div>
-          <div id="inst-results" class="inst-results" aria-live="polite"><p class="hint">Pick a source to see its upcoming events.</p></div>
-        </div>
-
-        <div class="tab-panel" role="tabpanel" id="panel-changed" aria-labelledby="tab-changed" data-panel="changed">
-          <div id="modified-events-section">
-            <p class="hint">Future events with a skip, hide, maybe or note applied. Select one to review or remove its change.</p>
-            <div id="modified-events-body" class="modified-events-list"></div>
-          </div>
+        <!-- admin.js still renders its original source-based event list into these elements.
+             The planner above replaces that UI, so they stay hidden until admin.js drops its event code. -->
+        <div hidden>
+          <select id="event-source-filter" aria-hidden="true" tabindex="-1"></select>
+          <select id="event-output-filter" aria-hidden="true" tabindex="-1"></select>
+          <input type="search" id="event-search" aria-hidden="true" tabindex="-1" />
+          <div id="inst-results"></div>
+          <div id="modified-events-body"></div>
         </div>
       </section>
 
@@ -292,6 +270,7 @@
   </div>
 
   <script src="/admin-shell.js"></script>
+  <script src="/event-planner.js" defer></script>
   <script src="/admin.js" defer></script>
 </body>
 </html>

@@ -4,7 +4,8 @@
   const DEFAULT_VIEW = 'sources';
   const views = Array.from(document.querySelectorAll('[data-view]'));
   const viewLinks = Array.from(document.querySelectorAll('[data-view-link]'));
-  const tablists = Array.from(document.querySelectorAll('[role="tablist"]'));
+  // Only the console's own tab strips; the event planner manages its tabs itself.
+  const tablists = Array.from(document.querySelectorAll('.tabs[role="tablist"]'));
 
   // --- Views and tabs, addressed by hash: #view or #view/tab ---
 
@@ -39,7 +40,7 @@
       else link.removeAttribute('aria-current');
     }
     const view = views.find((el) => el.dataset.view === viewName);
-    const tablist = view?.querySelector('[role="tablist"]');
+    const tablist = view?.querySelector('.tabs[role="tablist"]');
     if (tablist) {
       const tabs = tabsIn(tablist);
       selectTab(tabs.find((tab) => tab.dataset.tab === tabName) || tabs.find((tab) => tab.getAttribute('aria-selected') === 'true') || tabs[0]);

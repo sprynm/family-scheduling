@@ -2,64 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex, nofollow">
-  <title>Modify Events | Family Scheduling</title>
-  <link rel="stylesheet" href="/admin.css">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#10171e" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Family events">
+  <title>Family events</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="/console.css">
 </head>
-<body class="event-page">
-  <main class="event-main">
-    <div class="card hero-card">
-      <p class="eyebrow">Family Scheduling</p>
-      <div class="page-nav">
-        <a href="/admin" class="page-nav-link">Configure</a>
-        <a href="/admin/events" class="page-nav-link active">Modify Events</a>
-        <a href="/admin/feeds" class="page-nav-link">Debug ICS</a>
-      </div>
-      <h1>Modify Events</h1>
-      <p class="section-desc">Mobile-first event corrections. Pick a source, find the instance, and apply the override here.</p>
-      <div id="event-page-status" class="status">Loading...</div>
-    </div>
-
-    <div class="card mobile-focus-card">
-      <div class="card-header">
-        <h2>Upcoming Instances</h2>
-      </div>
-      <div class="event-filter-sticky">
-        <div class="event-filter-grid">
-          <div class="field-group">
-            <span class="field-label">Source</span>
-            <select id="event-source-filter">
-              <option value="">— pick a source —</option>
-            </select>
-          </div>
-          <div class="field-group">
-            <span class="field-label">Output</span>
-            <select id="event-output-filter">
-              <option value="">All outputs</option>
-            </select>
-          </div>
-          <div class="field-group event-search-group">
-            <span class="field-label">Search</span>
-            <input type="search" id="event-search" placeholder="Title keyword..." />
-          </div>
-        </div>
-      </div>
-      <div id="inst-results" class="inst-results mobile-inst-results">
-        <p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <h2>Modified Events</h2>
-      </div>
-      <p class="section-desc">Recent manual changes. Open an item here to review, add, or remove overrides.</p>
-      <div id="modified-events-list" class="modified-events-list">
-        <p class="hint" style="padding:8px 0">Loading...</p>
-      </div>
-    </div>
-  </main>
-  <script src="/admin-events.js" defer></script>
+<body class="console planner-page">
+  <a class="skip-link" href="#planner">Skip to events</a>
+  <div class="planner-shell">
+    <header class="planner-page-header">
+      <h1>Family events</h1>
+      <a class="planner-admin-link" href="/admin">Admin console</a>
+    </header>
+    <main>
+      <div id="planner" data-event-planner data-planner-sticky></div>
+    </main>
+  </div>
+  <script src="/event-planner.js" defer></script>
 </body>
 </html>
