@@ -4,214 +4,276 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="dark light">
   <title>Family Scheduling Admin</title>
-    <link rel="stylesheet" href="/admin.css">
-
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:wght@400;600;700&display=swap">
+  <link rel="stylesheet" href="/console.css">
 </head>
-<body>
-  <main>
+<body class="console">
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
 
-    <!-- Header -->
-    <div class="card">
-      <p class="eyebrow">Family Scheduling</p>
-      <div class="page-nav">
-        <a href="/admin" class="page-nav-link active">Configure</a>
-        <a href="/admin/events" class="page-nav-link">Modify Events</a>
-        <a href="/admin/feeds" class="page-nav-link">Debug ICS</a>
+  <div class="shell">
+    <!-- Sidebar: main navigation grouped by pipeline role, with live counts -->
+    <header class="sidebar">
+      <div class="brand">
+        <p class="brand-name">Family Scheduling</p>
+        <p class="brand-sub">Admin console</p>
       </div>
-      <h1>Admin Console</h1>
-      <div class="summary-grid">
-        <div class="metric-card"><p class="metric-label">Sources</p><p class="metric" id="metric-sources">-</p></div>
-        <div class="metric-card"><p class="metric-label">Events</p><p class="metric" id="metric-events">-</p></div>
-        <div class="metric-card"><p class="metric-label">Google Outputs</p><p class="metric" id="metric-targets">-</p></div>
-        <div class="metric-card"><p class="metric-label">Jobs</p><p class="metric" id="metric-jobs">-</p></div>
-      </div>
-      <div class="toolbar">
-        <button id="refresh" class="primary">Refresh</button>
-        <button id="rebuild" class="warn">Queue Full Rebuild</button>
-        <a href="/admin/events" class="button-link">Open Mobile Event Tools</a>
-        <a href="/admin/feeds" class="button-link">Open ICS Debug</a>
-      </div>
-    </div>
 
-    <p id="status" class="status">Loading...</p>
-
-    <!-- Section 1: Configure Outputs -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Configure Outputs</h2>
-      </div>
-      <p class="section-desc">Outputs are delivered calendar services. Sources are assigned to one or more outputs.</p>
-
-      <!-- Google Calendar outputs -->
-      <div class="subsection">
-        <div class="subsection-header">
-          <h3>Google Calendar</h3>
-          <span class="badge">Google</span>
+      <nav class="main-nav" aria-label="Admin sections">
+        <div class="nav-group" data-role="input">
+          <p class="nav-group-label" id="nav-input">Input</p>
+          <ul aria-labelledby="nav-input">
+            <li>
+              <a href="#sources" class="nav-link" data-view-link="sources">
+                <span class="nav-text">Sources</span>
+                <span class="nav-count"><span id="metric-sources">-</span><span class="visually-hidden"> sources</span></span>
+              </a>
+            </li>
+          </ul>
         </div>
-        <p class="hint" style="margin-bottom:12px">Connect a Google Calendar that this system will write to on each sync.</p>
-        <form id="target-form" class="inline-form">
-          <div class="field-group">
-            <span class="field-label">Display name</span>
-            <input id="target-key" type="text" placeholder="e.g. Grayson Clubs" required />
+
+        <div class="nav-group" data-role="output">
+          <p class="nav-group-label" id="nav-output">Output</p>
+          <ul aria-labelledby="nav-output">
+            <li>
+              <a href="#outputs" class="nav-link" data-view-link="outputs">
+                <span class="nav-text"><span class="nav-text-long">Calendars and feeds</span><span class="nav-text-short" aria-hidden="true">Outputs</span></span>
+                <span class="nav-count"><span id="metric-targets">-</span><span class="visually-hidden"> Google calendars</span></span>
+              </a>
+            </li>
+          </ul>
+        </div>
+
+        <div class="nav-group" data-role="result">
+          <p class="nav-group-label" id="nav-result">Result</p>
+          <ul aria-labelledby="nav-result">
+            <li>
+              <a href="#events" class="nav-link" data-view-link="events">
+                <span class="nav-text">Events</span>
+                <span class="nav-count"><span id="metric-events">-</span><span class="visually-hidden"> events</span></span>
+              </a>
+            </li>
+            <li>
+              <a href="#jobs" class="nav-link" data-view-link="jobs">
+                <span class="nav-text">Jobs</span>
+                <span class="nav-count"><span id="metric-jobs">-</span><span class="visually-hidden"> recent jobs</span></span>
+              </a>
+            </li>
+          </ul>
+        </div>
+
+        <div class="nav-group" data-role="tool">
+          <p class="nav-group-label" id="nav-tools">Tools</p>
+          <ul aria-labelledby="nav-tools">
+            <li><a href="/admin/events" class="nav-link nav-link-external">Family events (phone)</a></li>
+            <li><a href="/admin/feeds" class="nav-link nav-link-external">ICS feed debugger</a></li>
+          </ul>
+        </div>
+      </nav>
+    </header>
+
+    <main class="workspace" id="workspace" tabindex="-1">
+      <div class="workspace-bar">
+        <p id="status" class="status" role="status" aria-live="polite">Loading...</p>
+        <div class="workspace-actions">
+          <button id="refresh" class="primary" type="button">Refresh</button>
+          <button id="rebuild" class="warn" type="button">Rebuild all sources</button>
+        </div>
+      </div>
+
+      <!-- Input: sources -->
+      <section class="view" id="view-sources" data-view="sources" data-role="input" aria-labelledby="sources-heading">
+        <header class="view-header">
+          <p class="view-role">Input</p>
+          <h1 id="sources-heading">Sources</h1>
+          <p class="view-desc">Team calendars that feed this system, either a calendar URL that updates on its own or an uploaded .ics file.</p>
+        </header>
+
+        <div class="tabs" role="tablist" aria-label="Sources">
+          <button type="button" role="tab" class="tab" id="tab-source-list" aria-controls="panel-source-list" data-tab="source-list">All sources</button>
+          <button type="button" role="tab" class="tab" id="tab-source-editor" aria-controls="panel-source-editor" data-tab="source-editor">Add or change a source</button>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-source-list" aria-labelledby="tab-source-list" data-panel="source-list">
+          <div class="table-wrap">
+            <table class="sources-table">
+              <caption class="visually-hidden">Sources, their outputs, event counts, sync state and actions</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Source and outputs</th>
+                  <th scope="col">Events</th>
+                  <th scope="col">Google sync</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sources-body"></tbody>
+            </table>
           </div>
-          <div class="field-group">
-            <span class="field-label">Google Calendar ID</span>
-            <input id="target-calendar" type="text" placeholder="name@group.calendar.google.com" required />
-          </div>
-          <input type="hidden" id="target-mode" value="managed_output" />
-          <div class="field-group" style="justify-content:flex-end">
-            <span class="field-label">&nbsp;</span>
-            <button id="target-save" class="primary" type="submit">Add</button>
-          </div>
-        </form>
+        </div>
+
+        <div class="tab-panel" role="tabpanel" id="panel-source-editor" aria-labelledby="tab-source-editor" data-panel="source-editor">
+          <form id="source-form" class="source-form">
+            <fieldset class="form-section">
+              <legend>Where the events come from</legend>
+              <div class="field-row">
+                <div class="field-group">
+                  <label class="field-label" for="source-name">Friendly name</label>
+                  <input id="source-name" type="text" placeholder="e.g. Grayson Hockey" required />
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="source-type">Source type</label>
+                  <select id="source-type">
+                    <option value="ics">Calendar URL (auto-updates)</option>
+                    <option value="ics_upload">Upload ICS snapshot</option>
+                  </select>
+                </div>
+              </div>
+              <div id="source-url-field" class="field-group">
+                <label class="field-label" for="source-url">ICS URL</label>
+                <input id="source-url" class="mono" type="url" placeholder="https://..." required />
+              </div>
+              <div id="source-upload-field" class="field-group" hidden>
+                <label class="field-label" for="source-file">ICS calendar file</label>
+                <input id="source-file" type="file" accept=".ics,text/calendar,text/plain" aria-describedby="source-file-hint" />
+                <p class="hint" id="source-file-hint">Upload the complete calendar. Upload it again when the schedule changes; events missing from the new file are removed.</p>
+                <p id="source-upload-current" class="hint"></p>
+              </div>
+              <div class="check-field">
+                <input id="source-uid-fallback" type="checkbox" aria-describedby="source-uid-fallback-hint" />
+                <div>
+                  <label for="source-uid-fallback">Use UID fallback</label>
+                  <p class="hint" id="source-uid-fallback-hint">Match events by title and time when the upstream feed changes its event IDs between fetches.</p>
+                </div>
+              </div>
+              <div id="source-diagnostic" class="diagnostic" role="status" aria-live="polite"></div>
+            </fieldset>
+
+            <fieldset class="form-section">
+              <legend>How events are cleaned up</legend>
+              <div class="field-group">
+                <label class="field-label" for="source-title-rules">
+                  Title rewrite rules
+                  <span class="field-label-example">e.g. <code>/u11a/gi =&gt; Tigers</code></span>
+                </label>
+                <textarea id="source-title-rules" class="mono" rows="4" aria-describedby="source-title-rules-hint"></textarea>
+                <p class="hint" id="source-title-rules-hint">One rule per line: <code>/pattern/flags =&gt; replacement</code>. Applied to the original title on every ingest.</p>
+              </div>
+            </fieldset>
+
+            <fieldset class="form-section" data-role="output">
+              <legend>Where the events go</legend>
+              <div class="field-group">
+                <p class="field-label" id="source-ics-outputs-label">ICS feeds</p>
+                <div class="checkbox-wrap" id="source-ics-outputs" role="group" aria-labelledby="source-ics-outputs-label"></div>
+              </div>
+              <div class="field-group">
+                <p class="field-label" id="source-google-outputs-label">Google calendars</p>
+                <div class="checkbox-wrap" id="source-google-outputs" role="group" aria-labelledby="source-google-outputs-label"></div>
+                <p class="hint" id="no-google-hint">No Google calendars connected yet. Add one under Calendars and feeds.</p>
+              </div>
+              <div id="source-target-rules" class="target-rules" aria-label="Icon and prefix per output"></div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button id="source-save" class="primary" type="submit">Add Source</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Output: Google calendars and ICS feeds -->
+      <section class="view" id="view-outputs" data-view="outputs" data-role="output" aria-labelledby="outputs-heading">
+        <header class="view-header">
+          <p class="view-role">Output</p>
+          <h1 id="outputs-heading">Calendars and feeds</h1>
+          <p class="view-desc">Where events are delivered. Each source chooses which of these it feeds.</p>
+        </header>
+
+        <div class="output-grid">
+          <section class="panel" aria-labelledby="google-heading">
+            <h2 id="google-heading">Google calendars</h2>
+            <p class="hint">Calendars this system writes to on each sync.</p>
+            <form id="target-form" class="inline-form">
+              <div class="field-group">
+                <label class="field-label" for="target-key">Display name</label>
+                <input id="target-key" type="text" placeholder="e.g. Grayson Clubs" required />
+              </div>
+              <div class="field-group field-grow">
+                <label class="field-label" for="target-calendar">Google Calendar ID</label>
+                <input id="target-calendar" class="mono" type="text" placeholder="name@group.calendar.google.com" required />
+              </div>
+              <input type="hidden" id="target-mode" value="managed_output" />
+              <button id="target-save" class="primary" type="submit">Add calendar</button>
+            </form>
+            <div class="table-wrap">
+              <table class="targets-table">
+                <caption class="visually-hidden">Connected Google calendars</caption>
+                <thead><tr><th scope="col">Name</th><th scope="col">Calendar ID</th><th scope="col">Active</th><th scope="col">Actions</th></tr></thead>
+                <tbody id="targets-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="ics-heading">
+            <h2 id="ics-heading">ICS feeds</h2>
+            <p class="hint">Subscription links for calendar apps. The three feeds are fixed for now.</p>
+            <div class="table-wrap">
+              <table class="contracts-table">
+                <caption class="visually-hidden">ICS feed subscription links</caption>
+                <thead><tr><th scope="col">Feed</th><th scope="col">Subscription link</th><th scope="col"><span class="visually-hidden">Copy</span></th></tr></thead>
+                <tbody id="contracts-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- Result: events and changes -->
+      <section class="view" id="view-events" data-view="events" data-role="result" aria-labelledby="events-heading">
+        <header class="view-header">
+          <p class="view-role">Result</p>
+          <h1 id="events-heading">Events</h1>
+          <p class="view-desc">Everything coming up, for everyone. Tap an event to mark it not going, maybe, or add a note. The same screen lives at <a href="/admin/events">/admin/events</a> for phones.</p>
+        </header>
+
+        <div id="console-planner" data-event-planner></div>
+
+        <!-- admin.js still renders its original source-based event list into these elements.
+             The planner above replaces that UI, so they stay hidden until admin.js drops its event code. -->
+        <div hidden>
+          <select id="event-source-filter" aria-hidden="true" tabindex="-1"></select>
+          <select id="event-output-filter" aria-hidden="true" tabindex="-1"></select>
+          <input type="search" id="event-search" aria-hidden="true" tabindex="-1" />
+          <div id="inst-results"></div>
+          <div id="modified-events-body"></div>
+        </div>
+      </section>
+
+      <!-- Result: jobs -->
+      <section class="view" id="view-jobs" data-view="jobs" data-role="result" aria-labelledby="jobs-heading">
+        <header class="view-header">
+          <p class="view-role">Result</p>
+          <h1 id="jobs-heading">Jobs</h1>
+          <p class="view-desc">Recent ingest, rebuild and Google sync work, newest first.</p>
+        </header>
+        <p id="job-status" class="hint job-status" role="status" aria-live="polite"></p>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th>Display Name</th><th>Calendar ID</th><th>Active</th><th>Actions</th></tr></thead>
-            <tbody id="targets-body"></tbody>
+          <table class="jobs-table">
+            <caption class="visually-hidden">Recent jobs</caption>
+            <thead><tr><th scope="col">Type</th><th scope="col">Scope</th><th scope="col">Status</th></tr></thead>
+            <tbody id="jobs-body"></tbody>
           </table>
         </div>
-      </div>
+      </section>
+    </main>
+  </div>
 
-      <!-- ICS feed outputs -->
-      <div class="subsection">
-        <div class="subsection-header">
-          <h3>ICS Feeds</h3>
-          <span class="badge ics">ICS</span>
-          <span class="badge planned">Configurable feeds planned</span>
-        </div>
-        <p class="hint" style="margin-bottom:12px">Shareable calendar URLs. Currently fixed to three feeds — adding named feeds without a code change is planned.</p>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Feed</th><th>Subscription URL</th><th></th></tr></thead>
-            <tbody id="contracts-body"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Section 2: Configure Sources -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Configure Sources</h2>
-      </div>
-      <p class="section-desc">Add an ICS URL or upload a complete calendar snapshot, then choose which outputs its events feed into.</p>
-
-      <form id="source-form" style="display:grid;gap:14px">
-        <div class="form-row">
-          <div class="field-group">
-            <span class="field-label">Friendly name</span>
-            <input id="source-name" type="text" placeholder="e.g. Grayson Hockey" required />
-          </div>
-          <div class="field-group">
-            <span class="field-label">Source type</span>
-            <select id="source-type">
-              <option value="ics">Calendar URL (auto-updates)</option>
-              <option value="ics_upload">Upload ICS snapshot</option>
-            </select>
-          </div>
-        </div>
-        <div id="source-url-field" class="field-group">
-            <span class="field-label">ICS URL</span>
-            <input id="source-url" type="url" placeholder="https://..." required />
-        </div>
-        <div id="source-upload-field" class="field-group" hidden>
-          <span class="field-label">ICS calendar file</span>
-          <input id="source-file" type="file" accept=".ics,text/calendar,text/plain" />
-          <p class="hint">Upload a complete .ics calendar. Upload it again when the schedule changes; events missing from the new file will be removed.</p>
-          <p id="source-upload-current" class="hint"></p>
-        </div>
-        <div class="field-group">
-          <span class="field-label">Title Rewrite Rules</span>
-          <textarea id="source-title-rules" rows="4" placeholder="/u11a/gi => Tigers&#10;/WCHC 2016 REDS/g => BW"></textarea>
-          <p class="hint">Applied from the original upstream title on ingest and source updates. One rule per line: <code>/pattern/flags =&gt; replacement</code>.</p>
-        </div>
-        <label class="field-group" style="display:flex;flex-direction:row;align-items:center;gap:10px">
-          <input id="source-uid-fallback" type="checkbox" />
-          <span>
-            <span class="field-label" style="display:block;margin-bottom:4px">UID fallback</span>
-            <span class="hint">Use fallback identity matching when the upstream feed regenerates unstable UIDs.</span>
-          </span>
-        </label>
-        <div id="source-diagnostic" class="hint" style="white-space:pre-wrap; max-height:240px; overflow:auto; padding:10px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,0.02)"></div>
-        <div>
-          <p class="field-label" style="margin-bottom:6px">ICS Feeds</p>
-          <div class="checkbox-wrap" id="source-ics-outputs"></div>
-        </div>
-        <div>
-          <p class="field-label" style="margin-bottom:6px">Google Calendar Outputs</p>
-          <div class="checkbox-wrap" id="source-google-outputs"></div>
-          <p class="hint" id="no-google-hint">No Google outputs configured yet.</p>
-        </div>
-        <div id="source-target-rules" class="target-rules"></div>
-        <div>
-          <button id="source-save" class="primary" type="submit">Add Source</button>
-        </div>
-      </form>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Source</th>
-              <th>Events</th>
-              <th>Sync/Def</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="sources-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Section 3: Modify Events -->
-    <div class="card">
-      <div class="card-header">
-        <h2>Modify Events</h2>
-      </div>
-
-      <div class="form-row" style="margin-top:12px">
-        <div class="field-group">
-          <span class="field-label">Source</span>
-          <select id="event-source-filter">
-            <option value="">— pick a source —</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <span class="field-label">Filter by output</span>
-          <select id="event-output-filter">
-            <option value="">All outputs</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <span class="field-label">Search</span>
-          <input type="search" id="event-search" placeholder="Title keyword..." />
-        </div>
-      </div>
-
-      <div id="inst-results" class="inst-results"><p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p></div>
-
-      <div id="modified-events-section" style="margin-top:20px;border-top:1px solid var(--line);padding-top:16px">
-        <h3 style="font-size:0.95rem;font-weight:600;margin-bottom:8px">Future Events with Modifications</h3>
-        <div id="modified-events-body" class="modified-events-list"></div>
-      </div>
-    </div>
-
-    <!-- System -->
-    <div class="card">
-      <h2>Recent Jobs</h2>
-      <p id="job-status" class="hint"></p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Type</th><th>Scope</th><th>Status</th></tr></thead>
-          <tbody id="jobs-body"></tbody>
-        </table>
-      </div>
-    </div>
-
-  </main>
-    <script src="/admin.js" defer></script>
-
+  <script src="/admin-shell.js"></script>
+  <script src="/event-planner.js" defer></script>
+  <script src="/admin.js" defer></script>
 </body>
 </html>
