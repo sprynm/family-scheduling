@@ -246,16 +246,42 @@ export function formatEventDateTimeValue(value, timeZone, { style = 'ics', timed
   };
 }
 
+function hasValidDateParts(year, month, day, hour = 0, minute = 0, second = 0) {
+  if (year < 1 || month < 1 || month > 12 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return false;
+  }
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day >= 1 && day <= daysInMonth;
+}
+
 function parseDateValue(raw, tzid, fallbackTz, defaultFloatingTimeZone = 'UTC') {
   if (!raw) return null;
+  const extendedDateTime = raw.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:T([0-9]{2}):([0-9]{2})(?::([0-9]{2}))?(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?$/i);
+  if (extendedDateTime && !hasValidDateParts(
+    Number(extendedDateTime[1]), Number(extendedDateTime[2]), Number(extendedDateTime[3]),
+    Number(extendedDateTime[4] || 0), Number(extendedDateTime[5] || 0), Number(extendedDateTime[6] || 0)
+  )) return null;
   if (/^\d{8}$/.test(raw)) {
+    const year = Number(raw.slice(0, 4));
+    const month = Number(raw.slice(4, 6));
+    const day = Number(raw.slice(6, 8));
+    if (!hasValidDateParts(year, month, day)) return null;
     return { iso: `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T00:00:00.000Z`, tzid: tzid || 'UTC', isDateOnly: true };
   }
   if (/^\d{8}T\d{6}Z$/.test(raw)) {
+    if (!hasValidDateParts(
+      Number(raw.slice(0, 4)), Number(raw.slice(4, 6)), Number(raw.slice(6, 8)),
+      Number(raw.slice(9, 11)), Number(raw.slice(11, 13)), Number(raw.slice(13, 15))
+    )) return null;
     const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(9, 11)}:${raw.slice(11, 13)}:${raw.slice(13, 15)}.000Z`;
     return { iso, tzid: tzid || 'UTC', isDateOnly: false };
   }
   if (/^\d{8}T\d{6}$/.test(raw)) {
+    if (!hasValidDateParts(
+      Number(raw.slice(0, 4)), Number(raw.slice(4, 6)), Number(raw.slice(6, 8)),
+      Number(raw.slice(9, 11)), Number(raw.slice(11, 13)), Number(raw.slice(13, 15))
+    )) return null;
     // Floating local time — no Z suffix so the consumer can treat it as wall-clock
     const iso = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(9, 11)}:${raw.slice(11, 13)}:${raw.slice(13, 15)}.000`;
     return { iso, tzid: tzid || fallbackTz || defaultFloatingTimeZone || 'UTC', isDateOnly: false };
@@ -265,11 +291,12 @@ function parseDateValue(raw, tzid, fallbackTz, defaultFloatingTimeZone = 'UTC') 
   return { iso: date.toISOString(), tzid: tzid || 'UTC', isDateOnly: false };
 }
 
-export function parseICS(text, { defaultFloatingTimeZone = 'UTC' } = {}) {
+export function parseICS(text, { defaultFloatingTimeZone = 'UTC', strictDateProperties = false } = {}) {
   const unfolded = unfoldLines(text);
   const lines = unfolded.split(/\r?\n/);
   const events = [];
   let current = null;
+  let currentComponentDepth = 0;
 
   // Extract X-WR-TIMEZONE from calendar header (lines before any VEVENT)
   let calendarTimezone = null;
@@ -286,15 +313,26 @@ export function parseICS(text, { defaultFloatingTimeZone = 'UTC' } = {}) {
     if (!line) continue;
     if (line === 'BEGIN:VEVENT') {
       current = { raw: [] };
+      currentComponentDepth = 1;
       continue;
     }
     if (line === 'END:VEVENT') {
       if (current) events.push(current);
       current = null;
+      currentComponentDepth = 0;
       continue;
     }
     if (!current) continue;
     current.raw.push(line);
+    if (/^BEGIN:[A-Z0-9-]+$/i.test(line)) {
+      currentComponentDepth += 1;
+      continue;
+    }
+    if (/^END:[A-Z0-9-]+$/i.test(line)) {
+      currentComponentDepth = Math.max(1, currentComponentDepth - 1);
+      continue;
+    }
+    if (currentComponentDepth !== 1) continue;
     const parsed = parsePropertyLine(line);
     if (!parsed) continue;
     const { name, params, value } = parsed;
@@ -304,10 +342,24 @@ export function parseICS(text, { defaultFloatingTimeZone = 'UTC' } = {}) {
     if (name === 'LOCATION') current.location = unescapeText(value);
     if (name === 'STATUS') current.status = value.toLowerCase();
     if (name === 'RRULE') current.rrule = value;
-    if (name === 'DTSTART') current.dtstart = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
-    if (name === 'DTEND') current.dtend = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
-    if (name === 'RECURRENCE-ID') current.recurrenceId = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone)?.iso || value;
-    if (name === 'LAST-MODIFIED') current.lastModified = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone)?.iso || value;
+    if (name === 'DTSTART') {
+      current.dtstart = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+      if (strictDateProperties && !current.dtstart) throw new Error(`VEVENT ${current.uid || ''} has an invalid DTSTART`);
+    }
+    if (name === 'DTEND') {
+      current.dtend = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+      if (strictDateProperties && !current.dtend) throw new Error(`VEVENT ${current.uid || ''} has an invalid DTEND`);
+    }
+    if (name === 'RECURRENCE-ID') {
+      const recurrenceId = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+      if (strictDateProperties && !recurrenceId) throw new Error(`VEVENT ${current.uid || ''} has an invalid RECURRENCE-ID`);
+      current.recurrenceId = recurrenceId?.iso || value;
+    }
+    if (name === 'LAST-MODIFIED') {
+      const lastModified = parseDateValue(value, params.TZID, calendarTimezone, defaultFloatingTimeZone);
+      if (strictDateProperties && !lastModified) throw new Error(`VEVENT ${current.uid || ''} has an invalid LAST-MODIFIED`);
+      current.lastModified = lastModified?.iso || value;
+    }
   }
 
   return events
@@ -335,7 +387,7 @@ function inferDurationMs(event) {
   return 60 * 60 * 1000;
 }
 
-export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 7, now = new Date() } = {}) {
+export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 7, now = new Date(), maxOccurrences = null } = {}) {
   if (!event.rrule) {
     return [
       {
@@ -366,7 +418,19 @@ export function expandRecurringEvent(event, { horizonDays = 180, lookbackDays = 
   const ruleOptions = RRule.parseString(event.rrule);
   const tzid = normalizeTimeZone(event.timezone);
   const rule = new RRule({ ...ruleOptions, dtstart: start });
-  const occurrences = rule.between(windowStart, windowEnd, true);
+  let exceededOccurrenceLimit = false;
+  const occurrences = Number.isFinite(Number(maxOccurrences)) && Number(maxOccurrences) > 0
+    ? rule.between(windowStart, windowEnd, true, (_occurrence, index) => {
+        if (index >= Number(maxOccurrences)) {
+          exceededOccurrenceLimit = true;
+          return false;
+        }
+        return true;
+      })
+    : rule.between(windowStart, windowEnd, true);
+  if (exceededOccurrenceLimit) {
+    throw new Error(`Recurring event exceeds the ${Number(maxOccurrences)} occurrence limit`);
+  }
 
   return occurrences.map((occurrence) => {
     const occurrenceEnd = new Date(occurrence.getTime() + durationMs);

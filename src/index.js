@@ -3,6 +3,7 @@ import { getRoleFromRequest, requireRole } from './lib/auth.js';
 import { ADMIN_ROLES, FEED_CACHE_MAX_AGE_DEFAULT } from './lib/constants.js';
 import { createRepository } from './lib/repository.js';
 import { json, text } from './lib/responses.js';
+import { DEFAULT_ICS_UPLOAD_MAX_BYTES, normalizeAndValidateUploadedICS } from './lib/source-upload.js';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -163,6 +164,114 @@ function asBadRequest(error) {
   );
 }
 
+class UploadRequestError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.name = 'UploadRequestError';
+    this.status = status;
+  }
+}
+
+function requireSameOriginUploadRequest(request) {
+  const origin = request.headers.get('origin');
+  const fetchSite = request.headers.get('sec-fetch-site');
+  if (fetchSite && fetchSite.toLowerCase() === 'cross-site') {
+    return json({ error: 'Forbidden', message: 'Upload requests must come from the admin site' }, { status: 403 });
+  }
+  if (!origin) return null;
+  try {
+    if (new URL(origin).origin === new URL(request.url).origin) return null;
+  } catch {}
+  return json({ error: 'Forbidden', message: 'Upload requests must come from the admin site' }, { status: 403 });
+}
+
+async function readRequestBodyLimited(request, maxBytes) {
+  const reader = request.body?.getReader();
+  if (!reader) throw new UploadRequestError('Expected a multipart ICS upload body');
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        try { await reader.cancel(); } catch {}
+        throw new UploadRequestError(`Upload request exceeds the ${maxBytes}-byte request limit`, 413);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+function sanitizeUploadFilename(value) {
+  const basename = String(value || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 200);
+  if (!basename || !/\.ics$/i.test(basename)) {
+    throw new UploadRequestError('Choose an .ics calendar file');
+  }
+  return basename;
+}
+
+async function parseIcsUploadRequest(request, env) {
+  const maxFileBytes = parseOptionalPositiveInt(env.ICS_UPLOAD_MAX_BYTES) || DEFAULT_ICS_UPLOAD_MAX_BYTES;
+  const maxRequestBytes = maxFileBytes + 64 * 1024;
+  const contentLength = Number.parseInt(String(request.headers.get('content-length') || ''), 10);
+  if (Number.isFinite(contentLength) && contentLength > maxRequestBytes) {
+    throw new UploadRequestError(`Upload request exceeds the ${maxRequestBytes}-byte request limit`, 413);
+  }
+  if (!String(request.headers.get('content-type') || '').toLowerCase().startsWith('multipart/form-data;')) {
+    throw new UploadRequestError('Upload must use multipart/form-data');
+  }
+
+  const body = await readRequestBodyLimited(request, maxRequestBytes);
+  let form;
+  try {
+    form = await new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body,
+    }).formData();
+  } catch {
+    throw new UploadRequestError('Could not read the multipart ICS upload');
+  }
+  const metadataText = form.get('metadata');
+  let metadata;
+  try {
+    metadata = JSON.parse(String(metadataText || ''));
+  } catch {
+    throw new UploadRequestError('Upload metadata must be valid JSON');
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw new UploadRequestError('Upload metadata must be a JSON object');
+  }
+  const file = form.get('file');
+  if (!file || typeof file.text !== 'function' || typeof file.size !== 'number') {
+    throw new UploadRequestError('Choose an .ics calendar file');
+  }
+  if (file.size < 1) throw new UploadRequestError('The ICS file is empty');
+  if (file.size > maxFileBytes) throw new UploadRequestError(`ICS file exceeds the ${maxFileBytes}-byte file limit`, 413);
+  const fileName = sanitizeUploadFilename(file.name);
+  const rawText = await file.text();
+  const validated = normalizeAndValidateUploadedICS(rawText, {
+    defaultFloatingTimeZone: env.DEFAULT_FLOATING_TIMEZONE || 'UTC',
+    horizonDays: Number.parseInt(String(env.RECURRENCE_HORIZON_DAYS || '180'), 10) || 180,
+    lookbackDays: Number.parseInt(String(env.DEFAULT_LOOKBACK_DAYS || '7'), 10) || 7,
+    maxBytes: maxFileBytes,
+    maxEvents: Number.parseInt(String(env.SNAPSHOTS_MAX_RECORDS || '5000'), 10) || 5000,
+    maxInstances: Number.parseInt(String(env.SNAPSHOTS_MAX_RECORDS || '5000'), 10) || 5000,
+  });
+  return { metadata, fileName, ...validated };
+}
+
 async function buildInternalErrorResponse(request, env, error) {
   let includeDetails = false;
   try {
@@ -264,6 +373,46 @@ export default {
           return json({ source: await repo.createSource(payload) }, { status: 201 });
         } catch (error) {
           return asBadRequest(error);
+        }
+      }
+
+      if (pathname === '/api/sources/upload' && request.method === 'POST') {
+        const authError = await requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        const originError = requireSameOriginUploadRequest(request);
+        if (originError) return originError;
+        try {
+          const upload = await parseIcsUploadRequest(request, env);
+          const repo = await createRepository(env);
+          const result = await repo.createUploadedSource(upload.metadata, upload);
+          return json(result, { status: 202 });
+        } catch (error) {
+          const status = Number(error?.status) || (/storage is unavailable/i.test(String(error?.message || '')) ? 503 : 400);
+          return json({ error: status === 413 ? 'Payload too large' : 'Upload failed', message: error instanceof Error ? error.message : String(error) }, { status });
+        }
+      }
+
+      const sourceUploadMatch = pathname.match(/^\/api\/sources\/([^/]+)\/upload$/);
+      if (sourceUploadMatch && request.method === 'POST') {
+        const authError = await requireRole(request, env, ['admin']);
+        if (authError) return authError;
+        const originError = requireSameOriginUploadRequest(request);
+        if (originError) return originError;
+        try {
+          const sourceId = decodeURIComponent(sourceUploadMatch[1]);
+          const upload = await parseIcsUploadRequest(request, env);
+          const repo = await createRepository(env);
+          const existing = await repo.getSourceById(sourceId);
+          if (!existing) return json({ error: 'Not found' }, { status: 404 });
+          const metadata = { ...upload.metadata };
+          delete metadata.provider_type;
+          delete metadata.url;
+          const result = await repo.replaceSourceUpload(sourceId, metadata, upload);
+          if (!result) return json({ error: 'Not found' }, { status: 404 });
+          return json(result, { status: 202 });
+        } catch (error) {
+          const status = Number(error?.status) || (/storage is unavailable/i.test(String(error?.message || '')) ? 503 : 400);
+          return json({ error: status === 413 ? 'Payload too large' : 'Upload failed', message: error instanceof Error ? error.message : String(error) }, { status });
         }
       }
 
@@ -421,23 +570,29 @@ export default {
           if (!source) return json({ error: 'Not found' }, { status: 404 });
           return json({ source });
         } catch (error) {
-          return asBadRequest(error);
+          const status = Number(error?.status) === 503 ? 503 : 400;
+          return json({ error: status === 503 ? 'Temporarily unavailable' : 'Bad request', message: error instanceof Error ? error.message : String(error) }, { status });
         }
       }
 
       if (pathname.startsWith('/api/sources/') && request.method === 'DELETE') {
         const authError = await requireRole(request, env, ['admin']);
         if (authError) return authError;
-        const sourceId = pathname.split('/').filter(Boolean)[2];
-        const repo = await createRepository(env);
-        if (url.searchParams.get('permanent') === 'true') {
-          const source = await repo.deleteSource(sourceId);
+        try {
+          const sourceId = pathname.split('/').filter(Boolean)[2];
+          const repo = await createRepository(env);
+          if (url.searchParams.get('permanent') === 'true') {
+            const source = await repo.deleteSource(sourceId);
+            if (!source) return json({ error: 'Not found' }, { status: 404 });
+            return json({ deleted: source });
+          }
+          const source = await repo.disableSource(sourceId);
           if (!source) return json({ error: 'Not found' }, { status: 404 });
-          return json({ deleted: source });
+          return json({ source });
+        } catch (error) {
+          const status = Number(error?.status) === 503 ? 503 : 500;
+          return json({ error: status === 503 ? 'Temporarily unavailable' : 'Delete failed', message: error instanceof Error ? error.message : String(error) }, { status });
         }
-        const source = await repo.disableSource(sourceId);
-        if (!source) return json({ error: 'Not found' }, { status: 404 });
-        return json({ source });
       }
 
       if (pathname === '/api/rebuild/full' && request.method === 'POST') {
@@ -467,6 +622,8 @@ export default {
         if (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source') {
           summary = await repo.ingestSource(job.scopeId, {
             forceRefresh: job.jobType === 'rebuild_source',
+            uploadId: job.uploadId || null,
+            uploadRevision: job.uploadRevision ?? null,
           });
         } else if (job.jobType === 'sync_google_target') {
           summary = await repo.syncGoogleOutputsForTargetChunk(job.sourceId, job.targetId, {
@@ -486,7 +643,7 @@ export default {
             });
           }
         } else if (job.jobType === 'rebuild_system') {
-          const sources = await repo.listActiveSources();
+          const sources = await repo.listActiveSources({ includeAll: true });
           const results = [];
           for (const source of sources) {
             results.push(await repo.ingestSource(source.id, { forceRefresh: true }));
@@ -498,6 +655,16 @@ export default {
         await repo.markJobStatus(job.jobId, 'completed', { summary });
         message.ack();
       } catch (error) {
+        if (job.scopeType === 'source' && (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source')) {
+          try {
+            const pendingUpload = job.uploadId
+              ? await repo.getSourceUploadById(job.uploadId)
+              : await repo.getLatestSourceUpload(job.scopeId, ['pending']);
+            if (pendingUpload?.status === 'pending') {
+              await repo.markSourceUploadError(pendingUpload.id, error instanceof Error ? error.message : String(error));
+            }
+          } catch {}
+        }
         const attemptCount = Math.max(1, Number(message.attempts || job.attemptCount || 1));
         const { retryable, errorKind, retryAfterSeconds } = classifyQueueError(error);
         const maxAttempts = getMaxRetryAttempts(env);
