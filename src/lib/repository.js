@@ -2033,7 +2033,8 @@ export class D1Repository {
          canonical_events.status,
          canonical_events.timezone,
          COALESCE(NULLIF(source_target_links.icon, ''), canonical_events.source_icon, sources.icon, '') AS source_icon,
-         COALESCE(NULLIF(source_target_links.prefix, ''), canonical_events.source_prefix, sources.prefix, '') AS source_prefix,
+         -- Google prefixes are a per-link rule: a blank link prefix means none, not the source's family-feed prefix.
+         COALESCE(source_target_links.prefix, '') AS source_prefix,
          event_instances.id AS event_instance_id,
          event_instances.occurrence_start_at,
          event_instances.occurrence_end_at

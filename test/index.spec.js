@@ -4,6 +4,7 @@ import worker from '../src/index.js';
 import { clearAuthCachesForTest } from '../src/lib/auth.js';
 import { createRepository, D1Repository } from '../src/lib/repository.js';
 import { parseICS } from '../src/lib/ics.js';
+import { decorateEventSummary } from '../src/lib/presentation.js';
 
 async function drainQueue(env) {
   while (env.JOBS_QUEUE.sent.length) {
@@ -1582,7 +1583,8 @@ class FakeDb {
               status: event.status,
               timezone: event.timezone,
               source_icon: targetLink?.icon || event.source_icon || source?.icon || '',
-              source_prefix: targetLink?.prefix || event.source_prefix || source?.prefix || '',
+              // Google outputs use the link's own prefix only (no source fallback), mirroring listDesiredGoogleSyncRows.
+              source_prefix: targetLink?.prefix || '',
               event_instance_id: instance.id,
               occurrence_start_at: instance.occurrence_start_at,
               occurrence_end_at: instance.occurrence_end_at,
@@ -4406,6 +4408,15 @@ describe('family-scheduling worker', () => {
 
     expect(familyFeed).toContain('SUMMARY:N: 🏀 Basketball Practice');
     expect(naomiFeed).toContain('SUMMARY:🏀 Basketball Practice');
+  });
+
+  it('applies link prefixes on the family feed and google outputs but not on per-child feeds', () => {
+    const decorate = (target) => decorateEventSummary({ target, title: 'Practice', sourceIcon: '⚽', sourcePrefix: 'G:' });
+    expect(decorate('family')).toBe('G: ⚽ Practice');
+    expect(decorate('grayson_clubs')).toBe('G: ⚽ Practice');
+    expect(decorate('grayson')).toBe('⚽ Practice');
+    expect(decorate('naomi')).toBe('⚽ Practice');
+    expect(decorateEventSummary({ target: 'naomi_clubs', title: 'Practice', sourceIcon: '🏒', sourcePrefix: '' })).toBe('🏒 Practice');
   });
 
   it('renders per-target rule decoration from source_target_links', async () => {

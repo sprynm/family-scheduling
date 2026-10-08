@@ -2,6 +2,40 @@
 
 > Durable project decisions and their rationale.
 
+## 2026-10-08 - Google output prefixes come from the link only
+
+Decision:
+Google output event titles use the prefix set on that source-to-output link. A blank link prefix means no prefix; it does not fall back to the source-level prefix. The family ICS feed keeps its fallback to the source prefix, and the per-child `grayson`/`naomi` ICS feeds never carry a prefix.
+
+Rationale:
+The source-level prefix (`G:`/`N:`) exists to tell children apart on the combined family feed. Google outputs are configured per link in the admin, so the link is the only place an operator expects to control their titles.
+
+Consequences:
+Changing how titles are decorated does not count as a data change, so existing Google events are only re-titled when a Google sync runs (re-save the source or wait for changed data).
+
+Status:
+active
+
+Revisit When:
+If Google outputs need a different default than "no prefix" for newly linked sources.
+
+## 2026-10-08 - Uploaded ICS sources replace the whole calendar
+
+Decision:
+An `ics_upload` source holds one complete calendar file at a time. Each upload is a full snapshot: events missing from the new file are removed. Files are validated strictly before they are accepted, and the stored file is re-ingested daily to roll the recurrence window.
+
+Rationale:
+Some upstream feeds cannot be fetched by the Worker (PowerUp Sports serves a Cloudflare bot challenge). A full-snapshot model keeps the same ingest, identity and removal semantics as URL sources without inventing merge rules for partial files.
+
+Consequences:
+Operators must upload the complete schedule each time it changes. A source switched from URL to upload loses its URL on promotion; switching back requires re-entering it.
+
+Status:
+active
+
+Revisit When:
+If a source needs incremental additions or the upstream starts allowing Worker fetches again.
+
 ## 2026-03-11 - Drop stale historical single events at ingest
 
 Decision:

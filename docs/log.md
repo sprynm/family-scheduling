@@ -11,6 +11,34 @@ At closeout of a unit of work, insights should be compacted into:
 - plan.md
 - external knowledge base if appropriate
 
+## 2026-10-08
+
+### Uploaded ICS sources (Codex `dc2042d`) reviewed, fixed and released
+
+- New source type `ics_upload`: admin uploads a complete `.ics` (multipart, 1 MB default cap) to `POST /api/sources/upload` or `POST /api/sources/:id/upload`. The file is validated up front (one closed VCALENDAR, every VEVENT has UID + valid DTSTART, no duplicate UID/RECURRENCE-ID, occurrence cap), stored in R2 at `uploads/<sourceId>/<revision>.ics`, and ingested by a queued `rebuild_source` job. A re-upload replaces the calendar; events missing from the new file are removed. Uploaded sources re-ingest daily from the stored file to roll the recurrence window. Tables `source_uploads` and `source_ingest_locks` are created at runtime (`ensureSupportTables`); `migrations/0007` mirrors them.
+- Per-source ingest lock: ingest, upload, PATCH, disable and delete take a 15-minute D1 lock. Contention returns 503 (queue retries it as `upstream_5xx`).
+- Parser change for all feeds: properties inside nested components (VALARM) no longer overwrite the parent VEVENT. Checked against all six live feeds: only Family has alarms (15, `DESCRIPTION` only, no alarm `UID`), all 2015-2023 and outside the ingest window, so no production data or Google sync change.
+- Review found the commit broke 35 of 151 tests. Cause was the test `FakeDb`, not the feature: `run()` returned no `meta.changes` (the lock never acquired) and the sources INSERT/UPDATE emulation read binds by position (new `provider_type` shifted columns; `is_active` had been read from the `quality_profile` slot for a while). Fixed the fake, added upload tests, moved a date-bound fixture to 2099, excluded `.wrangler/` release copies from vitest. 81/81 passing.
+- Bug fixed: switching an uploaded source back to a URL kept `poll_interval_minutes = 1440` from promotion. Now resets to the URL default (30). Test fails without the fix.
+- Released: merged to `main` (`4b1ae2d`), pushed and deployed by the user. Admin shows the Source type selector.
+- Open review items (not fixed): a pending upload that keeps failing hijacks the source's ingest (URL never polled again until re-upload or switch back); lock-contention errors are written onto the pending upload's `last_error` and shown as an upload error; edits during an ingest return 503; upload limits reuse `SNAPSHOTS_MAX_RECORDS`; `rebuild_system` now rebuilds every source serially and one lock collision restarts it.
+
+### Grayson Soccer feed blocked upstream
+
+- `lakehillsoccer.powerupsports.com` serves a Cloudflare bot challenge ("Just a moment", HTTP 403) to the Worker and to local fetches. Every production fetch on 2026-10-08 logged `fetch_error HTTP 403`, so the source was not updating. Workaround: download the `.ics` in a browser and upload it onto the existing Grayson Soccer source (converts it to `ics_upload`, keeps outputs).
+
+### Google output titles missing prefixes
+
+- `decorateEventSummary` applied the prefix only for the `family` target, so Grayson Clubs / Naomi Clubs Google events dropped the `G:`/`N:` set on each link, contrary to `workflow-diagram.md` (Google = per-link rule) and the admin form.
+- Fix: prefix applies to every target except the `grayson`/`naomi` ICS feeds. Google sync rows now carry the link's own prefix only (blank = none, no fallback to the source's family-feed prefix). Production links all have explicit prefixes. 82/82 tests passing.
+- After deploy, titles only change when a Google sync runs. Re-save (Change -> Update Source) each Google-linked source to queue one: BW Sessions, Grayson Kings, Grayson Soccer, Naomi Kings, Naomi Reign.
+
+### D1 waste from historical feed data (investigation)
+
+- Old events never reach D1: single events older than the 30-day retention window and recurring series with no in-window occurrences are skipped before staging. Family is 746 KB / 1,912 events, of which 67 are in window; parse + expand costs ~50 ms.
+- The real waste: Google returns the Family feed in a different order every fetch, so the raw payload hash never matches and every ingest is a full rewrite of its current events plus a 746 KB R2 snapshot. Last 24h: all 7 Family ingests were `parsed`, none `unchanged_payload`. Naomi Reign never returns 304 either.
+- Proposed fix (not started): compare a normalized fingerprint of the in-window events (sorted, ignoring DTSTAMP/order) with the last ingest and skip the R2 snapshot and event writes when equal.
+
 ## 2026-10-05
 
 ### D1 free-tier write limit exhausted (2026-10-06)
@@ -22,6 +50,9 @@ At closeout of a unit of work, insights should be compacted into:
 - Remaining waste: active rows are still marked deleted and re-upserted on every changed payload (~400-500 rows per ingest). Skipping writes when the staged content fingerprint is unchanged would remove most of it.
 - To resume: deploy, then `wrangler queues resume-delivery family-scheduling-jobs` after the 00:00 UTC reset.
 - 2026-10-06 14:41 UTC: pushed `dab4076` and deployed version `a924415a` (APP_DB confirmed as production `5cadc788`). Queue still paused. Only 2 `ingest_source` jobs are queued (14:00 UTC cron); not flushed, because purging their messages would leave the rows queued and dedupe would block those sources until stale expiry.
+- 2026-10-07: queue resumed at 00:31 UTC. The two 14:00 UTC jobs never ran (messages likely lost during a brief early resume at 17:25 UTC on 10-06 while writes were blocked) and were marked failed (`lost_message`) at 03:38 UTC with user approval.
+- 2026-10-07 04:05 UTC review: OK. The 04:00 cron ingested Family, Grayson Kings, Naomi Kings and BW Sessions, plus a Grayson Google sync, all completed. Last hour: 696 rows written / 618 read. The mark-deleted UPDATE is no longer in the top 10 writers, so the dab4076 guard is holding. No active jobs. `rows_written_24h` 66,974 (down from 71,438 at 03:35 as 10-06's runaway ages out). No action taken.
+- 2026-10-07 06:12 UTC: the overnight monitor saw `wrangler d1 insights --timePeriod 1h` report 4,751 writes (the guarded mark-deleted UPDATE at "56 runs" x 67 rows) and paused queue delivery under the standing authorization. False alarm: `d1 info` rows_written_24h fell 66,974 -> 57,809 between 04:05 and 06:15 (real rate ~500/h), only ~8 ingests ran, no new deploy, and the companion statements in the same batch showed 0 runs. Insights per-query figures are sampled and extrapolated, so use `d1 info` totals for alerting. Queue left paused for the user to resume.
 
 ### Admin background polling
 

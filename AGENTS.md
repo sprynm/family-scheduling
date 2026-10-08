@@ -1,5 +1,14 @@
 # AGENTS
 
+## Git Mode
+
+**Strict** — Deploys on push to Cloudflare Workers (`wrangler.jsonc`) — personal, but a commit on `main` reaches production.
+
+Branch from a Notion Execution Task before implementation work; merge `--no-ff` and delete the branch in the same session.
+
+With a second agent working this repo at the same time, split by file ownership
+or use a separate worktree. See `C:\Users\lance\.agents\policies\git-branch-decision.md`.
+
 ## Skill routing
 
 All shared skills are managed globally. Follow the boot sequence:
@@ -15,7 +24,7 @@ This repo maps to the **node** domain.
 - Owner: personal
 - Stack: Cloudflare Workers, ICS/iCalendar, Node
 - Role: active implementation repo for the new family scheduling system
-- Legacy repo: `C:\Dev\ics-merge` — reference only, not for new features
+- Legacy repo: `C:\_Dev-archive\ics-merge` — reference only, not for new features
 
 ## Repo scope
 
@@ -25,7 +34,7 @@ Use this repo for:
 - ingest, recurrence, prune, and sync implementation
 - tests and operational docs
 
-Use `C:\Dev\ics-merge` only for:
+Use `C:\_Dev-archive\ics-merge` only for:
 - legacy feed contract reference (`cals.txt`, `wrangler.jsonc`)
 - migration comparison
 - emergency fixes to the old worker if explicitly required
@@ -33,6 +42,7 @@ Use `C:\Dev\ics-merge` only for:
 ## Local rules
 
 - `family-scheduling` is the primary git repo — create feature branches here
-- Keep `main` stable
+- Keep `main` stable — it deploys to Cloudflare Workers on push, so a commit on
+  `main` is a release. Verify over HTTP after merging; a green build is not delivery.
 - Preserve the `family`, `grayson`, and `naomi` feed contracts when touching compatibility-sensitive code
 - UIDs must be stable across syncs — never depend on source ICS UIDs being consistent
