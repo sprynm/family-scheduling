@@ -33,6 +33,14 @@ At closeout of a unit of work, insights should be compacted into:
 - Fix: prefix applies to every target except the `grayson`/`naomi` ICS feeds. Google sync rows now carry the link's own prefix only (blank = none, no fallback to the source's family-feed prefix). Production links all have explicit prefixes. 82/82 tests passing.
 - After deploy, titles only change when a Google sync runs. Re-save (Change -> Update Source) each Google-linked source to queue one: BW Sessions, Grayson Kings, Grayson Soccer, Naomi Kings, Naomi Reign.
 
+### Admin console layout and family event planner
+
+- `/admin` rebuilt as a sidebar console: Input (Sources), Output (Calendars and feeds), Result (Events, Jobs), with live counts and tabs. New `console.css` (Atkinson Hyperlegible, light/dark, WCAG AA text contrast) and `admin-shell.js` (hash-routed views, ARIA tabs, keyboard access). `admin.js` unchanged; its old event list renders into a hidden block in `admin.html` until its event code is removed.
+- New `event-planner.js` replaces the source-picker event tools at `/admin/events` and in the console's Events view: upcoming events grouped by day, Grayson/Naomi/Family toggles (none = everyone, remembered per device), bottom sheet with Not going / Maybe / Add a note / Hide from one calendar, toast with Undo, Changed tab. Same API, no server changes. `admin-events.js` removed.
+- Found while building it: `hidden` overrides need `payload.target_key`; the old forms never sent one, so Hidden had no effect. Maybe and note overrides are stored but no feed or Google output renders them; the planner labels them "only shown here".
+- Verified with a local mock harness and headless Chrome at 360x780 (Galaxy S23) and 390px: no horizontal overflow, 20/20 scripted interaction checks. Not yet verified against production data, on a real phone, or for the partner's Cloudflare Access login.
+- `/admin/feeds` still uses the old `admin.css` look.
+
 ### D1 waste from historical feed data (investigation)
 
 - Old events never reach D1: single events older than the 30-day retention window and recurring series with no in-window occurrences are skipped before staging. Family is 746 KB / 1,912 events, of which 67 are in window; parse + expand costs ~50 ms.
