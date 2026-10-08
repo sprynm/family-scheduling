@@ -1064,3 +1064,7 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .nav-count { min-width: 0; padding: 0 0.3rem; font-size: 0.8125rem; }
   .main-nav .nav-group[data-role="tool"] { display: none; }
 }
+
+/* Example shown beside a field label so it stays visible while typing. */
+.field-label-example { margin-left: 0.5rem; font-weight: 400; color: var(--muted); }
+.field-label-example code { color: var(--ink); }

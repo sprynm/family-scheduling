@@ -142,15 +142,6 @@
                 <p class="hint" id="source-file-hint">Upload the complete calendar. Upload it again when the schedule changes; events missing from the new file are removed.</p>
                 <p id="source-upload-current" class="hint"></p>
               </div>
-            </fieldset>
-
-            <fieldset class="form-section">
-              <legend>How events are cleaned up</legend>
-              <div class="field-group">
-                <label class="field-label" for="source-title-rules">Title rewrite rules</label>
-                <textarea id="source-title-rules" class="mono" rows="4" placeholder="/u11a/gi => Tigers&#10;/WCHC 2016 REDS/g => BW" aria-describedby="source-title-rules-hint"></textarea>
-                <p class="hint" id="source-title-rules-hint">One rule per line: <code>/pattern/flags =&gt; replacement</code>. Applied to the original title on every ingest.</p>
-              </div>
               <div class="check-field">
                 <input id="source-uid-fallback" type="checkbox" aria-describedby="source-uid-fallback-hint" />
                 <div>
@@ -159,6 +150,18 @@
                 </div>
               </div>
               <div id="source-diagnostic" class="diagnostic" role="status" aria-live="polite"></div>
+            </fieldset>
+
+            <fieldset class="form-section">
+              <legend>How events are cleaned up</legend>
+              <div class="field-group">
+                <label class="field-label" for="source-title-rules">
+                  Title rewrite rules
+                  <span class="field-label-example">e.g. <code>/u11a/gi =&gt; Tigers</code></span>
+                </label>
+                <textarea id="source-title-rules" class="mono" rows="4" aria-describedby="source-title-rules-hint"></textarea>
+                <p class="hint" id="source-title-rules-hint">One rule per line: <code>/pattern/flags =&gt; replacement</code>. Applied to the original title on every ingest.</p>
+              </div>
             </fieldset>
 
             <fieldset class="form-section" data-role="output">
