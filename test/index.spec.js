@@ -1081,6 +1081,17 @@ class FakeDb {
     }
   }
 
+  // Mirrors OCCURRENCE_NOTES_SQL: the occurrence's own notes plus series-wide notes, oldest first.
+  occurrenceNotes(canonicalEventId, instanceId) {
+    const notes = this.eventOverrides
+      .filter((row) => row.canonical_event_id === canonicalEventId && row.override_type === 'note' && !row.cleared_at
+        && (!row.event_instance_id || row.event_instance_id === instanceId))
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+      .map((row) => JSON.parse(row.payload_json || '{}').note)
+      .filter(Boolean);
+    return notes.length ? notes.join('\n') : null;
+  }
+
   runSourceUploads(sql, values) {
     if (sql.includes('CREATE ')) return 0;
     if (sql.includes('INSERT INTO source_uploads')) {
@@ -1449,7 +1460,7 @@ class FakeDb {
           .map((row) => row.canonical_event_id)
       )].map((canonicalEventId) => ({ canonical_event_id: canonicalEventId }));
     }
-    if (sql.includes('FROM event_overrides')) {
+    if (sql.includes('FROM event_overrides') && !sql.includes('AS occurrence_note')) {
       return this.eventOverrides.filter((row) => row.canonical_event_id === values[0] && !row.cleared_at);
     }
     if (sql.includes('FROM output_rules WHERE canonical_event_id')) {
@@ -1585,6 +1596,7 @@ class FakeDb {
               source_icon: targetLink?.icon || event.source_icon || source?.icon || '',
               // Google outputs use the link's own prefix only (no source fallback), mirroring listDesiredGoogleSyncRows.
               source_prefix: targetLink?.prefix || '',
+              occurrence_note: this.occurrenceNotes(event.id, instance.id),
               event_instance_id: instance.id,
               occurrence_start_at: instance.occurrence_start_at,
               occurrence_end_at: instance.occurrence_end_at,
@@ -1613,6 +1625,7 @@ class FakeDb {
             source_icon: targetLink?.icon || event.source_icon || source?.icon || '',
             source_prefix: targetLink?.prefix || event.source_prefix || source?.prefix || '',
             description: event.description,
+            occurrence_note: this.occurrenceNotes(event.id, instance.id),
             location: event.location,
             status: event.status,
             timezone: event.timezone || 'UTC',
@@ -5220,6 +5233,126 @@ describe('family-scheduling worker', () => {
       'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/google-event-1',
       expect.objectContaining({ method: 'PUT' })
     );
+  });
+
+  it('adds a note to just the one occurrence in the ICS feed and Google calendar', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    env.GOOGLE_SERVICE_ACCOUNT_JSON = await createServiceAccountJson();
+    const db = new FakeDb();
+    env.APP_DB = db;
+    db.outputTargets.push({
+      id: 'outt_google_note',
+      target_type: 'google',
+      slug: 'grayson_clubs',
+      display_name: 'Grayson Clubs',
+      calendar_id: 'grayson-clubs@group.calendar.google.com',
+      ownership_mode: 'managed_output',
+      is_system: 0,
+      is_active: 1,
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sources.push({
+      id: 'src_note_sync',
+      name: 'grayson-note',
+      display_name: 'Grayson Note',
+      provider_type: 'ics',
+      owner_type: 'grayson',
+      source_category: 'sports',
+      url: 'https://example.com/grayson-note.ics',
+      icon: '🏒',
+      prefix: 'G:',
+      fetch_url_secret_ref: null,
+      include_in_child_ics: 1,
+      include_in_family_ics: 1,
+      include_in_child_google_output: 1,
+      is_active: 1,
+      sort_order: 0,
+      poll_interval_minutes: 30,
+      quality_profile: 'standard',
+      created_at: '2026-03-03T00:00:00.000Z',
+      updated_at: '2026-03-03T00:00:00.000Z',
+    });
+    db.sourceTargetLinks.push(
+      { id: 'stl_note_family', source_id: 'src_note_sync', target_id: null, target_key: 'family', target_type: 'ics', icon: '🏒', prefix: 'G:', sort_order: 0, is_enabled: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' },
+      { id: 'stl_note_google', source_id: 'src_note_sync', target_id: 'outt_google_note', target_key: 'grayson_clubs', target_type: 'google', icon: '🏒', prefix: 'G:', sort_order: 1, is_enabled: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' }
+    );
+
+    // A weekly practice with three occurrences; the note goes on the middle one only.
+    const now = Date.now();
+    const weekly = (offsetDays) => new Date(now + offsetDays * 86400000).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '').slice(0, 15) + 'Z';
+    let createdCount = 0;
+    const googleUpdates = [];
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      if (String(url) === 'https://example.com/grayson-note.ics') {
+        return new Response([
+          'BEGIN:VCALENDAR',
+          'BEGIN:VEVENT',
+          'UID:grayson-note-series',
+          'SUMMARY:Hockey Practice',
+          'DESCRIPTION:Bring skates',
+          `DTSTART:${weekly(3)}`,
+          `DTEND:${weekly(3).replace(/T(\d{2})/, (m, h) => 'T' + String((Number(h) + 1) % 24).padStart(2, '0'))}`,
+          'RRULE:FREQ=WEEKLY;COUNT=3',
+          'END:VEVENT',
+          'END:VCALENDAR',
+        ].join('\r\n'), { status: 200 });
+      }
+      if (String(url) === 'https://oauth2.googleapis.com/token') {
+        return new Response(JSON.stringify({ access_token: 'google-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url) === 'https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events' && options.method === 'POST') {
+        createdCount += 1;
+        return new Response(JSON.stringify({ id: `google-note-${createdCount}`, etag: `etag-${createdCount}` }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (String(url).startsWith('https://www.googleapis.com/calendar/v3/calendars/grayson-clubs%40group.calendar.google.com/events/') && options.method === 'PUT') {
+        googleUpdates.push({ id: String(url).split('/').pop(), body: JSON.parse(options.body) });
+        return new Response(JSON.stringify({ id: String(url).split('/').pop(), etag: 'etag-updated' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${options.method || 'GET'}`);
+    }));
+
+    const repo = new D1Repository(db, env);
+    await repo.ingestSource('src_note_sync');
+    await drainQueue(env);
+    expect(db.eventInstances).toHaveLength(3);
+    expect(db.googleEventLinks).toHaveLength(3);
+
+    const instances = [...db.eventInstances].sort((a, b) => a.occurrence_start_at.localeCompare(b.occurrence_start_at));
+    const target = instances[1];
+    await repo.createOverride({
+      eventId: target.canonical_event_id,
+      eventInstanceId: target.id,
+      overrideType: 'note',
+      payload: { note: 'Grandma driving' },
+      actorRole: 'editor',
+    });
+    await drainQueue(env);
+
+    const feed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    const vevents = feed.split('BEGIN:VEVENT').slice(1);
+    const noted = vevents.filter((block) => block.includes('Note: Grandma driving'));
+    expect(noted).toHaveLength(1);
+    expect(noted[0]).toContain(`UID:${target.id}@family-scheduling`);
+    expect(noted[0]).toContain('DESCRIPTION:Note: Grandma driving\\n\\nBring skates');
+    expect(noted[0]).toContain('SUMMARY:G: 🏒 Hockey Practice');
+    expect(vevents.filter((block) => block.includes('DESCRIPTION:Bring skates'))).toHaveLength(2);
+
+    // Google: exactly the one linked event is updated, with the note in its description.
+    const targetLink = db.googleEventLinks.find((link) => link.event_instance_id === target.id);
+    expect(googleUpdates).toHaveLength(1);
+    expect(googleUpdates[0].id).toBe(targetLink.google_event_id);
+    expect(googleUpdates[0].body.description).toBe('Note: Grandma driving\n\nBring skates');
+    expect(googleUpdates[0].body.summary).toBe('G: 🏒 Hockey Practice');
+
+    // Undo restores the original description on that occurrence only.
+    const noteOverride = db.eventOverrides.find((row) => row.override_type === 'note');
+    await repo.clearOverride(noteOverride.id);
+    await drainQueue(env);
+    const restored = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    expect(restored).not.toContain('Note: Grandma driving');
+    expect(googleUpdates).toHaveLength(2);
+    expect(googleUpdates[1].body.description).toBe('Bring skates');
   });
 
   it('applies skip overrides immediately to feeds and queued google sync', async () => {

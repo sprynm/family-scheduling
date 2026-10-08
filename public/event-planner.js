@@ -357,7 +357,7 @@
             '</button>') +
           '<form class="sheet-note" data-note-form>' +
             '<label for="planner-note-' + root.id + '">Add a note</label>' +
-            '<p class="sheet-action-hint">Only shown here, not on calendars.</p>' +
+            '<p class="sheet-action-hint">Shows in this event’s details on the calendars. Only this date changes.</p>' +
             '<div class="sheet-note-row">' +
               '<input type="text" id="planner-note-' + root.id + '" name="note" maxlength="200" placeholder="e.g. Grandma driving" autocomplete="off" enterkeyhint="done" />' +
               '<button type="submit" class="sheet-note-save"' + disabled + '>Save</button>' +
@@ -461,7 +461,7 @@
             ? title + ' hidden from ' + hiddenTargetLabel(created || { payload }) + '.'
             : overrideType === 'maybe'
               ? title + ' marked maybe.'
-              : 'Note saved on ' + title + '.';
+              : 'Note added to ' + title + ' on the calendars.';
         showToast(message, created ? created.id : null);
       } catch (error) {
         state.busy = false;
