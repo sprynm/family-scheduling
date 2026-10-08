@@ -36,3 +36,12 @@ export function decorateEventSummary({ target, title, sourceIcon = '', sourcePre
   // The family feed and Google outputs apply the per-link prefix.
   return joinParts([resolvedPrefix, resolvedIcon, title]);
 }
+
+// Notes added in the planner go at the top of the event description, one "Note:" line each,
+// so they show on calendars without touching the title.
+export function addNotesToDescription(description, notes) {
+  const lines = String(notes || '').split('\n').map((note) => note.trim()).filter(Boolean);
+  if (!lines.length) return description || '';
+  const noteText = lines.map((note) => 'Note: ' + note).join('\n');
+  return description ? noteText + '\n\n' + description : noteText;
+}

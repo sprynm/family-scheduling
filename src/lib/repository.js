@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { DEFAULT_FLOATING_TIMEZONE, TARGETS, TARGET_LABELS } from './constants.js';
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, isGoogleRateLimitError, updateGoogleCalendarEvent } from './google-calendar.js';
 import { buildICS, expandRecurringEvent, formatEventDateTimeValue, parseICS } from './ics.js';
-import { decorateEventSummary } from './presentation.js';
+import { addNotesToDescription, decorateEventSummary } from './presentation.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -385,6 +385,20 @@ function buildUidStabilityReport(firstEvents, secondEvents) {
 }
 
 const GOOGLE_SYNC_JOB_CHUNK_SIZE = 10;
+// Active note changes for one occurrence: its own notes plus any series-wide notes, oldest first.
+// Used by the ICS feed and Google sync so a note alters only the occurrences it applies to.
+const OCCURRENCE_NOTES_SQL = `(
+  SELECT group_concat(note, char(10)) FROM (
+    SELECT json_extract(note_ov.payload_json, '$.note') AS note
+    FROM event_overrides note_ov
+    WHERE note_ov.canonical_event_id = canonical_events.id
+      AND note_ov.override_type = 'note'
+      AND note_ov.cleared_at IS NULL
+      AND (note_ov.event_instance_id = event_instances.id OR note_ov.event_instance_id IS NULL)
+    ORDER BY note_ov.created_at
+  )
+) AS occurrence_note`;
+
 // Only completed setup is cached per isolate. In-flight setup is never shared between requests:
 // Workers ties I/O to the request that started it, so if that request is cancelled the shared
 // promise never settles and every later request in the isolate hangs. Setup is idempotent, so
@@ -2037,6 +2051,7 @@ export class D1Repository {
          COALESCE(NULLIF(source_target_links.icon, ''), canonical_events.source_icon, sources.icon, '') AS source_icon,
          -- Google prefixes are a per-link rule: a blank link prefix means none, not the source's family-feed prefix.
          COALESCE(source_target_links.prefix, '') AS source_prefix,
+         ${OCCURRENCE_NOTES_SQL},
          event_instances.id AS event_instance_id,
          event_instances.occurrence_start_at,
          event_instances.occurrence_end_at
@@ -2113,7 +2128,7 @@ export class D1Repository {
         sourceIcon: row.source_icon,
         sourcePrefix: row.source_prefix,
       }),
-      description: row.description || '',
+      description: addNotesToDescription(row.description, row.occurrence_note),
       location: row.location || '',
       status: row.status === 'cancelled' ? 'cancelled' : 'confirmed',
       start: start?.type === 'date'
@@ -2606,6 +2621,7 @@ export class D1Repository {
         COALESCE(NULLIF(source_target_links.icon, ''), canonical_events.source_icon, sources.icon, '') AS source_icon,
         COALESCE(NULLIF(source_target_links.prefix, ''), canonical_events.source_prefix, sources.prefix, '') AS source_prefix,
         canonical_events.description,
+        ${OCCURRENCE_NOTES_SQL},
         canonical_events.location,
         canonical_events.status,
         event_instances.id AS event_instance_id,
@@ -2647,7 +2663,7 @@ export class D1Repository {
         sourcePrefix: row.source_prefix,
       }),
       sourceTitle: row.title,
-      description: row.description,
+      description: addNotesToDescription(row.description, row.occurrence_note),
       location: row.location,
       status: row.status,
       sourceIcon: row.source_icon,
