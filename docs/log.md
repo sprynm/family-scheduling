@@ -40,6 +40,8 @@ At closeout of a unit of work, insights should be compacted into:
 - Found while building it: `hidden` overrides need `payload.target_key`; the old forms never sent one, so Hidden had no effect. Maybe and note overrides are stored but no feed or Google output renders them; the planner labels them "only shown here".
 - Verified with a local mock harness and headless Chrome at 360x780 (Galaxy S23) and 390px: no horizontal overflow, 20/20 scripted interaction checks. Not yet verified against production data, on a real phone, or for the partner's Cloudflare Access login.
 - `/admin/feeds` still uses the old `admin.css` look.
+- Access gap fixed: Cloudflare Access covers `/admin/*` and `/api/*`, but static assets served `admin.html` at bare `/admin` (also `/admin-events`, `/admin-feeds`), and `/` redirected there, so the shell rendered for anyone. Now `assets.html_handling: none` plus `run_worker_first` for those page URLs, and the Worker redirects them under `/admin/`. The old login flow actually ended on the unprotected `/admin`: the Worker's `ASSETS.fetch('/admin.html')` got a 307 there from the default HTML handling.
+- Naomi's person colour changed from pink to green at her request.
 
 ### D1 waste from historical feed data (investigation)
 

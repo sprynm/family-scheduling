@@ -118,6 +118,16 @@ function requireFeedToken(request, env) {
   return null;
 }
 
+const UNPROTECTED_PAGE_REDIRECTS = {
+  '/': '/admin/',
+  '/admin': '/admin/',
+  '/admin.html': '/admin/',
+  '/admin-events': '/admin/events',
+  '/admin-events.html': '/admin/events',
+  '/admin-feeds': '/admin/feeds',
+  '/admin-feeds.html': '/admin/feeds',
+};
+
 function getAdminAssetPath(pathname) {
   if (pathname === '/admin/events' || pathname === '/admin/events/') {
     return '/admin-events.html';
@@ -296,12 +306,13 @@ export default {
       const pathname = url.pathname;
       const target = getRouteTarget(pathname);
 
-      if (pathname === '/') {
-        return Response.redirect(`${url.origin}/admin`, 302);
+      // Cloudflare Access protects /admin/*, not these bare page URLs; send them under it before anything renders.
+      const protectedPagePath = UNPROTECTED_PAGE_REDIRECTS[pathname];
+      if (protectedPagePath) {
+        return Response.redirect(`${url.origin}${protectedPagePath}${url.search}`, 302);
       }
 
       if (
-        pathname === '/admin' ||
         pathname === '/admin/' ||
         pathname === '/admin/events' ||
         pathname === '/admin/events/' ||

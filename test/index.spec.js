@@ -2489,8 +2489,8 @@ describe('family-scheduling worker', () => {
     expect(db.sourceCountQueryRuns).toBe(1);
   });
 
-  it('serves admin shell on /admin', async () => {
-    const request = new Request('http://example.com/admin', { headers: { 'x-user-role': 'admin' } });
+  it('serves admin shell on /admin/', async () => {
+    const request = new Request('http://example.com/admin/', { headers: { 'x-user-role': 'admin' } });
     const ctx = createExecutionContext();
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -2729,13 +2729,34 @@ describe('family-scheduling worker', () => {
     });
   });
 
-  it('redirects the root path to /admin', async () => {
+  it('redirects the root path under the Access-protected /admin/', async () => {
     const request = new Request('http://example.com/');
     const ctx = createExecutionContext();
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
     expect(response.status).toBe(302);
-    expect(response.headers.get('location')).toBe('http://example.com/admin');
+    expect(response.headers.get('location')).toBe('http://example.com/admin/');
+  });
+
+  it('redirects bare and .html page URLs under /admin/ instead of rendering them', async () => {
+    const expected = {
+      '/admin': '/admin/',
+      '/admin.html': '/admin/',
+      '/admin-events': '/admin/events',
+      '/admin-events.html': '/admin/events',
+      '/admin-feeds?target=family': '/admin/feeds?target=family',
+      '/admin-feeds.html': '/admin/feeds',
+    };
+    for (const [path, location] of Object.entries(expected)) {
+      // Even an authenticated request is redirected, so no page ever renders outside Cloudflare Access.
+      const request = new Request('http://example.com' + path, { headers: { 'x-user-role': 'admin' } });
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(request, env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(response.status, path).toBe(302);
+      expect(response.headers.get('location'), path).toBe('http://example.com' + location);
+      expect(env.ASSETS.fetch).not.toHaveBeenCalled();
+    }
   });
 
   it('renders child feeds with icon but without family prefix', async () => {

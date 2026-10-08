@@ -686,13 +686,13 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 :root {
   --person-grayson: #7cc0f5;
-  --person-naomi: #f59ac0;
+  --person-naomi: #8fd66e;
   --person-family: #c9d3dc;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --person-grayson: #1f5f99;
-    --person-naomi: #a3325f;
+    --person-naomi: #2f7a1f;
     --person-family: #4b5967;
   }
 }
@@ -738,6 +738,8 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   border-radius: 50%;
   background: var(--person);
 }
+/* On a filled (selected) toggle the person colour can be faint; ring it so the dot stays visible. */
+.planner-chip[aria-pressed="true"] .planner-chip-name::before { box-shadow: 0 0 0 2px var(--primary-ink); }
 .planner-chip[aria-pressed="true"] {
   background: var(--primary-bg);
   border-color: var(--primary-bg);
