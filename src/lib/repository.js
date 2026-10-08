@@ -1424,6 +1424,8 @@ export class D1Repository {
       throw new Error('Upload an ICS file before changing this source to an uploaded source');
     }
     const sourceCategory = String(input.source_category || existing.source_category || deriveSourceCategory(url || '', ownerType)).trim().toLowerCase();
+    // Promoting an upload pins the interval to daily; a source switched back to a URL must poll at the URL default again.
+    const convertingUploadToUrl = providerType === 'ics' && existing.provider_type === 'ics_upload';
     const updated = {
       name: String(input.name ?? existing.name ?? '').trim(),
       display_name: String(input.display_name ?? existing.display_name ?? input.name ?? existing.name ?? '').trim(),
@@ -1444,7 +1446,7 @@ export class D1Repository {
       ),
       is_active: toBoolInt(input.is_active, existing.is_active),
       sort_order: Number(input.sort_order ?? existing.sort_order ?? 0),
-      poll_interval_minutes: Number(input.poll_interval_minutes ?? existing.poll_interval_minutes ?? 30),
+      poll_interval_minutes: Number(input.poll_interval_minutes ?? (convertingUploadToUrl ? null : existing.poll_interval_minutes) ?? 30),
       quality_profile: input.quality_profile ?? existing.quality_profile,
     };
     await this.db.prepare(

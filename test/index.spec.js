@@ -77,8 +77,8 @@ class FakeStatement {
   }
 
   async run() {
-    this.db.run(this.sql, this.values);
-    return { success: true };
+    const changes = this.db.run(this.sql, this.values);
+    return { success: true, meta: { changes: Number(changes || 0) } };
   }
 }
 
@@ -95,6 +95,8 @@ class FakeDb {
     this.outputRules = [];
     this.googleEventLinks = [];
     this.syncJobs = [];
+    this.sourceUploads = [];
+    this.sourceIngestLocks = [];
     this.googleEventLinkGoogleEventIdNotNull = 0;
     this.googleEventLinksV2 = null;
     this.sourceCountQueryRuns = 0;
@@ -109,6 +111,31 @@ class FakeDb {
   }
 
   run(sql, values) {
+    if (sql.includes('INSERT INTO source_ingest_locks')) {
+      const [sourceId, lockToken, expiresAt, now] = values;
+      const existing = this.sourceIngestLocks.find((row) => row.source_id === sourceId);
+      if (!existing) {
+        this.sourceIngestLocks.push({ source_id: sourceId, lock_token: lockToken, expires_at: expiresAt });
+        return 1;
+      }
+      if (String(existing.expires_at) > String(now)) return 0;
+      Object.assign(existing, { lock_token: lockToken, expires_at: expiresAt });
+      return 1;
+    }
+
+    if (sql.includes('DELETE FROM source_ingest_locks')) {
+      const [sourceId, lockToken] = values;
+      const before = this.sourceIngestLocks.length;
+      this.sourceIngestLocks = this.sourceIngestLocks.filter((row) => (
+        row.source_id !== sourceId || (lockToken !== undefined && row.lock_token !== lockToken)
+      ));
+      return before - this.sourceIngestLocks.length;
+    }
+
+    if (sql.includes('source_uploads') || (sql.includes('UPDATE sources') && sql.includes("provider_type = 'ics_upload'"))) {
+      return this.runSourceUploads(sql, values);
+    }
+
     if (sql.includes('CREATE TABLE IF NOT EXISTS output_targets')) {
       return;
     }
@@ -244,11 +271,12 @@ class FakeDb {
     }
 
     if (sql.includes('INSERT INTO sources')) {
-      const hasUidFallbackColumns = sql.includes('uid_fallback_enabled');
+      // Mirrors D1Repository.insertSource: uid_fallback_checked_at/report_json are NULL and is_active is 1 in the SQL.
       const [
         id,
         name,
         displayName,
+        providerType,
         ownerType,
         sourceCategory,
         url,
@@ -258,44 +286,33 @@ class FakeDb {
         includeInFamilyIcs,
         includeInChildGoogleOutput,
         titleRewriteRulesJson,
-        uidFallbackEnabledOrSortOrder,
-        uidFallbackCheckedAtOrPollIntervalMinutes,
-        uidFallbackReportJsonOrQualityProfile,
-        maybeIsActive,
-        maybeSortOrder,
-        maybePollIntervalMinutes,
-        maybeQualityProfile,
-        maybeCreatedAt,
-        maybeUpdatedAt,
+        uidFallbackEnabled,
+        sortOrder,
+        pollIntervalMinutes,
+        qualityProfile,
+        createdAt,
+        updatedAt,
       ] = values;
-      const uidFallbackEnabled = hasUidFallbackColumns ? uidFallbackEnabledOrSortOrder : 0;
-      const uidFallbackCheckedAt = hasUidFallbackColumns ? uidFallbackCheckedAtOrPollIntervalMinutes : null;
-      const uidFallbackReportJson = hasUidFallbackColumns ? uidFallbackReportJsonOrQualityProfile : null;
-      const isActive = hasUidFallbackColumns ? maybeIsActive : 1;
-      const sortOrder = hasUidFallbackColumns ? maybeSortOrder : uidFallbackEnabledOrSortOrder;
-      const pollIntervalMinutes = hasUidFallbackColumns ? maybePollIntervalMinutes : uidFallbackCheckedAtOrPollIntervalMinutes;
-      const qualityProfile = hasUidFallbackColumns ? maybeQualityProfile : uidFallbackReportJsonOrQualityProfile;
-      const createdAt = hasUidFallbackColumns ? maybeCreatedAt : maybeCreatedAt;
-      const updatedAt = hasUidFallbackColumns ? maybeUpdatedAt : maybeUpdatedAt;
       this.sources.push({
         id,
         name,
         display_name: displayName,
-        provider_type: 'ics',
+        provider_type: providerType,
         owner_type: ownerType,
         source_category: sourceCategory,
         url,
         icon,
         prefix,
         fetch_url_secret_ref: null,
+        upload_revision: 0,
         include_in_child_ics: includeInChildIcs,
         include_in_family_ics: includeInFamilyIcs,
         include_in_child_google_output: includeInChildGoogleOutput,
         title_rewrite_rules_json: titleRewriteRulesJson,
         uid_fallback_enabled: uidFallbackEnabled,
-        uid_fallback_checked_at: uidFallbackCheckedAt,
-        uid_fallback_report_json: uidFallbackReportJson,
-        is_active: isActive,
+        uid_fallback_checked_at: null,
+        uid_fallback_report_json: null,
+        is_active: 1,
         sort_order: sortOrder,
         poll_interval_minutes: pollIntervalMinutes,
         quality_profile: qualityProfile,
@@ -1026,6 +1043,9 @@ class FakeDb {
 
     if (sql.includes('UPDATE sources') && sql.includes('display_name')) {
       const hasUidFallbackColumns = sql.includes('uid_fallback_enabled');
+      const hasProviderType = sql.includes('provider_type = ?');
+      const providerType = hasProviderType ? values[2] : undefined;
+      if (hasProviderType) values = [...values.slice(0, 2), ...values.slice(3)];
       const [name, displayName, ownerType, sourceCategory, url, icon, prefix, includeInChildIcs, includeInFamilyIcs, includeInChildGoogleOutput, titleRewriteRulesJson, uidFallbackEnabledOrIsActive, maybeIsActive, maybeSortOrder, maybePollIntervalMinutes, maybeQualityProfile, maybeUpdatedAt, sourceId] = values;
       const uidFallbackEnabled = hasUidFallbackColumns ? uidFallbackEnabledOrIsActive : 0;
       const isActive = hasUidFallbackColumns ? maybeIsActive : uidFallbackEnabledOrIsActive;
@@ -1053,10 +1073,98 @@ class FakeDb {
           poll_interval_minutes: pollIntervalMinutes,
           quality_profile: qualityProfile,
           updated_at: updatedAt,
+          ...(providerType !== undefined ? { provider_type: providerType } : {}),
         });
       }
       return;
     }
+  }
+
+  runSourceUploads(sql, values) {
+    if (sql.includes('CREATE ')) return 0;
+    if (sql.includes('INSERT INTO source_uploads')) {
+      const [id, sourceId, revision, blobRef, fileName, payloadHash, uploadedAt, guardSourceId, guardRevision] = values;
+      const source = this.sources.find((row) => row.id === guardSourceId && Number(row.upload_revision || 0) === Number(guardRevision));
+      if (!source) return 0;
+      this.sourceUploads.push({
+        id,
+        source_id: sourceId,
+        revision,
+        blob_ref: blobRef,
+        file_name: fileName,
+        payload_hash: payloadHash,
+        uploaded_at: uploadedAt,
+        status: 'pending',
+        applied_at: null,
+        last_error: null,
+      });
+      return 1;
+    }
+    if (sql.includes("SET status = 'active'")) {
+      const [appliedAt, uploadId, sourceId, revision] = values;
+      const upload = this.sourceUploads.find((row) => row.id === uploadId && row.status === 'pending');
+      const newerPending = this.sourceUploads.some((row) => row.source_id === sourceId && row.status === 'pending' && Number(row.revision) > Number(revision));
+      if (!upload || newerPending) return 0;
+      Object.assign(upload, { status: 'active', applied_at: appliedAt, last_error: null });
+      return 1;
+    }
+    if (sql.includes("SET status = 'superseded'") && sql.includes("status = 'active'") && sql.includes('current.id = ?')) {
+      const [sourceId, uploadId] = values;
+      if (this.sourceUploads.find((row) => row.id === uploadId)?.status !== 'active') return 0;
+      let changes = 0;
+      for (const row of this.sourceUploads) {
+        if (row.source_id === sourceId && row.id !== uploadId && row.status === 'active') {
+          row.status = 'superseded';
+          changes += 1;
+        }
+      }
+      return changes;
+    }
+    if (sql.includes('UPDATE sources') && sql.includes("provider_type = 'ics_upload'")) {
+      const [updatedAt, sourceId, uploadId] = values;
+      if (this.sourceUploads.find((row) => row.id === uploadId)?.status !== 'active') return 0;
+      const source = this.sources.find((row) => row.id === sourceId);
+      if (!source) return 0;
+      Object.assign(source, { provider_type: 'ics_upload', url: null, poll_interval_minutes: 1440, updated_at: updatedAt });
+      return 1;
+    }
+    if (sql.includes("SET status = 'superseded'")) {
+      // Covers the pending supersede on staging/replacement and the pending/active supersede on URL conversion.
+      const [sourceId, ...rest] = values;
+      const statuses = sql.includes("'pending', 'active'") ? ['pending', 'active'] : ['pending'];
+      if (sql.includes('upload_revision = ?')) {
+        const [, guardRevision] = rest;
+        const source = this.sources.find((row) => row.id === sourceId);
+        if (Number(source?.upload_revision || 0) !== Number(guardRevision)) return 0;
+      }
+      const excludeId = sql.includes('id <> ?') ? rest[0] : null;
+      let changes = 0;
+      for (const row of this.sourceUploads) {
+        if (row.source_id !== sourceId || !statuses.includes(row.status) || row.id === excludeId) continue;
+        row.status = 'superseded';
+        if (sql.includes("last_error = 'Replaced by a newer upload'")) row.last_error = 'Replaced by a newer upload';
+        changes += 1;
+      }
+      return changes;
+    }
+    if (sql.includes('UPDATE source_uploads SET last_error = ?')) {
+      const [message, uploadId] = values;
+      const upload = this.sourceUploads.find((row) => row.id === uploadId && row.status === 'pending');
+      if (!upload) return 0;
+      upload.last_error = message;
+      return 1;
+    }
+    if (sql.includes('DELETE FROM source_uploads WHERE id = ?')) {
+      const before = this.sourceUploads.length;
+      this.sourceUploads = this.sourceUploads.filter((row) => row.id !== values[0] || (sql.includes("status = '") && !sql.includes(`status = '${row.status}'`)));
+      return before - this.sourceUploads.length;
+    }
+    if (sql.includes('DELETE FROM source_uploads WHERE source_id = ?')) {
+      const before = this.sourceUploads.length;
+      this.sourceUploads = this.sourceUploads.filter((row) => row.source_id !== values[0]);
+      return before - this.sourceUploads.length;
+    }
+    return 0;
   }
 
   runAll(sql, values) {
@@ -1074,19 +1182,35 @@ class FakeDb {
         .slice(0, limit || Infinity)
         .map((row) => ({ payload_blob_ref: row.payload_blob_ref }));
     }
+    if (sql.includes('SELECT blob_ref FROM source_uploads WHERE source_id = ?')) {
+      return this.sourceUploads.filter((row) => row.source_id === values[0]).map((row) => ({ blob_ref: row.blob_ref }));
+    }
+    if (sql.includes('FROM source_uploads') && sql.includes("status = 'superseded'") && sql.includes('uploaded_at < ?')) {
+      const [cutoff, limit] = values;
+      return this.sourceUploads
+        .filter((row) => row.status === 'superseded' && String(row.uploaded_at) < String(cutoff))
+        .slice(0, limit || Infinity)
+        .map((row) => ({ id: row.id, blob_ref: row.blob_ref }));
+    }
     if (sql.includes('FROM sources s') && sql.includes('LEFT JOIN (') && sql.includes('last_fetched_at') && sql.includes('WHERE s.is_active = 1')) {
       const now = Date.now();
+      const includeAll = !sql.includes('datetime(');
       return this.sources
         .filter((source) => {
-          if (!source.is_active || !source.url) return false;
+          if (!source.is_active) return false;
+          const liveUploads = this.sourceUploads.filter((row) => row.source_id === source.id && ['pending', 'active'].includes(row.status));
+          if (!source.url && !liveUploads.length) return false;
+          if (includeAll) return true;
           const snapshots = this.sourceSnapshots
             .filter((row) => row.source_id === source.id)
             .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)));
-          const latest = snapshots[0];
-          if (!latest?.fetched_at) return true;
-          const lastFetchedAt = new Date(latest.fetched_at).getTime();
+          const latestUploadAt = liveUploads.map((row) => row.uploaded_at).sort().pop();
+          const lastSeenAt = snapshots[0]?.fetched_at || latestUploadAt;
+          if (!lastSeenAt) return true;
+          const lastFetchedAt = new Date(lastSeenAt).getTime();
           if (!Number.isFinite(lastFetchedAt)) return true;
-          return lastFetchedAt <= now - Number(source.poll_interval_minutes || 30) * 60 * 1000;
+          const intervalMinutes = source.provider_type === 'ics_upload' ? 1440 : Number(source.poll_interval_minutes || 30);
+          return lastFetchedAt <= now - intervalMinutes * 60 * 1000;
         })
         .sort((a, b) => String(a.owner_type).localeCompare(String(b.owner_type)) || Number(a.sort_order || 0) - Number(b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
     }
@@ -1501,6 +1625,23 @@ class FakeDb {
   }
 
   runFirst(sql, values) {
+    if (sql.includes('SET upload_revision = upload_revision + 1')) {
+      const [updatedAt, sourceId] = values;
+      const source = this.sources.find((row) => row.id === sourceId);
+      if (!source) return null;
+      source.upload_revision = Number(source.upload_revision || 0) + 1;
+      source.updated_at = updatedAt;
+      return { upload_revision: source.upload_revision };
+    }
+    if (sql.includes('SELECT * FROM source_uploads WHERE id = ?')) {
+      return this.sourceUploads.find((row) => row.id === values[0]) || null;
+    }
+    if (sql.includes('FROM source_uploads') && sql.includes('ORDER BY revision DESC')) {
+      const [sourceId, ...statuses] = values;
+      return this.sourceUploads
+        .filter((row) => row.source_id === sourceId && statuses.includes(row.status))
+        .sort((a, b) => Number(b.revision) - Number(a.revision))[0] || null;
+    }
     if (sql.includes('SELECT COUNT(*) AS count FROM canonical_events')) {
       return { count: this.canonicalEvents.length };
     }
@@ -3228,6 +3369,141 @@ describe('family-scheduling worker', () => {
     expect(updatedLinks.some((row) => row.target_key === 'naomi_clubs')).toBe(false);
   });
 
+  describe('uploaded ICS sources', () => {
+    const icsDay = (offsetDays) => new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+    const buildUploadIcs = (uids) => [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      ...uids.flatMap((uid, index) => [
+        'BEGIN:VEVENT',
+        `UID:${uid}`,
+        `SUMMARY:Soccer ${uid}`,
+        `DTSTART:${icsDay(10 + index)}T170000Z`,
+        `DTEND:${icsDay(10 + index)}T180000Z`,
+        'BEGIN:VALARM',
+        'ACTION:DISPLAY',
+        'DESCRIPTION:Reminder',
+        'TRIGGER:-PT30M',
+        'END:VALARM',
+        'END:VEVENT',
+      ]),
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const uploadRequest = (path, metadata, icsText, fileName = 'soccer.ics') => {
+      const form = new FormData();
+      form.set('metadata', JSON.stringify(metadata));
+      form.set('file', new File([icsText], fileName, { type: 'text/calendar' }));
+      return new Request(`http://example.com${path}`, { method: 'POST', headers: { 'x-user-role': 'admin' }, body: form });
+    };
+    const send = async (request) => {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(request, env, ctx);
+      await waitOnExecutionContext(ctx);
+      return { status: response.status, body: await response.json() };
+    };
+    const liveEvents = (sourceId) => env.APP_DB.canonicalEvents.filter((row) => row.source_id === sourceId && !Number(row.source_deleted));
+    const metadata = {
+      owner_type: 'naomi',
+      display_name: 'Naomi Soccer',
+      include_in_child_ics: true,
+      include_in_family_ics: false,
+      include_in_child_google_output: false,
+      target_links: [{ target_key: 'naomi', icon: '⚽', prefix: '' }],
+    };
+
+    beforeEach(() => {
+      const objects = new Map();
+      env.SNAPSHOTS = {
+        objects,
+        put: vi.fn(async (key, value) => { objects.set(key, String(value)); }),
+        get: vi.fn(async (key) => (objects.has(key) ? { text: async () => objects.get(key) } : null)),
+        delete: vi.fn(async (keys) => { for (const key of [].concat(keys)) objects.delete(key); }),
+      };
+    });
+
+    afterEach(() => {
+      delete env.SNAPSHOTS;
+    });
+
+    it('creates a source from an upload, ingests it, and drops events missing from a re-upload', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1', 'game-2'])));
+      expect(created.status).toBe(202);
+      expect(created.body.queued).toBe(true);
+      const sourceId = created.body.source.id;
+      expect(created.body.source.provider_type).toBe('ics_upload');
+      expect(env.SNAPSHOTS.objects.has(`uploads/${sourceId}/1.ics`)).toBe(true);
+
+      await drainQueue(env);
+      const firstUpload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId && row.revision === 1);
+      expect(firstUpload.status).toBe('active');
+      expect(env.APP_DB.sources.find((row) => row.id === sourceId).poll_interval_minutes).toBe(1440);
+      expect(liveEvents(sourceId).map((row) => row.title).sort()).toEqual(['Soccer game-1', 'Soccer game-2']);
+      // VALARM properties must not leak into the parent event.
+      expect(liveEvents(sourceId).every((row) => row.description !== 'Reminder')).toBe(true);
+
+      const replaced = await send(uploadRequest(`/api/sources/${sourceId}/upload`, metadata, buildUploadIcs(['game-2']), 'soccer-v2.ics'));
+      expect(replaced.status).toBe(202);
+      await drainQueue(env);
+
+      expect(env.APP_DB.sourceUploads.find((row) => row.id === firstUpload.id).status).toBe('superseded');
+      expect(env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId && row.revision === 2).status).toBe('active');
+      expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer game-2']);
+      expect(env.APP_DB.sourceIngestLocks).toHaveLength(0);
+    });
+
+    it('restores the URL poll interval when an uploaded source is switched back to a URL', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      await drainQueue(env);
+      expect(env.APP_DB.sources.find((row) => row.id === sourceId).poll_interval_minutes).toBe(1440);
+
+      const patched = await send(new Request(`http://example.com/api/sources/${sourceId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-user-role': 'admin' },
+        body: JSON.stringify({ provider_type: 'ics', url: 'https://example.com/naomi-soccer.ics' }),
+      }));
+
+      expect(patched.status).toBe(200);
+      const source = env.APP_DB.sources.find((row) => row.id === sourceId);
+      expect(source.provider_type).toBe('ics');
+      expect(source.url).toBe('https://example.com/naomi-soccer.ics');
+      expect(source.poll_interval_minutes).toBe(30);
+      expect(env.APP_DB.sourceUploads.filter((row) => row.source_id === sourceId).every((row) => row.status === 'superseded')).toBe(true);
+    });
+
+    it('rejects an incomplete calendar without creating a source or storing the file', async () => {
+      const sourceCount = env.APP_DB.sources.length;
+      const truncated = buildUploadIcs(['game-1']).replace(/\r\nEND:VCALENDAR$/, '');
+
+      const rejected = await send(uploadRequest('/api/sources/upload', metadata, truncated));
+
+      expect(rejected.status).toBe(400);
+      expect(rejected.body.message).toMatch(/closed VCALENDAR/);
+      expect(env.APP_DB.sources).toHaveLength(sourceCount);
+      expect(env.SNAPSHOTS.objects.size).toBe(0);
+      expect(env.JOBS_QUEUE.sent).toHaveLength(0);
+    });
+
+    it('returns 503 instead of editing a source while its ingest lock is held', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      env.APP_DB.sourceIngestLocks.push({
+        source_id: sourceId,
+        lock_token: 'held-by-another-ingest',
+        expires_at: new Date(Date.now() + 60 * 1000).toISOString(),
+      });
+
+      const patched = await send(new Request(`http://example.com/api/sources/${sourceId}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-user-role': 'admin' },
+        body: JSON.stringify({ display_name: 'Renamed' }),
+      }));
+
+      expect(patched.status).toBe(503);
+      expect(env.APP_DB.sources.find((row) => row.id === sourceId).display_name).toBe('Naomi Soccer');
+    });
+  });
+
   it('creates google targets through admin API', async () => {
     const request = new Request('http://example.com/api/targets', {
       method: 'POST',
@@ -3776,8 +4052,8 @@ describe('family-scheduling worker', () => {
               'BEGIN:VEVENT',
               'UID:family-same-state-1',
               'SUMMARY:Family Dinner',
-              'DTSTART:20260610T010000Z',
-              'DTEND:20260610T020000Z',
+              'DTSTART:20990610T010000Z',
+              'DTEND:20990610T020000Z',
               'END:VEVENT',
               'END:VCALENDAR',
             ]
@@ -3785,8 +4061,8 @@ describe('family-scheduling worker', () => {
               'BEGIN:VCALENDAR',
               'BEGIN:VEVENT',
               'UID:family-same-state-1',
-              'DTEND:20260610T020000Z',
-              'DTSTART:20260610T010000Z',
+              'DTEND:20990610T020000Z',
+              'DTSTART:20990610T010000Z',
               'SUMMARY:Family Dinner',
               'END:VEVENT',
               'END:VCALENDAR',
