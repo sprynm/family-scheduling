@@ -2,15 +2,15 @@
 // an event "not going", flag it as maybe, add a note, or hide it from one calendar, with undo.
 // Mounts into every [data-event-planner] element. Uses the same API as the admin console.
 (() => {
+  // Toggle filters: none selected shows everyone; select one or more to narrow the list.
   const PEOPLE = [
-    { key: '', label: 'Everyone' },
     { key: 'grayson', label: 'Grayson' },
     { key: 'naomi', label: 'Naomi' },
     { key: 'family', label: 'Family' },
   ];
   const PERSON_LABEL = { grayson: 'Grayson', naomi: 'Naomi', family: 'Family' };
   const CHANGE_LABEL = { skip: 'Not going', maybe: 'Maybe', note: 'Note', hidden: 'Hidden' };
-  const STORAGE_KEY = 'eventPlanner.person';
+  const STORAGE_KEY = 'eventPlanner.people';
   const TOAST_MS = 7000;
   const DAY_MS = 86400000;
 
@@ -41,12 +41,17 @@
     return response.json();
   }
 
-  function readStoredPerson() {
-    try { return localStorage.getItem(STORAGE_KEY) || ''; } catch { return ''; }
+  function readStoredPeople() {
+    try { return new Set(String(localStorage.getItem(STORAGE_KEY) || '').split(',').filter((key) => PERSON_LABEL[key])); } catch { return new Set(); }
   }
 
-  function storePerson(value) {
-    try { localStorage.setItem(STORAGE_KEY, value); } catch {}
+  function storePeople(people) {
+    try { localStorage.setItem(STORAGE_KEY, [...people].join(',')); } catch {}
+  }
+
+  function listNames(keys) {
+    const names = keys.map((key) => PERSON_LABEL[key] || key);
+    return names.length > 1 ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] : names[0] || '';
   }
 
   // All-day events are stored as UTC midnight spanning whole days; show them by their UTC date.
@@ -92,7 +97,7 @@
       instances: [],
       overrides: [],
       targets: null,
-      person: readStoredPerson(),
+      people: readStoredPeople(),
       query: '',
       tab: 'upcoming',
       loading: true,
@@ -105,7 +110,7 @@
     if (sticky) root.classList.add('planner-sticky');
     root.innerHTML =
       '<div class="planner-controls">' +
-        '<div class="planner-people" role="group" aria-label="Show events for"></div>' +
+        '<div class="planner-people" role="group" aria-label="Show only these people. None selected shows everyone."></div>' +
         '<div class="planner-search">' +
           '<label class="visually-hidden" for="planner-search-' + root.id + '">Search events</label>' +
           '<input type="search" id="planner-search-' + root.id + '" placeholder="Search events" autocomplete="off" enterkeyhint="search" />' +
@@ -191,14 +196,18 @@
     function visibleInstances() {
       const query = state.query.trim().toLowerCase();
       return state.instances.filter((instance) => {
-        if (state.person && instance.owner_type !== state.person) return false;
+        if (!showsPerson(instance.owner_type)) return false;
         if (query && !String(instance.title || '').toLowerCase().includes(query) && !String(instance.source_name || '').toLowerCase().includes(query)) return false;
         return true;
       });
     }
 
+    function showsPerson(owner) {
+      return !state.people.size || state.people.has(owner);
+    }
+
     function personCounts() {
-      const counts = { '': state.instances.length };
+      const counts = {};
       for (const instance of state.instances) counts[instance.owner_type] = (counts[instance.owner_type] || 0) + 1;
       return counts;
     }
@@ -206,14 +215,14 @@
     function renderPeople() {
       const counts = personCounts();
       peopleEl.innerHTML = PEOPLE
-        .filter((person) => !person.key || counts[person.key])
-        .map((person) => '<button type="button" class="planner-chip" data-person="' + person.key + '" aria-pressed="' + (state.person === person.key) + '"' + (person.key ? ' data-owner="' + person.key + '"' : '') + '>' +
-          escapeHtml(person.label) + ' <span class="planner-chip-count">' + (state.loading ? '' : (counts[person.key] || 0)) + '</span></button>')
+        .map((person) => '<button type="button" class="planner-chip" data-person="' + person.key + '" data-owner="' + person.key + '" aria-pressed="' + state.people.has(person.key) + '">' +
+          '<span class="planner-chip-name">' + escapeHtml(person.label) + '</span>' +
+          '<span class="planner-chip-count">' + (state.loading ? '' : (counts[person.key] || 0) + ((counts[person.key] || 0) === 1 ? ' event' : ' events')) + '</span></button>')
         .join('');
     }
 
     function renderTabs() {
-      const changedCount = state.overrides.filter((override) => !state.person || override.owner_type === state.person).length;
+      const changedCount = state.overrides.filter((override) => showsPerson(override.owner_type)).length;
       root.querySelectorAll('[data-planner-tab]').forEach((tab) => {
         const selected = tab.dataset.plannerTab === state.tab;
         tab.setAttribute('aria-selected', String(selected));
@@ -265,8 +274,8 @@
         if (state.query) {
           return '<div class="planner-empty"><p>No events match “' + escapeHtml(state.query) + '”.</p><button type="button" data-planner-clear-search>Clear search</button></div>';
         }
-        if (state.person) {
-          return '<div class="planner-empty"><p>Nothing coming up for ' + escapeHtml(PERSON_LABEL[state.person] || state.person) + '.</p><button type="button" data-person="">Show everyone</button></div>';
+        if (state.people.size) {
+          return '<div class="planner-empty"><p>Nothing coming up for ' + escapeHtml(listNames([...state.people])) + '.</p><button type="button" data-planner-show-everyone>Show everyone</button></div>';
         }
         return '<div class="planner-empty"><p>No upcoming events.</p></div>';
       }
@@ -277,7 +286,7 @@
 
     function renderChanged() {
       const items = state.overrides
-        .filter((override) => !state.person || override.owner_type === state.person)
+        .filter((override) => showsPerson(override.owner_type))
         .sort((x, y) => String(x.event_date || '').localeCompare(String(y.event_date || '')));
       if (!items.length) {
         return '<div class="planner-empty"><p>No changes yet. Tap any upcoming event to mark it not going, maybe, or add a note.</p></div>';
@@ -494,9 +503,12 @@
     peopleEl.addEventListener('click', (event) => {
       const chip = event.target.closest('[data-person]');
       if (!chip) return;
-      state.person = chip.dataset.person;
-      storePerson(state.person);
+      const key = chip.dataset.person;
+      if (state.people.has(key)) state.people.delete(key);
+      else state.people.add(key);
+      storePeople(state.people);
       render();
+      peopleEl.querySelector('[data-person="' + key + '"]')?.focus();
     });
 
     searchEl.addEventListener('input', () => {
@@ -527,10 +539,9 @@
         searchEl.focus();
         return;
       }
-      const emptyPerson = event.target.closest('.planner-empty [data-person]');
-      if (emptyPerson) {
-        state.person = emptyPerson.dataset.person;
-        storePerson(state.person);
+      if (event.target.closest('[data-planner-show-everyone]')) {
+        state.people.clear();
+        storePeople(state.people);
         render();
         return;
       }

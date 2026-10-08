@@ -709,25 +709,32 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 }
 
 .planner-people {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.5rem;
+  max-width: 30rem;
   padding: 2px;
 }
 .planner-chip {
-  flex: none;
-  min-height: 2.75rem;
-  padding: 0.4rem 1rem;
-  border-radius: 999px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+  min-height: 3.5rem;
+  padding: 0.4rem 0.4rem;
+  border-radius: 12px;
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--ink);
   font-size: 1rem;
 }
-.planner-chip[data-owner]::before {
+.planner-chip-name { display: inline-flex; align-items: center; gap: 0.35rem; font-weight: 700; }
+.planner-chip-name::before {
   content: "";
   width: 0.65rem;
   height: 0.65rem;
+  flex: none;
   border-radius: 50%;
   background: var(--person);
 }
@@ -736,7 +743,7 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   border-color: var(--primary-bg);
   color: var(--primary-ink);
 }
-.planner-chip-count { font-weight: 400; opacity: 0.8; font-variant-numeric: tabular-nums; }
+.planner-chip-count { font-size: 0.8125rem; font-weight: 400; opacity: 0.85; font-variant-numeric: tabular-nums; }
 .planner-chip-count:empty { display: none; }
 
 .planner-search input { min-height: 3rem; font-size: 1.0625rem; }
@@ -754,7 +761,7 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   font-size: 1rem;
 }
 .planner-tabs [role="tab"][aria-selected="true"] { color: var(--ink); border-bottom-color: var(--result); }
-.planner-refresh { flex: none; }
+.planner-refresh { flex: none; min-height: 2.75rem; }
 
 .planner-loading { padding: 2rem 0; color: var(--muted); }
 
@@ -1068,3 +1075,10 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 /* Example shown beside a field label so it stays visible while typing. */
 .field-label-example { margin-left: 0.5rem; font-weight: 400; color: var(--muted); }
 .field-label-example code { color: var(--ink); }
+
+/* Phones: slightly tighter page gutters so the person toggles and tab row fit at 360px. */
+@media (max-width: 400px) {
+  .planner-page .planner-shell { padding: 0 0.75rem 6rem; }
+  .planner-tabs [role="tab"] { padding: 0.4rem 0.7rem; }
+  .planner-refresh { padding: 0.45rem 0.75rem; }
+}
