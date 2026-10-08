@@ -9,6 +9,7 @@ const ICON_OPTIONS = [
   { value: '🏈', label: '🏈 Football' },
   { value: '🏀', label: '🏀 Basketball' },
   { value: '🏐', label: '🏐 Volleyball' },
+  { value: '⚽', label: '⚽ Soccer' },
   { value: '⚾', label: '⚾ Baseball' },
   { value: '🥍', label: '🥍 Lacrosse' },
   { value: '𝄞', label: '𝄞 Music' },
@@ -34,7 +35,12 @@ const statusEl = document.getElementById('status');
     // sources
     const sourceForm = document.getElementById('source-form');
     const sourceNameInput = document.getElementById('source-name');
+    const sourceTypeInput = document.getElementById('source-type');
+    const sourceUrlField = document.getElementById('source-url-field');
     const sourceUrlInput = document.getElementById('source-url');
+    const sourceUploadField = document.getElementById('source-upload-field');
+    const sourceFileInput = document.getElementById('source-file');
+    const sourceUploadCurrentEl = document.getElementById('source-upload-current');
     const sourceTitleRulesInput = document.getElementById('source-title-rules');
     const sourceUidFallbackInput = document.getElementById('source-uid-fallback');
     const sourceDiagnosticEl = document.getElementById('source-diagnostic');
@@ -264,13 +270,33 @@ const statusEl = document.getElementById('status');
       return `UID fallback: ${mode}. Last check: ${label}. ${recommendation}. ${report.message || ''}`.trim();
     }
 
-    function applySourceFormState({ id = '', name = '', url = '', titleRulesText = '', uidFallbackEnabled = false, uidFallbackReport = null, links = [] }, { focus = false, scroll = false } = {}) {
+    function syncSourceTypeFields() {
+      const isUpload = sourceTypeInput.value === 'ics_upload';
+      sourceUrlField.hidden = isUpload;
+      sourceUploadField.hidden = !isUpload;
+      sourceUrlInput.required = !isUpload;
+      const editingId = sourceForm.getAttribute('data-editing-id') || '';
+      const existingUpload = sourceForm.dataset.sourceProviderType === 'ics_upload' || sourceForm.dataset.sourceUploadStatus === 'pending';
+      sourceFileInput.required = isUpload && (!editingId || !existingUpload);
+    }
+
+    function applySourceFormState({ id = '', name = '', url = '', providerType = 'ics', uploadFileName = '', lastUploadedAt = '', uploadStatus = '', titleRulesText = '', uidFallbackEnabled = false, uidFallbackReport = null, links = [] }, { focus = false, scroll = false } = {}) {
       sourceNameInput.value = name;
       sourceUrlInput.value = url;
+      sourceTypeInput.value = providerType === 'ics_upload' || uploadStatus === 'pending' ? 'ics_upload' : 'ics';
+      sourceFileInput.value = '';
+      sourceForm.dataset.sourceProviderType = providerType;
+      sourceForm.dataset.sourceUploadStatus = uploadStatus;
+      const uploadedLabel = uploadFileName
+        ? `Current file: ${uploadFileName}${lastUploadedAt ? ` · uploaded ${formatUiDate(lastUploadedAt, { includeTime: true })}` : ''}${uploadStatus === 'pending' ? ' · waiting to process' : ''}`
+        : '';
+      sourceUploadCurrentEl.textContent = uploadedLabel;
       sourceTitleRulesInput.value = titleRulesText;
       sourceTitleRulesDirty = false;
       sourceUidFallbackInput.checked = !!uidFallbackEnabled;
-      sourceDiagnosticEl.textContent = formatUidFallbackDiagnostic({ source_url: url, report: uidFallbackReport });
+      sourceDiagnosticEl.textContent = sourceTypeInput.value === 'ics_upload'
+        ? 'Uploaded calendars use the same event identity and UID fallback matching. UID stability can be compared after another version is uploaded.'
+        : formatUidFallbackDiagnostic({ source_url: url, report: uidFallbackReport });
       sourceIcsOutputsEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
         cb.checked = links.some((link) => (link.target_id && link.target_id === cb.value) || (link.target_key === cb.dataset.targetSlug));
       });
@@ -290,6 +316,7 @@ const statusEl = document.getElementById('status');
         sourceForm.removeAttribute('data-editing-id');
         document.getElementById('source-save').textContent = 'Add Source';
       }
+      syncSourceTypeFields();
       if (focus) sourceNameInput.focus();
       if (scroll) sourceForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -490,6 +517,12 @@ const statusEl = document.getElementById('status');
         sourcesBody,
         sortedSources.slice(0, 30).map((s) => {
           const lastFetch = formatUiDate(s.last_fetched_at, { includeTime: true });
+          const isUploadedSource = s.provider_type === 'ics_upload' || s.upload_status === 'pending';
+          const lastProcessed = s.last_upload_processed_at
+            ? formatUiDate(s.last_upload_processed_at, { includeTime: true })
+            : isUploadedSource
+              ? '—'
+              : lastFetch;
           const status = buildSourceStatus(s);
           const syncCounts = s.google_sync_counts || {};
           const hasGoogleTarget = Array.isArray(s.target_links) && s.target_links.some((link) => link.target_type === 'google');
@@ -514,7 +547,7 @@ const statusEl = document.getElementById('status');
             '</div>';
           const eventsCell = '<div>' +
             '<div style="font-weight:600">' + Number(s.event_count || 0) + '</div>' +
-            '<div class="hint">from feed</div>' +
+            '<div class="hint">' + (isUploadedSource ? 'from upload' : 'from feed') + '</div>' +
             '</div>';
           const syncDefCell = '<div>' +
             '<div>' + (hasGoogleTarget ? 'Google sync\'d: ' + Number(syncCounts.synced || 0) : 'Google sync: n/a') + '</div>' +
@@ -523,10 +556,16 @@ const statusEl = document.getElementById('status');
           const fallbackSummary = buildUidFallbackSummary(s);
           const statusBody = '<div class="hint status-stack-body">' +
             '<div>Errors: ' + Number(syncCounts.errors || 0) + '</div>' +
-            '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>' +
+            (isUploadedSource
+              ? '<div>Last uploaded: ' + escapeHtml(formatUiDate(s.last_uploaded_at, { includeTime: true })) + '</div>' +
+                '<div>Last processed: ' + escapeHtml(lastProcessed) + '</div>' +
+                (s.upload_file_name ? '<div>File: ' + escapeHtml(s.upload_file_name) + '</div>' : '') +
+                '<div>Upload the complete calendar again when the schedule changes.</div>'
+              : '<div>Last fetch: ' + escapeHtml(lastFetch) + '</div>') +
             (fallbackSummary ? '<div>' + escapeHtml(fallbackSummary) + '</div>' : '') +
             '</div>' +
-            (status.detail ? '<div class="hint status-stack-detail" style="' + detailStyle + '" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '');
+            (status.detail ? '<div class="hint status-stack-detail" style="' + detailStyle + '" title="' + escapeHtml(status.detail) + '">' + escapeHtml(status.detail) + '</div>' : '') +
+            (s.upload_last_error ? '<div class="hint status-stack-detail" style="color:#7a1c1c">Upload: ' + escapeHtml(s.upload_last_error) + '</div>' : '');
           const statusCell = status.tone === 'ok'
             ? '<details class="status-stack status-stack-ok"><summary><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><span class="hint">details</span></summary><div class="status-stack-panel">' + statusBody + '</div></details>'
             : '<div class="status-stack"><span style="' + statusStyle + '">' + escapeHtml(status.label) + '</span><div class="status-stack-panel">' + statusBody + '</div></div>';
@@ -537,7 +576,7 @@ const statusEl = document.getElementById('status');
           '<td>' + statusCell + '</td>' +
           '<td><div class="actions">' +
           '<button class="primary rebuild-source" data-source-id="' + (s.id || '') + '">Rebuild</button>' +
-          '<button class="change-source" data-source-id="' + (s.id || '') + '" data-source-name="' + (s.display_name || s.name || '').replace(/"/g, '&quot;') + '" data-source-url="' + (s.url || '').replace(/"/g, '&quot;') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-uid-fallback="' + (Number(s.uid_fallback_enabled || 0) ? '1' : '0') + '" data-source-uid-fallback-report="' + encodeURIComponent(JSON.stringify(s.uid_fallback_report || null)) + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
+          '<button class="change-source" data-source-id="' + escapeHtml(s.id || '') + '" data-source-name="' + escapeHtml(s.display_name || s.name || '') + '" data-source-url="' + escapeHtml(s.url || '') + '" data-source-provider-type="' + escapeHtml(s.provider_type || 'ics') + '" data-source-upload-file-name="' + escapeHtml(s.upload_file_name || '') + '" data-source-uploaded-at="' + escapeHtml(s.last_uploaded_at || '') + '" data-source-upload-status="' + escapeHtml(s.upload_status || '') + '" data-source-title-rules="' + encodeURIComponent(s.title_rewrite_rules_text || '') + '" data-source-uid-fallback="' + (Number(s.uid_fallback_enabled || 0) ? '1' : '0') + '" data-source-uid-fallback-report="' + encodeURIComponent(JSON.stringify(s.uid_fallback_report || null)) + '" data-source-links="' + JSON.stringify(Array.isArray(s.target_links) ? s.target_links : []).replace(/"/g, '&quot;') + '">Change</button>' +
           '<button class="danger disable-source" data-source-id="' + (s.id || '') + '">Disable</button>' +
           '<button class="danger delete-source" data-source-id="' + (s.id || '') + '">Delete</button>' +
           '</div></td></tr>';
@@ -567,6 +606,10 @@ const statusEl = document.getElementById('status');
           const id = btn.getAttribute('data-source-id');
           const name = btn.getAttribute('data-source-name') || '';
           const url = btn.getAttribute('data-source-url') || '';
+          const providerType = btn.getAttribute('data-source-provider-type') || 'ics';
+          const uploadFileName = btn.getAttribute('data-source-upload-file-name') || '';
+          const lastUploadedAt = btn.getAttribute('data-source-uploaded-at') || '';
+          const uploadStatus = btn.getAttribute('data-source-upload-status') || '';
           const titleRulesText = decodeURIComponent(btn.getAttribute('data-source-title-rules') || '');
           const uidFallbackEnabled = btn.getAttribute('data-source-uid-fallback') === '1';
           let uidFallbackReport = null;
@@ -576,7 +619,7 @@ const statusEl = document.getElementById('status');
           let links = [];
           try { links = JSON.parse(btn.getAttribute('data-source-links') || '[]'); } catch {}
           applySourceFormState(
-            { id, name, url, titleRulesText, uidFallbackEnabled, uidFallbackReport, links },
+            { id, name, url, providerType, uploadFileName, lastUploadedAt, uploadStatus, titleRulesText, uidFallbackEnabled, uidFallbackReport, links },
             { focus: true, scroll: true }
           );
         });
@@ -752,6 +795,10 @@ const statusEl = document.getElementById('status');
               id: source.id,
               name: source.display_name || source.name || '',
               url: source.url || '',
+              providerType: source.provider_type || 'ics',
+              uploadFileName: source.upload_file_name || '',
+              lastUploadedAt: source.last_uploaded_at || '',
+              uploadStatus: source.upload_status || '',
               titleRulesText: source.title_rewrite_rules_text || '',
               uidFallbackEnabled: Number(source.uid_fallback_enabled || 0) === 1,
               uidFallbackReport: source.uid_fallback_report || null,
@@ -1003,13 +1050,17 @@ const statusEl = document.getElementById('status');
     // --- Source form ---
     sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);
     sourceGoogleOutputsEl.addEventListener('change', syncTargetRuleInputs);
+    sourceTypeInput.addEventListener('change', syncSourceTypeFields);
     sourceTitleRulesInput.addEventListener('input', () => {
       sourceTitleRulesDirty = true;
     });
 
     function resetSourceForm() {
       sourceNameInput.value = '';
+      sourceTypeInput.value = 'ics';
       sourceUrlInput.value = '';
+      sourceFileInput.value = '';
+      sourceUploadCurrentEl.textContent = '';
       sourceTitleRulesInput.value = '';
       sourceTitleRulesDirty = false;
       sourceUidFallbackInput.checked = false;
@@ -1019,6 +1070,9 @@ const statusEl = document.getElementById('status');
       sourceRuleState.clear();
       syncTargetRuleInputs();
       sourceForm.removeAttribute('data-editing-id');
+      delete sourceForm.dataset.sourceProviderType;
+      delete sourceForm.dataset.sourceUploadStatus;
+      syncSourceTypeFields();
       document.getElementById('source-save').textContent = 'Add Source';
     }
 
@@ -1027,14 +1081,21 @@ const statusEl = document.getElementById('status');
       const saveBtn = document.getElementById('source-save');
       saveBtn.disabled = true;
       const editingId = sourceForm.getAttribute('data-editing-id') || null;
+      const providerType = sourceTypeInput.value;
+      const originalProviderType = sourceForm.dataset.sourceProviderType || 'ics';
+      const uploadStatus = sourceForm.dataset.sourceUploadStatus || '';
+      const selectedFile = sourceFileInput.files?.[0] || null;
       setStatus(editingId ? 'Updating source...' : 'Saving source...', false);
       try {
         const sourceUrl = String(sourceUrlInput.value || '').trim();
         const selectedIcs = getCheckedTargets(sourceIcsOutputsEl);
         const selectedGoogle = getCheckedTargets(sourceGoogleOutputsEl);
 
-        if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
+        if (providerType === 'ics' && !sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
           throw new Error('Source URL must start with http:// or https://');
+        }
+        if (providerType === 'ics_upload' && !selectedFile && (!editingId || (originalProviderType !== 'ics_upload' && uploadStatus !== 'pending'))) {
+          throw new Error('Choose a complete .ics file to create or convert this source.');
         }
         if (!selectedIcs.length && !selectedGoogle.length) {
           throw new Error('Select at least one output (ICS or Google).');
@@ -1054,7 +1115,6 @@ const statusEl = document.getElementById('status');
         const body = {
           owner_type: ownerType,
           display_name: sourceNameInput.value,
-          url: sourceUrl,
           include_in_child_ics: selectedIcsSlugs.includes('grayson') || selectedIcsSlugs.includes('naomi'),
           include_in_family_ics: selectedIcsSlugs.includes('family'),
           include_in_child_google_output: selectedGoogle.length > 0,
@@ -1062,19 +1122,36 @@ const statusEl = document.getElementById('status');
           uid_fallback_enabled: sourceUidFallbackInput.checked,
           target_links: targetLinks,
         };
+        if (providerType === 'ics') {
+          body.provider_type = 'ics';
+          body.url = sourceUrl;
+        }
         if (editingId && !sourceTitleRulesDirty) {
           delete body.title_rewrite_rules_text;
         }
 
         let savedSource = null;
-        if (editingId) {
+        let uploadResult = null;
+        if (providerType === 'ics_upload' && selectedFile) {
+          const uploadForm = new FormData();
+          uploadForm.set('metadata', JSON.stringify(body));
+          uploadForm.set('file', selectedFile, selectedFile.name);
+          const endpoint = editingId
+            ? '/api/sources/' + encodeURIComponent(editingId) + '/upload'
+            : '/api/sources/upload';
+          const response = await fetchJson(endpoint, { method: 'POST', body: uploadForm });
+          uploadResult = response;
+          savedSource = response.source || null;
+        } else if (editingId) {
+          if (providerType === 'ics_upload' && originalProviderType === 'ics_upload') {
+            body.provider_type = 'ics_upload';
+          }
           const response = await fetchJson('/api/sources/' + encodeURIComponent(editingId), {
             method: 'PATCH',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
           });
           savedSource = response.source || null;
-          setStatus('Source updated.', false);
         } else {
           const response = await fetchJson('/api/sources', {
             method: 'POST',
@@ -1082,11 +1159,19 @@ const statusEl = document.getElementById('status');
             body: JSON.stringify(body),
           });
           savedSource = response.source || null;
-          setStatus('Source saved. Queue a rebuild to ingest it now.', false);
         }
 
         if (savedSource && savedSource.id) {
           sourceForm.setAttribute('data-editing-id', savedSource.id);
+          if (providerType === 'ics_upload') {
+            await loadDashboard();
+            setStatus(uploadResult?.queued
+              ? `ICS upload accepted. Ingest queued${uploadResult.job?.id ? ` (${uploadResult.job.id})` : ''}.`
+              : uploadResult
+                ? `ICS upload saved, but ingest was not queued. Use Rebuild to retry. ${uploadResult.queue_error || ''}`.trim()
+                : 'Source settings updated. The uploaded calendar remains in use.', !uploadResult?.queued && !!uploadResult);
+            return;
+          }
           setStatus('Source saved. Running UID stability test...', false);
           try {
             const diagnosticPayload = await fetchJson('/api/sources/' + encodeURIComponent(savedSource.id) + '/diagnose', {

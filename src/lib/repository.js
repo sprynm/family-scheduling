@@ -598,6 +598,34 @@ export class D1Repository {
       `CREATE UNIQUE INDEX IF NOT EXISTS source_target_links_source_target_idx
        ON source_target_links(source_id, target_key)`
     ).run();
+    await this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS source_uploads (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        blob_ref TEXT NOT NULL UNIQUE,
+        file_name TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        uploaded_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        applied_at TEXT,
+        last_error TEXT,
+        UNIQUE (source_id, revision),
+        FOREIGN KEY (source_id) REFERENCES sources(id)
+      )`
+    ).run();
+    await this.db.prepare(
+      `CREATE INDEX IF NOT EXISTS source_uploads_source_status_revision_idx
+       ON source_uploads(source_id, status, revision)`
+    ).run();
+    await this.db.prepare(
+      `CREATE TABLE IF NOT EXISTS source_ingest_locks (
+        source_id TEXT PRIMARY KEY,
+        lock_token TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (source_id) REFERENCES sources(id)
+      )`
+    ).run();
 
     const ensureColumn = async (column, definition) => {
       try {
@@ -612,6 +640,12 @@ export class D1Repository {
     await ensureColumn('prefix', "TEXT NOT NULL DEFAULT ''");
     await ensureColumn('sort_order', 'INTEGER NOT NULL DEFAULT 0');
     await ensureColumn('target_id', 'TEXT REFERENCES output_targets(id)');
+    try {
+      await this.db.prepare(`ALTER TABLE sources ADD COLUMN upload_revision INTEGER NOT NULL DEFAULT 0`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
     try {
       await this.db.prepare(`ALTER TABLE sources ADD COLUMN title_rewrite_rules_json TEXT NOT NULL DEFAULT '[]'`).run();
     } catch (error) {
@@ -892,7 +926,13 @@ export class D1Repository {
          s.title_rewrite_rules_json,
          s.uid_fallback_enabled, s.uid_fallback_checked_at, s.uid_fallback_report_json,
          s.include_in_child_ics, s.include_in_family_ics, s.include_in_child_google_output,
-         s.is_active, s.sort_order, s.poll_interval_minutes, s.quality_profile, s.updated_at,
+         s.is_active, s.sort_order, s.poll_interval_minutes, s.quality_profile, s.upload_revision, s.updated_at,
+         latest_upload.file_name AS upload_file_name,
+         latest_upload.uploaded_at AS last_uploaded_at,
+         latest_upload.status AS upload_status,
+         latest_upload.last_error AS upload_last_error,
+         latest_upload.revision AS last_uploaded_revision,
+         active_upload.applied_at AS last_upload_processed_at,
          snap.fetched_at AS last_fetched_at,
          snap.http_status AS last_http_status,
          snap.parse_status AS last_parse_status,
@@ -906,6 +946,13 @@ export class D1Repository {
        ) latest ON latest.source_id = s.id
        LEFT JOIN source_snapshots snap
          ON snap.source_id = s.id AND snap.fetched_at = latest.max_fetched_at
+       LEFT JOIN source_uploads latest_upload
+         ON latest_upload.source_id = s.id
+        AND latest_upload.revision = (
+          SELECT MAX(upload_revision.revision) FROM source_uploads upload_revision WHERE upload_revision.source_id = s.id
+        )
+       LEFT JOIN source_uploads active_upload
+         ON active_upload.source_id = s.id AND active_upload.status = 'active'
        LEFT JOIN (
          SELECT source_id, COUNT(*) AS event_count
          FROM canonical_events
@@ -1041,25 +1088,60 @@ export class D1Repository {
   }
 
   async createSource(input) {
-    const timestamp = nowIso();
     const url = ensureHttpsUrl(input.url);
+    return this.insertSource(input, {
+      providerType: 'ics',
+      url,
+      sourceId: stableId('src', `${normalizeOwnerType(input.owner_type)}:${url}`),
+    });
+  }
+
+  async createUploadedSource(input, upload) {
+    if (!this.env.SNAPSHOTS?.put) {
+      throw new Error('Uploaded ICS storage is unavailable: the SNAPSHOTS R2 binding is required');
+    }
+    const sourceId = makeOpaqueId('src', `${normalizeOwnerType(input.owner_type)}:${input.display_name || input.name || ''}`);
+    try {
+      await this.insertSource(input, {
+        providerType: 'ics_upload',
+        url: null,
+        sourceId,
+      });
+      return await this.stageSourceUpload(sourceId, upload);
+    } catch (error) {
+      const uploads = await this.db.prepare(`SELECT blob_ref FROM source_uploads WHERE source_id = ?`).bind(sourceId).all();
+      const blobRefs = (uploads.results || []).map((row) => row.blob_ref).filter(Boolean);
+      if (blobRefs.length && this.env.SNAPSHOTS?.delete) {
+        try { await this.env.SNAPSHOTS.delete(blobRefs); } catch {}
+      }
+      await this.db.batch([
+        this.db.prepare(`DELETE FROM source_uploads WHERE source_id = ?`).bind(sourceId),
+        this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId),
+        this.db.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId),
+      ]);
+      throw error;
+    }
+  }
+
+  async insertSource(input, { providerType, url, sourceId }) {
+    const timestamp = nowIso();
     const ownerType = normalizeOwnerType(input.owner_type);
-    const sourceCategory = String(input.source_category || deriveSourceCategory(url, ownerType)).trim().toLowerCase();
-    const displayName = String(input.display_name || input.name || buildLegacyDisplayName(ownerType, url, 0)).trim();
+    const sourceCategory = String(input.source_category || deriveSourceCategory(url || '', ownerType)).trim().toLowerCase();
+    const displayName = String(input.display_name || input.name || (url ? buildLegacyDisplayName(ownerType, url, 0) : `${ownerType}-calendar-upload`)).trim();
     const name = String(input.name || displayName).trim();
     const titleRewriteRules = normalizeTitleRewriteRules(input.title_rewrite_rules ?? input.title_rewrite_rules_text ?? []);
-    const sourceId = stableId('src', `${ownerType}:${url}`);
     await this.db.prepare(
       `INSERT INTO sources (
         id, name, display_name, provider_type, owner_type, source_category, url, icon, prefix, fetch_url_secret_ref,
         include_in_child_ics, include_in_family_ics, include_in_child_google_output, title_rewrite_rules_json,
         uid_fallback_enabled, uid_fallback_checked_at, uid_fallback_report_json,
         is_active, sort_order, poll_interval_minutes, quality_profile, created_at, updated_at
-      ) VALUES (?, ?, ?, 'ics', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)`
     ).bind(
       sourceId,
       name,
       displayName,
+      providerType,
       ownerType,
       sourceCategory,
       url,
@@ -1087,15 +1169,265 @@ export class D1Repository {
     return this.getSourceById(sourceId);
   }
 
+  async getSourceUploadById(uploadId) {
+    const row = await this.db.prepare(`SELECT * FROM source_uploads WHERE id = ?`).bind(uploadId).first();
+    return mapRow(row);
+  }
+
+  async getLatestSourceUpload(sourceId, statuses = ['pending', 'active']) {
+    const allowedStatuses = Array.isArray(statuses) ? statuses.filter((status) => ['pending', 'active', 'superseded'].includes(status)) : [];
+    if (!allowedStatuses.length) return null;
+    const placeholders = allowedStatuses.map(() => '?').join(', ');
+    const row = await this.db.prepare(
+      `SELECT * FROM source_uploads
+       WHERE source_id = ? AND status IN (${placeholders})
+       ORDER BY revision DESC
+       LIMIT 1`
+    ).bind(sourceId, ...allowedStatuses).first();
+    return mapRow(row);
+  }
+
+  async withSourceIngestLock(sourceId, operation) {
+    const lockToken = makeOpaqueId('ingest', sourceId);
+    const now = nowIso();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    const acquired = await this.db.prepare(
+      `INSERT INTO source_ingest_locks (source_id, lock_token, expires_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(source_id) DO UPDATE SET
+         lock_token = excluded.lock_token,
+         expires_at = excluded.expires_at
+       WHERE source_ingest_locks.expires_at <= ?`
+    ).bind(sourceId, lockToken, expiresAt, now).run();
+    if (Number(acquired?.meta?.changes || 0) !== 1) {
+      const error = new Error(`Source ingestion is already running: ${sourceId}`);
+      error.status = 503;
+      throw error;
+    }
+    try {
+      return await operation();
+    } finally {
+      await this.db.prepare(
+        `DELETE FROM source_ingest_locks WHERE source_id = ? AND lock_token = ?`
+      ).bind(sourceId, lockToken).run();
+    }
+  }
+
+  async stageSourceUpload(sourceId, upload) {
+    const staged = await this.withSourceIngestLock(sourceId, () => this.stageSourceUploadUnlocked(sourceId, upload));
+    return this.enqueueStagedSourceUpload(sourceId, staged);
+  }
+
+  async replaceSourceUpload(sourceId, input, upload) {
+    if (!(await this.getSourceById(sourceId))) return null;
+    const staged = await this.withSourceIngestLock(sourceId, async () => {
+      await this.validateSourceUpdateInput(sourceId, input);
+      const pendingUpload = await this.stageSourceUploadUnlocked(sourceId, upload, { supersedePending: false });
+      try {
+        pendingUpload.source = await this.updateSourceUnlocked(sourceId, input);
+        await this.db.prepare(
+          `UPDATE source_uploads SET status = 'superseded', last_error = 'Replaced by a newer upload'
+           WHERE source_id = ? AND status = 'pending' AND id <> ?`
+        ).bind(sourceId, pendingUpload.upload.id).run();
+        return pendingUpload;
+      } catch (error) {
+        const current = await this.getSourceUploadById(pendingUpload.upload.id);
+        if (current?.status === 'pending') {
+          await this.db.prepare(`DELETE FROM source_uploads WHERE id = ? AND status = 'pending'`).bind(current.id).run();
+        }
+        try { await this.env.SNAPSHOTS?.delete?.(current?.blob_ref || pendingUpload.blobRef); } catch {}
+        throw error;
+      }
+    });
+    return this.enqueueStagedSourceUpload(sourceId, staged);
+  }
+
+  async stageSourceUploadUnlocked(sourceId, upload, { supersedePending = true } = {}) {
+    const source = await this.getSourceById(sourceId);
+    if (!source) throw new Error(`Unknown source: ${sourceId}`);
+    if (!Number(source.is_active)) throw new Error(`Source is inactive: ${sourceId}`);
+    if (!this.env.SNAPSHOTS?.put) {
+      throw new Error('Uploaded ICS storage is unavailable: the SNAPSHOTS R2 binding is required');
+    }
+
+    const revisionRow = await this.db.prepare(
+      `UPDATE sources SET upload_revision = upload_revision + 1, updated_at = ? WHERE id = ? RETURNING upload_revision`
+    ).bind(nowIso(), sourceId).first();
+    const revision = Number(revisionRow?.upload_revision || 0);
+    if (!revision) throw new Error(`Could not allocate an upload revision for source: ${sourceId}`);
+    const uploadId = stableId('upl', `${sourceId}:${revision}`);
+    const blobRef = `uploads/${sourceId}/${revision}.ics`;
+    const uploadedAt = nowIso();
+    const payloadHash = String(upload.payloadHash || hashValue(upload.body));
+    let stored = false;
+    try {
+      await this.env.SNAPSHOTS.put(blobRef, upload.body, {
+        httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
+        customMetadata: { sourceId, uploadId, revision: String(revision) },
+      });
+      stored = true;
+      const statements = [];
+      if (supersedePending) {
+        statements.push(this.db.prepare(
+          `UPDATE source_uploads
+           SET status = 'superseded', last_error = 'Replaced by a newer upload'
+           WHERE source_id = ? AND status = 'pending'
+             AND EXISTS (SELECT 1 FROM sources WHERE id = ? AND upload_revision = ?)`
+        ).bind(sourceId, sourceId, revision));
+      }
+      statements.push(this.db.prepare(
+          `INSERT INTO source_uploads (
+            id, source_id, revision, blob_ref, file_name, payload_hash, uploaded_at, status, applied_at, last_error
+          ) SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL
+            FROM sources WHERE id = ? AND upload_revision = ?`
+        ).bind(
+          uploadId,
+          sourceId,
+          revision,
+          blobRef,
+          upload.fileName,
+          payloadHash,
+          uploadedAt,
+          sourceId,
+          revision
+        ));
+      const results = await this.db.batch(statements);
+      const insertResult = results?.[results.length - 1];
+      if (Number(insertResult?.meta?.changes || 0) !== 1) {
+        throw new Error('A newer ICS upload was accepted before this file could be queued. Upload it again.');
+      }
+    } catch (error) {
+      if (stored && this.env.SNAPSHOTS?.delete) {
+        try { await this.env.SNAPSHOTS.delete(blobRef); } catch {}
+      }
+      throw error;
+    }
+
+    return {
+      source: await this.getSourceById(sourceId),
+      upload: { id: uploadId, revision, file_name: upload.fileName, uploaded_at: uploadedAt, status: 'pending' },
+      blobRef,
+    };
+  }
+
+  async enqueueStagedSourceUpload(sourceId, staged) {
+    const { upload } = staged;
+    let job = null;
+    let queueError = null;
+    try {
+      job = await this.enqueueJob({
+        jobType: 'rebuild_source',
+        scopeType: 'source',
+        scopeId: sourceId,
+        payload: { uploadId: upload.id, uploadRevision: upload.revision },
+        dedupe: false,
+      });
+    } catch (error) {
+      queueError = error instanceof Error ? error.message : String(error);
+      await this.db.prepare(`UPDATE source_uploads SET last_error = ? WHERE id = ? AND status = 'pending'`).bind(queueError, upload.id).run();
+    }
+
+    return {
+      source: await this.getSourceById(sourceId),
+      upload,
+      job,
+      queued: Boolean(job),
+      queue_error: queueError,
+    };
+  }
+
+  async promoteSourceUpload(sourceId, uploadId) {
+    const upload = await this.getSourceUploadById(uploadId);
+    if (!upload || upload.source_id !== sourceId) throw new Error(`Unknown uploaded ICS revision: ${uploadId}`);
+    const appliedAt = nowIso();
+    const results = await this.db.batch([
+      this.db.prepare(
+        `UPDATE source_uploads
+         SET status = 'active', applied_at = ?, last_error = NULL
+         WHERE id = ? AND status = 'pending'
+           AND NOT EXISTS (
+             SELECT 1 FROM source_uploads newer
+             WHERE newer.source_id = ? AND newer.status = 'pending' AND newer.revision > ?
+           )`
+      ).bind(appliedAt, uploadId, sourceId, upload.revision),
+      this.db.prepare(
+        `UPDATE source_uploads SET status = 'superseded'
+         WHERE source_id = ? AND id <> ? AND status = 'active'
+           AND EXISTS (SELECT 1 FROM source_uploads current WHERE current.id = ? AND current.status = 'active')`
+      ).bind(sourceId, uploadId, uploadId),
+      this.db.prepare(
+        `UPDATE sources
+         SET provider_type = 'ics_upload', url = NULL, poll_interval_minutes = 1440, updated_at = ?
+         WHERE id = ? AND EXISTS (SELECT 1 FROM source_uploads current WHERE current.id = ? AND current.status = 'active')`
+      ).bind(appliedAt, sourceId, uploadId),
+    ]);
+    const changes = Number(results?.[0]?.meta?.changes || 0);
+    const currentUpload = await this.getSourceUploadById(uploadId);
+    return { applied: changes > 0 || currentUpload?.status === 'active', upload: currentUpload };
+  }
+
+  async markSourceUploadError(uploadId, error) {
+    const message = String(error || 'Upload processing failed').slice(0, 1000);
+    await this.db.prepare(
+      `UPDATE source_uploads SET last_error = ? WHERE id = ? AND status = 'pending'`
+    ).bind(message, uploadId).run();
+  }
+
   async updateSource(sourceId, input) {
+    if (!(await this.getSourceById(sourceId))) return null;
+    return this.withSourceIngestLock(sourceId, () => this.updateSourceUnlocked(sourceId, input));
+  }
+
+  async validateSourceUpdateInput(sourceId, input) {
+    const existing = await this.getSourceById(sourceId);
+    if (!existing) return false;
+    const ownerType = input.owner_type !== undefined ? normalizeOwnerType(input.owner_type) : existing.owner_type;
+    const providerType = String(input.provider_type ?? existing.provider_type ?? 'ics').trim().toLowerCase();
+    if (!['ics', 'ics_upload'].includes(providerType)) {
+      throw new Error(`Unsupported provider_type: ${providerType}`);
+    }
+    if (providerType === 'ics') {
+      const rawUrl = input.url !== undefined ? input.url : existing.url;
+      if (!String(rawUrl || '').trim()) throw new Error('Source URL is required for URL sources');
+      ensureHttpsUrl(rawUrl);
+    } else if (existing.provider_type !== 'ics_upload' && !(await this.getLatestSourceUpload(sourceId, ['pending', 'active']))) {
+      throw new Error('Upload an ICS file before changing this source to an uploaded source');
+    }
+    normalizeTitleRewriteRules(input.title_rewrite_rules ?? input.title_rewrite_rules_text ?? existing.title_rewrite_rules_json ?? []);
+    const targetLinksInput = Array.isArray(input.target_links) ? input.target_links : input.target_keys;
+    if (Array.isArray(targetLinksInput)) {
+      const defaults = {
+        ownerType,
+        icon: input.icon ?? existing.icon ?? '',
+        prefix: input.prefix ?? existing.prefix ?? this.derivePrefix(ownerType),
+      };
+      const normalizedLinks = normalizeTargetLinks(targetLinksInput, ownerType, defaults);
+      for (const item of normalizedLinks) await this.resolveInputTarget(item, defaults);
+    }
+    return true;
+  }
+
+  async updateSourceUnlocked(sourceId, input) {
     const existing = await this.getSourceById(sourceId);
     if (!existing) return null;
     const ownerType = input.owner_type !== undefined ? normalizeOwnerType(input.owner_type) : existing.owner_type;
-    const url = input.url !== undefined ? ensureHttpsUrl(input.url) : existing.url;
-    const sourceCategory = String(input.source_category || deriveSourceCategory(url, ownerType)).trim().toLowerCase();
+    const providerType = String(input.provider_type ?? existing.provider_type ?? 'ics').trim().toLowerCase();
+    if (!['ics', 'ics_upload'].includes(providerType)) {
+      throw new Error(`Unsupported provider_type: ${providerType}`);
+    }
+    let url = null;
+    if (providerType === 'ics') {
+      const rawUrl = input.url !== undefined ? input.url : existing.url;
+      if (!String(rawUrl || '').trim()) throw new Error('Source URL is required for URL sources');
+      url = ensureHttpsUrl(rawUrl);
+    } else if (existing.provider_type !== 'ics_upload' && !(await this.getLatestSourceUpload(sourceId, ['pending', 'active']))) {
+      throw new Error('Upload an ICS file before changing this source to an uploaded source');
+    }
+    const sourceCategory = String(input.source_category || existing.source_category || deriveSourceCategory(url || '', ownerType)).trim().toLowerCase();
     const updated = {
       name: String(input.name ?? existing.name ?? '').trim(),
       display_name: String(input.display_name ?? existing.display_name ?? input.name ?? existing.name ?? '').trim(),
+      provider_type: providerType,
       owner_type: ownerType,
       source_category: sourceCategory,
       url,
@@ -1117,13 +1449,14 @@ export class D1Repository {
     };
     await this.db.prepare(
       `UPDATE sources
-       SET name = ?, display_name = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
+       SET name = ?, display_name = ?, provider_type = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
            include_in_child_ics = ?, include_in_family_ics = ?, include_in_child_google_output = ?, title_rewrite_rules_json = ?,
            uid_fallback_enabled = ?, is_active = ?, sort_order = ?, poll_interval_minutes = ?, quality_profile = ?, updated_at = ?
        WHERE id = ?`
     ).bind(
       updated.name,
       updated.display_name,
+      updated.provider_type,
       updated.owner_type,
       updated.source_category,
       updated.url,
@@ -1141,6 +1474,12 @@ export class D1Repository {
       nowIso(),
       sourceId
     ).run();
+    if (providerType === 'ics' && input.provider_type === 'ics') {
+      await this.db.prepare(
+        `UPDATE source_uploads SET status = 'superseded'
+         WHERE source_id = ? AND status IN (${existing.provider_type === 'ics_upload' ? "'pending', 'active'" : "'pending'"})`
+      ).bind(sourceId).run();
+    }
     const targetLinksInput = Array.isArray(input.target_links) ? input.target_links : input.target_keys;
     if (Array.isArray(targetLinksInput)) {
       await this.setSourceTargets(sourceId, targetLinksInput, {
@@ -1221,6 +1560,11 @@ export class D1Repository {
   }
 
   async disableSource(sourceId) {
+    if (!(await this.getSourceById(sourceId))) return null;
+    return this.withSourceIngestLock(sourceId, () => this.disableSourceUnlocked(sourceId));
+  }
+
+  async disableSourceUnlocked(sourceId) {
     const timestamp = nowIso();
     await this.db.batch([
       this.db.prepare(`UPDATE sources SET is_active = 0, updated_at = ? WHERE id = ?`).bind(timestamp, sourceId),
@@ -1240,9 +1584,22 @@ export class D1Repository {
   }
 
   async deleteSource(sourceId) {
+    if (!(await this.getSourceById(sourceId))) return null;
+    return this.withSourceIngestLock(sourceId, () => this.deleteSourceUnlocked(sourceId));
+  }
+
+  async deleteSourceUnlocked(sourceId) {
     const existing = await this.getSourceById(sourceId);
     if (!existing) return null;
     const timestamp = nowIso();
+    const uploadsResult = await this.db.prepare(
+      `SELECT blob_ref FROM source_uploads WHERE source_id = ?`
+    ).bind(sourceId).all();
+    const uploadBlobRefs = (uploadsResult.results || []).map((row) => row.blob_ref).filter(Boolean);
+    if (uploadBlobRefs.length && !this.env.SNAPSHOTS?.delete) {
+      throw new Error('Uploaded ICS storage is unavailable; cannot permanently delete this source file');
+    }
+    if (uploadBlobRefs.length) await this.env.SNAPSHOTS.delete(uploadBlobRefs);
     // All deletes are independent (same sourceId / subquery) — batch for atomicity
     await this.db.batch([
       // Unfinished jobs for a deleted source can never complete; leaving them queued keeps the admin polling.
@@ -1259,6 +1616,8 @@ export class D1Repository {
       this.db.prepare(`DELETE FROM canonical_events WHERE source_id = ?`).bind(sourceId),
       this.db.prepare(`DELETE FROM source_events WHERE source_id = ?`).bind(sourceId),
       this.db.prepare(`DELETE FROM source_snapshots WHERE source_id = ?`).bind(sourceId),
+      this.db.prepare(`DELETE FROM source_uploads WHERE source_id = ?`).bind(sourceId),
+      this.db.prepare(`DELETE FROM source_ingest_locks WHERE source_id = ?`).bind(sourceId),
       this.db.prepare(`DELETE FROM source_target_links WHERE source_id = ?`).bind(sourceId),
       this.db.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId),
     ]);
@@ -2172,7 +2531,8 @@ export class D1Repository {
       `INSERT INTO sync_jobs (id, job_type, scope_type, scope_id, status, started_at)
        VALUES (?, ?, ?, ?, 'queued', ?)`
     ).bind(jobId, jobType, scopeType, scopeId || null, timestamp).run();
-    if (this.env.JOBS_QUEUE?.send) {
+    try {
+      if (!this.env.JOBS_QUEUE?.send) throw new Error('Job queue binding is unavailable');
       await this.env.JOBS_QUEUE.send({
         jobId,
         jobType,
@@ -2180,6 +2540,14 @@ export class D1Repository {
         scopeId: scopeId || null,
         ...(payload && typeof payload === 'object' ? payload : {}),
       });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.db.prepare(
+        `UPDATE sync_jobs
+         SET status = 'failed', finished_at = ?, error_json = ?, last_error_kind = 'queue_send'
+         WHERE id = ? AND status = 'queued'`
+      ).bind(nowIso(), JSON.stringify({ message, kind: 'queue_send' }), jobId).run();
+      throw error;
     }
     return {
       id: jobId,
@@ -2522,8 +2890,16 @@ export class D1Repository {
       prefix: cleanRuleValue(row.prefix),
       sort_order: Number(row.sort_order || 0),
     }));
+    const latestUpload = await this.getLatestSourceUpload(id, ['pending', 'active', 'superseded']);
+    const activeUpload = await this.getLatestSourceUpload(id, ['active']);
     return {
       ...mapRow(source),
+      upload_file_name: latestUpload?.file_name || null,
+      last_uploaded_at: latestUpload?.uploaded_at || null,
+      upload_status: latestUpload?.status || null,
+      upload_last_error: latestUpload?.last_error || null,
+      last_uploaded_revision: latestUpload?.revision ?? null,
+      last_upload_processed_at: activeUpload?.applied_at || null,
       title_rewrite_rules: normalizeTitleRewriteRules(source.title_rewrite_rules_json || []),
       title_rewrite_rules_text: titleRewriteRulesToText(source.title_rewrite_rules_json || []),
       uid_fallback_enabled: Number(source.uid_fallback_enabled || 0),
@@ -2616,6 +2992,18 @@ export class D1Repository {
   async diagnoseSourceIdentity(sourceId) {
     const source = await this.getSourceById(sourceId);
     if (!source) throw new Error(`Unknown source: ${sourceId}`);
+    if (source.provider_type === 'ics_upload') {
+      return {
+        source_id: source.id,
+        source_url: null,
+        fallback_enabled: Number(source.uid_fallback_enabled || 0),
+        report: {
+          status: 'unavailable',
+          recommendation: 'manual_compare',
+          message: 'Uploaded ICS sources have no remote URL to fetch twice. Re-upload a later complete version to compare UID stability.',
+        },
+      };
+    }
     const sourceUrl = ensureHttpsUrl(source.url);
 
     const fetchSnapshot = async () => {
@@ -2691,7 +3079,15 @@ export class D1Repository {
     return Number(result?.meta?.changes || 0);
   }
 
-  async listActiveSources() {
+  async listActiveSources({ includeAll = false } = {}) {
+    const dueFilter = includeAll ? '' : `
+         AND (
+           COALESCE(latest.last_fetched_at, latest_upload.uploaded_at) IS NULL
+           OR datetime(COALESCE(latest.last_fetched_at, latest_upload.uploaded_at)) <= datetime(
+             'now',
+             '-' || CASE WHEN s.provider_type = 'ics_upload' THEN 1440 ELSE s.poll_interval_minutes END || ' minutes'
+           )
+         )`;
     const result = await this.db.prepare(
       `SELECT s.*
        FROM sources s
@@ -2699,13 +3095,19 @@ export class D1Repository {
          SELECT source_id, MAX(fetched_at) AS last_fetched_at
          FROM source_snapshots
          GROUP BY source_id
-       ) latest ON latest.source_id = s.id
+         ) latest ON latest.source_id = s.id
+       LEFT JOIN (
+         SELECT source_id, MAX(uploaded_at) AS uploaded_at
+         FROM source_uploads
+         WHERE status IN ('pending', 'active')
+         GROUP BY source_id
+         ) latest_upload ON latest_upload.source_id = s.id
        WHERE s.is_active = 1
-         AND s.url IS NOT NULL
          AND (
-           latest.last_fetched_at IS NULL
-           OR datetime(latest.last_fetched_at) <= datetime('now', '-' || s.poll_interval_minutes || ' minutes')
+           s.url IS NOT NULL
+           OR EXISTS (SELECT 1 FROM source_uploads upload WHERE upload.source_id = s.id AND upload.status IN ('pending', 'active'))
          )
+         ${dueFilter}
        ORDER BY s.owner_type, s.sort_order, s.name`
     ).all();
     return result.results || [];
@@ -2720,6 +3122,8 @@ export class D1Repository {
     const failedJobCutoff = new Date(Date.now() - failedJobRetainDays * 24 * 60 * 60 * 1000).toISOString();
     const batchSize = 500;
     let blobKeysDeleted = 0;
+    let uploadBlobKeysDeleted = 0;
+    let uploadRowsDeleted = 0;
 
     // Delete old snapshot blobs in batches first.
     while (this.env.SNAPSHOTS?.delete) {
@@ -2741,6 +3145,25 @@ export class D1Repository {
     ).bind(cutoff).first();
     const rowsDeleted = Number(oldCountRow?.count || 0);
     await this.db.prepare(`DELETE FROM source_snapshots WHERE fetched_at < ?`).bind(cutoff).run();
+
+    // Keep current and pending source files indefinitely. Only expired superseded revisions are prunable.
+    while (this.env.SNAPSHOTS?.delete) {
+      const batch = await this.db.prepare(
+        `SELECT id, blob_ref FROM source_uploads
+         WHERE status = 'superseded' AND uploaded_at < ?
+         LIMIT ?`
+      ).bind(cutoff, batchSize).all();
+      const rows = batch.results || [];
+      const keys = rows.map((row) => row.blob_ref).filter(Boolean);
+      if (!rows.length) break;
+      await this.env.SNAPSHOTS.delete(keys);
+      uploadBlobKeysDeleted += keys.length;
+      await this.db.batch(rows.map((row) => this.db.prepare(
+        `DELETE FROM source_uploads WHERE id = ? AND status = 'superseded'`
+      ).bind(row.id)));
+      uploadRowsDeleted += rows.length;
+      if (rows.length < batchSize) break;
+    }
 
     const completedJobsDeletedRow = await this.db.prepare(
       `SELECT COUNT(*) AS count
@@ -2769,6 +3192,8 @@ export class D1Repository {
       cutoff,
       snapshotRowsDeleted: rowsDeleted,
       snapshotBlobKeysDeleted: blobKeysDeleted,
+      sourceUploadRowsDeleted: uploadRowsDeleted,
+      sourceUploadBlobKeysDeleted: uploadBlobKeysDeleted,
       completedJobRetainDays,
       completedJobCutoff,
       completedJobsDeleted,
@@ -2853,14 +3278,45 @@ export class D1Repository {
     return '';
   }
 
-  async ingestSource(sourceId, options = {}) {
+  async processSourceIngest(sourceId, options = {}) {
     const forceRefresh = options && options.forceRefresh === true;
     const source = await this.getSourceById(sourceId);
     if (!source) throw new Error(`Unknown source: ${sourceId}`);
     if (!Number(source.is_active)) {
       throw new Error(`Source is inactive: ${sourceId}`);
     }
-    const sourceUrl = ensureHttpsUrl(source.url);
+    const latestPendingUpload = await this.getLatestSourceUpload(sourceId, ['pending']);
+    let sourceUpload = options.uploadId ? await this.getSourceUploadById(options.uploadId) : latestPendingUpload;
+    if (options.uploadId && !sourceUpload) throw new Error(`Unknown uploaded ICS revision: ${options.uploadId}`);
+    if (sourceUpload && sourceUpload.source_id !== sourceId) throw new Error(`Uploaded ICS revision does not belong to source: ${sourceId}`);
+    if (sourceUpload && options.uploadRevision != null && Number(options.uploadRevision) !== Number(sourceUpload.revision)) {
+      throw new Error(`Uploaded ICS revision mismatch for source: ${sourceId}`);
+    }
+    if (!sourceUpload && source.provider_type === 'ics_upload') {
+      sourceUpload = await this.getLatestSourceUpload(sourceId, ['active']);
+      if (!sourceUpload) throw new Error(`Uploaded ICS source has no stored calendar file: ${sourceId}`);
+    }
+    if (sourceUpload && sourceUpload.status === 'superseded') {
+      return {
+        sourceId,
+        eventsParsed: 0,
+        instancesMaterialized: 0,
+        fetchState: 'stale_upload_skipped',
+        dataChanged: false,
+        googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
+      };
+    }
+    if (sourceUpload && latestPendingUpload && Number(latestPendingUpload.revision) > Number(sourceUpload.revision)) {
+      return {
+        sourceId,
+        eventsParsed: 0,
+        instancesMaterialized: 0,
+        fetchState: 'stale_upload_skipped',
+        dataChanged: false,
+        googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
+      };
+    }
+    const sourceUrl = sourceUpload ? null : ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
     const previousSnapshot = await this.getLatestSnapshotForSource(sourceId);
     const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
@@ -2868,49 +3324,62 @@ export class D1Repository {
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
     const pastRetentionDays = parsePositiveInt(this.env.INGEST_PAST_RETENTION_DAYS, parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30));
     const pastCutoffIso = new Date(Date.now() - pastRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const maxUploadInstances = parsePositiveInt(this.env.SNAPSHOTS_MAX_RECORDS, 5000);
 
     const stagedEvents = [];
     let totalEvents = 0;
     let totalInstances = 0;
-    let response;
+    let response = null;
     let body = '';
     const requestHeaders = {};
-    if (!forceRefresh && previousSnapshot?.etag) {
-      requestHeaders['If-None-Match'] = previousSnapshot.etag;
-    }
-    if (!forceRefresh && previousSnapshot?.last_modified) {
-      requestHeaders['If-Modified-Since'] = previousSnapshot.last_modified;
-    }
-    try {
-      response = await fetch(sourceUrl, {
-        headers: requestHeaders,
-        cf: { cacheTtl: 0 },
-      });
-      if (response.status !== 304) {
-        body = await response.text();
+    if (sourceUpload) {
+      const storedUpload = await this.env.SNAPSHOTS?.get?.(sourceUpload.blob_ref);
+      if (!storedUpload) {
+        const error = new Error(`Stored ICS upload is missing for source ${sourceId} revision ${sourceUpload.revision}`);
+        error.status = 503;
+        throw error;
       }
-    } catch (error) {
-      const snapshotId = stableId('snap', `${sourceId}:${sourceUrl}:${fetchedAt}:error`);
-      await this.db.prepare(
-        `INSERT INTO source_snapshots (
-          id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        snapshotId,
-        sourceId,
-        fetchedAt,
-        null,
-        null,
-        null,
-        null,
-        null,
-        'fetch_error',
-        error instanceof Error ? error.message : String(error)
-      ).run();
-      throw error;
+      body = await storedUpload.text();
+      response = { status: 200, ok: true, headers: new Headers() };
+    } else {
+      if (source.provider_type === 'ics_upload') throw new Error(`Uploaded ICS source has no active file: ${sourceId}`);
+      if (!forceRefresh && previousSnapshot?.etag) {
+        requestHeaders['If-None-Match'] = previousSnapshot.etag;
+      }
+      if (!forceRefresh && previousSnapshot?.last_modified) {
+        requestHeaders['If-Modified-Since'] = previousSnapshot.last_modified;
+      }
+      try {
+        response = await fetch(sourceUrl, {
+          headers: requestHeaders,
+          cf: { cacheTtl: 0 },
+        });
+        if (response.status !== 304) {
+          body = await response.text();
+        }
+      } catch (error) {
+        const snapshotId = stableId('snap', `${sourceId}:${sourceUrl}:${fetchedAt}:error`);
+        await this.db.prepare(
+          `INSERT INTO source_snapshots (
+            id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          snapshotId,
+          sourceId,
+          fetchedAt,
+          null,
+          null,
+          null,
+          null,
+          null,
+          'fetch_error',
+          error instanceof Error ? error.message : String(error)
+        ).run();
+        throw error;
+      }
     }
 
-    const snapshotId = stableId('snap', `${sourceId}:${sourceUrl}:${fetchedAt}`);
+    const snapshotId = stableId('snap', `${sourceId}:${sourceUpload?.id || sourceUrl}:${fetchedAt}`);
     const blobRef = `snapshots/${sourceId}/${snapshotId}.ics`;
     const snapshotsEnabled = String(this.env.SNAPSHOTS_ENABLED ?? 'true').toLowerCase() !== 'false';
     const maxSnapshotBytes = parsePositiveInt(this.env.SNAPSHOTS_MAX_BYTES, 1024 * 1024);
@@ -2922,11 +3391,11 @@ export class D1Repository {
     const snapshotCount = Number(snapshotCountRow?.count || 0);
     const skipForSize = payloadBytes > maxSnapshotBytes;
     const skipForCount = snapshotCount >= maxSnapshotRecords;
-    const canStoreSnapshot = snapshotsEnabled && !!this.env.SNAPSHOTS?.put && !skipForSize && !skipForCount;
+    const canStoreSnapshot = !sourceUpload && snapshotsEnabled && !!this.env.SNAPSHOTS?.put && !skipForSize && !skipForCount;
     let storedBlobRef = null;
-    const payloadHash = body ? hashValue(body) : (previousSnapshot?.payload_hash || null);
+    const payloadHash = sourceUpload?.payload_hash || (body ? hashValue(body) : (previousSnapshot?.payload_hash || null));
 
-    if (!forceRefresh && response.status === 304) {
+    if (!sourceUpload && !forceRefresh && response.status === 304) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -2956,7 +3425,7 @@ export class D1Repository {
       };
     }
 
-    if (!forceRefresh && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
+    if (!sourceUpload && !forceRefresh && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -3006,8 +3475,10 @@ export class D1Repository {
       response.headers.get('last-modified'),
       storedBlobRef,
       payloadHash,
-      response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
-      response.ok
+      sourceUpload ? 'upload_received' : response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
+      sourceUpload
+        ? null
+        : response.ok
         ? storedBlobRef
           ? null
           : skipForSize
@@ -3026,6 +3497,7 @@ export class D1Repository {
 
     const events = parseICS(body, {
       defaultFloatingTimeZone: getFloatingTimeZoneFallback(this.env),
+      strictDateProperties: Boolean(sourceUpload),
     }).sort(compareEventsForIngest);
     const useUidFallback = Number(source.uid_fallback_enabled || 0) === 1;
 
@@ -3052,11 +3524,16 @@ export class D1Repository {
           ? fallbackKey
           : providerKey || fallbackKey
       );
-      const instances = expandRecurringEvent(event, {
+      const expandedInstances = expandRecurringEvent(event, {
         horizonDays,
         lookbackDays,
         now: new Date(),
-      }).map((instance) => {
+        maxOccurrences: sourceUpload ? Math.max(1, maxUploadInstances - totalInstances) : null,
+      });
+      if (sourceUpload && totalInstances + expandedInstances.length > maxUploadInstances) {
+        throw new Error(`Uploaded ICS expands to more than ${maxUploadInstances} occurrences`);
+      }
+      const instances = expandedInstances.map((instance) => {
         totalInstances += 1;
         return {
           id: stableId('inst', `${canonicalEventId}:${instance.recurrenceInstanceKey}`),
@@ -3237,21 +3714,48 @@ export class D1Repository {
     await this.reapplyActiveOverridesForSource(sourceId);
     const currentStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const dataChanged = previousStateFingerprint !== currentStateFingerprint;
-    const googleSync = dataChanged
+    const googleSync = dataChanged || (sourceUpload && sourceUpload.status === 'pending')
       ? await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'sync' })
       : { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 };
+
+    if (sourceUpload) {
+      const promoted = await this.promoteSourceUpload(sourceId, sourceUpload.id);
+      await this.db.prepare(
+        `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
+      ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
+      if (!promoted.applied) {
+        return {
+          sourceId,
+          fetchedAt,
+          uploadRevision: sourceUpload.revision,
+          urlsFetched: 0,
+          eventsParsed: totalEvents,
+          instancesMaterialized: totalInstances,
+          fetchState: 'stale_upload_superseded',
+          dataChanged,
+          googleSync,
+          publishStrategy: typeof this.db.exec === 'function' ? 'transaction' : 'staged-before-mutate',
+        };
+      }
+    }
 
     return {
       sourceId,
       fetchedAt,
-      urlsFetched: 1,
+      uploadRevision: sourceUpload?.revision ?? null,
+      urlsFetched: sourceUpload ? 0 : 1,
       eventsParsed: totalEvents,
       instancesMaterialized: totalInstances,
-      fetchState: 'changed',
+      fetchState: sourceUpload ? 'uploaded' : 'changed',
       dataChanged,
       googleSync,
       publishStrategy: typeof this.db.exec === 'function' ? 'transaction' : 'staged-before-mutate',
     };
+  }
+
+  async ingestSource(sourceId, options = {}) {
+    if (!(await this.getSourceById(sourceId))) throw new Error(`Unknown source: ${sourceId}`);
+    return this.withSourceIngestLock(sourceId, () => this.processSourceIngest(sourceId, options));
   }
 }
 

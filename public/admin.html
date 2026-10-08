@@ -95,7 +95,7 @@
       <div class="card-header">
         <h2>Configure Sources</h2>
       </div>
-      <p class="section-desc">Add an ICS URL and choose which outputs its events feed into.</p>
+      <p class="section-desc">Add an ICS URL or upload a complete calendar snapshot, then choose which outputs its events feed into.</p>
 
       <form id="source-form" style="display:grid;gap:14px">
         <div class="form-row">
@@ -104,9 +104,22 @@
             <input id="source-name" type="text" placeholder="e.g. Grayson Hockey" required />
           </div>
           <div class="field-group">
+            <span class="field-label">Source type</span>
+            <select id="source-type">
+              <option value="ics">Calendar URL (auto-updates)</option>
+              <option value="ics_upload">Upload ICS snapshot</option>
+            </select>
+          </div>
+        </div>
+        <div id="source-url-field" class="field-group">
             <span class="field-label">ICS URL</span>
             <input id="source-url" type="url" placeholder="https://..." required />
-          </div>
+        </div>
+        <div id="source-upload-field" class="field-group" hidden>
+          <span class="field-label">ICS calendar file</span>
+          <input id="source-file" type="file" accept=".ics,text/calendar,text/plain" />
+          <p class="hint">Upload a complete .ics calendar. Upload it again when the schedule changes; events missing from the new file will be removed.</p>
+          <p id="source-upload-current" class="hint"></p>
         </div>
         <div class="field-group">
           <span class="field-label">Title Rewrite Rules</span>
