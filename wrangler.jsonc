@@ -5,7 +5,18 @@
   "main": "src/index.js",
   "assets": {
     "directory": "./public",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    // Serve HTML only by exact file path, so /admin never resolves to admin.html outside Cloudflare Access.
+    "html_handling": "none",
+    // Page URLs go to the Worker, which redirects them under the Access-protected /admin/ paths.
+    "run_worker_first": [
+      "/admin",
+      "/admin.html",
+      "/admin-events",
+      "/admin-events.html",
+      "/admin-feeds",
+      "/admin-feeds.html"
+    ]
   },
   "compatibility_date": "2025-09-06",
   "compatibility_flags": ["nodejs_compat"],
