@@ -28,13 +28,11 @@ export function decorateEventSummary({ target, title, sourceIcon = '', sourcePre
   const resolvedIcon = String(sourceIcon || '').trim() || detectFallbackIcon(title);
   const resolvedPrefix = String(sourcePrefix || '').trim();
 
-  if (target === 'family') {
-    return joinParts([resolvedPrefix, resolvedIcon, title]);
-  }
-
+  // Per-child ICS feeds already say whose events they are, so they never carry a prefix.
   if (target === 'grayson' || target === 'naomi') {
     return joinParts([resolvedIcon, title]);
   }
 
-  return joinParts([resolvedIcon, title]);
+  // The family feed and Google outputs apply the per-link prefix.
+  return joinParts([resolvedPrefix, resolvedIcon, title]);
 }
