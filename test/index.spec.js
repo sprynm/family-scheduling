@@ -1092,6 +1092,12 @@ class FakeDb {
     return notes.length ? notes.join('\n') : null;
   }
 
+  // Mirrors OCCURRENCE_MAYBE_SQL.
+  occurrenceMaybe(canonicalEventId, instanceId) {
+    return this.eventOverrides.some((row) => row.canonical_event_id === canonicalEventId && row.override_type === 'maybe' && !row.cleared_at
+      && (!row.event_instance_id || row.event_instance_id === instanceId)) ? 1 : 0;
+  }
+
   runSourceUploads(sql, values) {
     if (sql.includes('CREATE ')) return 0;
     if (sql.includes('INSERT INTO source_uploads')) {
@@ -1597,6 +1603,7 @@ class FakeDb {
               // Google outputs use the link's own prefix only (no source fallback), mirroring listDesiredGoogleSyncRows.
               source_prefix: targetLink?.prefix || '',
               occurrence_note: this.occurrenceNotes(event.id, instance.id),
+              occurrence_maybe: this.occurrenceMaybe(event.id, instance.id),
               event_instance_id: instance.id,
               occurrence_start_at: instance.occurrence_start_at,
               occurrence_end_at: instance.occurrence_end_at,
@@ -1626,6 +1633,7 @@ class FakeDb {
             source_prefix: targetLink?.prefix || event.source_prefix || source?.prefix || '',
             description: event.description,
             occurrence_note: this.occurrenceNotes(event.id, instance.id),
+            occurrence_maybe: this.occurrenceMaybe(event.id, instance.id),
             location: event.location,
             status: event.status,
             timezone: event.timezone || 'UTC',
@@ -5353,6 +5361,38 @@ describe('family-scheduling worker', () => {
     expect(restored).not.toContain('Note: Grandma driving');
     expect(googleUpdates).toHaveLength(2);
     expect(googleUpdates[1].body.description).toBe('Bring skates');
+
+    // Maybe on the last occurrence: "Maybe:" leads that title and it becomes tentative, nowhere else.
+    const maybeTarget = instances[2];
+    await repo.createOverride({
+      eventId: maybeTarget.canonical_event_id,
+      eventInstanceId: maybeTarget.id,
+      overrideType: 'maybe',
+      payload: {},
+      actorRole: 'editor',
+    });
+    await drainQueue(env);
+    const maybeFeed = await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 });
+    const maybeBlocks = maybeFeed.split('BEGIN:VEVENT').slice(1);
+    const tentative = maybeBlocks.filter((block) => block.includes('STATUS:TENTATIVE'));
+    expect(tentative).toHaveLength(1);
+    expect(tentative[0]).toContain(`UID:${maybeTarget.id}@family-scheduling`);
+    expect(tentative[0]).toContain('SUMMARY:Maybe: G: 🏒 Hockey Practice');
+    expect(maybeBlocks.filter((block) => block.includes('SUMMARY:G: 🏒 Hockey Practice'))).toHaveLength(2);
+
+    const maybeLink = db.googleEventLinks.find((link) => link.event_instance_id === maybeTarget.id);
+    expect(googleUpdates).toHaveLength(3);
+    expect(googleUpdates[2].id).toBe(maybeLink.google_event_id);
+    expect(googleUpdates[2].body.summary).toBe('Maybe: G: 🏒 Hockey Practice');
+    expect(googleUpdates[2].body.status).toBe('tentative');
+
+    // Undo puts the title and status back on that occurrence.
+    await repo.clearOverride(db.eventOverrides.find((row) => row.override_type === 'maybe').id);
+    await drainQueue(env);
+    expect(await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 })).not.toContain('Maybe:');
+    expect(googleUpdates).toHaveLength(4);
+    expect(googleUpdates[3].body.summary).toBe('G: 🏒 Hockey Practice');
+    expect(googleUpdates[3].body.status).toBe('confirmed');
   });
 
   it('applies skip overrides immediately to feeds and queued google sync', async () => {
