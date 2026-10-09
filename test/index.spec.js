@@ -1692,6 +1692,14 @@ class FakeDb {
   }
 
   runFirst(sql, values) {
+    if (sql.includes('SELECT source_id FROM canonical_events WHERE id = ?')) {
+      const event = this.canonicalEvents.find((row) => row.id === values[0]);
+      return event ? { source_id: event.source_id } : null;
+    }
+    if (sql.includes('SELECT canonical_event_id FROM event_overrides WHERE id = ?') && !sql.includes('event_instance_id')) {
+      const override = this.eventOverrides.find((row) => row.id === values[0]);
+      return override ? { canonical_event_id: override.canonical_event_id } : null;
+    }
     if (sql.includes('SET upload_revision = upload_revision + 1')) {
       const [updatedAt, sourceId] = values;
       const source = this.sources.find((row) => row.id === sourceId);
@@ -4032,6 +4040,24 @@ describe('family-scheduling worker', () => {
 
       expect(retry.fetchState).toBe('changed');
       expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
+    });
+
+    it('waits for a running ingest instead of failing a planner change', async () => {
+      const { db } = setup();
+      serve([calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')])]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      const event = db.canonicalEvents.find((row) => !Number(row.source_deleted));
+      const instance = db.eventInstances.find((row) => row.canonical_event_id === event.id);
+      // Another ingest holds the source lock for the next ~600 ms.
+      db.sourceIngestLocks.push({ source_id: 'src_reorder', lock_token: 'other-ingest', expires_at: new Date(Date.now() + 600).toISOString() });
+      const started = Date.now();
+
+      await repo.createOverride({ eventId: event.id, eventInstanceId: instance.id, overrideType: 'skip', payload: {}, actorRole: 'editor' });
+
+      expect(Date.now() - started).toBeGreaterThanOrEqual(400);
+      expect(db.outputRules.filter((rule) => rule.event_instance_id === instance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
+      expect(db.sourceIngestLocks.some((row) => row.source_id === 'src_reorder' && row.lock_token !== 'other-ingest')).toBe(false);
     });
 
     it('repairs output rules on the next ingest when an override failed to reconcile', async () => {

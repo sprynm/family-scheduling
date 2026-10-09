@@ -1241,6 +1241,7 @@ export class D1Repository {
     if (Number(acquired?.meta?.changes || 0) !== 1) {
       const error = new Error(`Source ingestion is already running: ${sourceId}`);
       error.status = 503;
+      error.code = 'SOURCE_LOCKED';
       throw error;
     }
     try {
@@ -1250,6 +1251,29 @@ export class D1Repository {
         `DELETE FROM source_ingest_locks WHERE source_id = ? AND lock_token = ?`
       ).bind(sourceId, lockToken).run();
     }
+  }
+
+  // For short user actions (planner changes): wait for a running ingest to finish instead of failing.
+  async withSourceIngestLockWhenFree(sourceId, operation, { waitMs = 20000, pollMs = 500 } = {}) {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        return await this.withSourceIngestLock(sourceId, operation);
+      } catch (error) {
+        if (error?.code !== 'SOURCE_LOCKED') throw error;
+        if (Date.now() >= deadline) {
+          const busy = new Error('The calendar is updating right now. Try again in a moment.');
+          busy.status = 503;
+          throw busy;
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    }
+  }
+
+  async getSourceIdForEvent(canonicalEventId) {
+    const row = await this.db.prepare(`SELECT source_id FROM canonical_events WHERE id = ?`).bind(canonicalEventId).first();
+    return row?.source_id || null;
   }
 
   async stageSourceUpload(sourceId, upload) {
@@ -2495,7 +2519,15 @@ export class D1Repository {
     ).bind(canonicalEventId).run();
   }
 
-  async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
+  // Override changes take the source's ingest lock so an ingest cannot interleave with the fingerprint
+  // reset, the override write and its reconciliation.
+  async createOverride(args) {
+    const sourceId = await this.getSourceIdForEvent(args.eventId);
+    if (!sourceId) return this.createOverrideUnlocked(args);
+    return this.withSourceIngestLockWhenFree(sourceId, () => this.createOverrideUnlocked(args));
+  }
+
+  async createOverrideUnlocked({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
     const timestamp = nowIso();
     const normalizedOverrideType = normalizeOverrideType(overrideType);
     const normalizedPayload = normalizeOverridePayload(payload);
@@ -2541,6 +2573,13 @@ export class D1Repository {
   }
 
   async clearOverride(overrideId) {
+    const row = await this.db.prepare(`SELECT canonical_event_id FROM event_overrides WHERE id = ?`).bind(overrideId).first();
+    const sourceId = row ? await this.getSourceIdForEvent(row.canonical_event_id) : null;
+    if (!sourceId) return this.clearOverrideUnlocked(overrideId);
+    return this.withSourceIngestLockWhenFree(sourceId, () => this.clearOverrideUnlocked(overrideId));
+  }
+
+  async clearOverrideUnlocked(overrideId) {
     const timestamp = nowIso();
     const override = await this.db.prepare(
       `SELECT canonical_event_id, event_instance_id FROM event_overrides WHERE id = ?`
