@@ -6,17 +6,6 @@ Prioritized work items. Completed work stays below as historical reference; only
 
 ## Active Tickets
 
-### Ticket: Skip ingest writes when in-window events are unchanged
-**Why:** Google returns the Family feed in a different order on every fetch, so the raw payload hash never matches. Every Family ingest rewrites its ~67 current events and stores a 746 KB R2 snapshot even when nothing changed. Naomi Reign never returns 304 either.
-
-**Work:**
-1. After parsing and the retention/window filter, compute a fingerprint of the staged events (sorted by identity; summary, description, location, status, start/end, rrule, recurrence-id, exdates; ignore DTSTAMP and order).
-2. Compare with the previous snapshot's fingerprint; when equal, record `unchanged_payload` and skip the R2 snapshot and all event writes.
-3. Keep `forceRefresh` (Rebuild) bypassing the check.
-4. Measure Family `parsed` vs `unchanged_payload` counts and `rows_written_24h` before and after.
-
-**Done when:** Unchanged Family fetches write only a snapshot row, with tests covering reordered and DTSTAMP-only changes.
-
 ### Ticket: Harden uploaded ICS sources (review follow-ups)
 **Work:**
 1. A pending upload whose ingest keeps failing should not block the source; stop falling back to it after N failures or mark it `failed`.
@@ -68,6 +57,9 @@ Prioritized work items. Completed work stays below as historical reference; only
 ---
 
 ## Completed Functional Work
+
+### Skip ingest writes when events are unchanged (2026-10-09)
+Completed. Ingest fingerprints the staged events (sorted by identity, ignoring feed order, DTSTAMP and LAST-MODIFIED) and records an `unchanged_content` snapshot instead of rewriting events or storing an R2 blob when they match the last completed ingest. Conditional requests and the unchanged-payload shortcut now start from the last completed snapshot, closing a hole where a failed write could be skipped forever. To measure after deploy: Family `parsed` vs `unchanged_content` counts and `rows_written_24h` / `rows_read_24h` from `wrangler d1 info`.
 
 ### Migrate remaining `runInTransaction()` callers to `db.batch()`
 Completed. The remaining high-write source sync paths were converted to `db.batch()`.
