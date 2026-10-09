@@ -13,7 +13,12 @@ At closeout of a unit of work, insights should be compacted into:
 
 ## 2026-10-09
 
-### Free-time work (review branches, not merged)
+### Free-time work (merged 2026-10-09 after Codex review; not yet deployed)
+
+- Codex (`codex exec --sandbox read-only`) reviewed each branch; the ingest/upload stack took four passes. Every finding was fixed with a test that fails without the fix. Final verdicts: ingest/upload MERGE: OK, print week MERGE: OK, legacy cleanup no defects.
+- Fixes from review: 304/payload shortcuts limited to after a completed check today (stable feeds re-check once a day so recurrences roll and retention applies); fingerprint saved last, after upload promotion and Google queueing, with Google sync queued whenever content never completed an ingest; fingerprints cleared atomically with the first ingest write, before settings mutations, on disable, and before override writes; planner changes take the source lock (waiting up to 20 s) so they cannot interleave with an ingest; upload promoted before Google queueing; rebuild_system applies the upload failure rule; queue consumer `max_retries: 4` and the Worker retry budget capped at 5 deliveries; admin shows `unchanged_content` as healthy; print-week calendar-day stepping (DST), disabled until loaded, compact two-column layout for busy weeks; FakeDb batches roll back like D1.
+- Codex tooling note: the npm `codex` was 0.139 and could not parse `~/.codex/config.toml` (`[agents] enabled`); updated to 0.162.0. Codex's shell intermittently fails with `setup refresh had errors`; inlining the diff into the prompt works around it.
+
 
 - `perf/skip-unchanged-ingest-writes`: ingest fingerprints staged events (sorted by identity; feed order, DTSTAMP, LAST-MODIFIED ignored) and records `unchanged_content` instead of rewriting events, re-reading source state twice and storing an R2 blob. Also fixes an older hole: ETag/If-Modified-Since and the unchanged-payload shortcut now start from the last *completed* snapshot, so a failed write can no longer be skipped forever. Index on `source_snapshots(source_id, fetched_at)`; migration 0008. After deploy each source does one full write (old snapshots have no fingerprint), then skips when unchanged.
 - `fix/upload-hardening` (stacked on the perf branch): permanently failing uploads become `failed` and stop blocking the source; only upload-processing errors are recorded against an upload; `ICS_UPLOAD_MAX_EVENTS` / `ICS_UPLOAD_MAX_INSTANCES`; `rebuild_system` continues past a failing source.
