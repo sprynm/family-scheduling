@@ -1084,3 +1084,60 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .planner-tabs [role="tab"] { padding: 0.4rem 0.7rem; }
   .planner-refresh { padding: 0.45rem 0.75rem; }
 }
+
+/* ======================================================================
+   Print this week: a one-page fridge sheet built by event-planner.js.
+   ====================================================================== */
+
+.planner-footer { display: flex; justify-content: flex-end; padding-top: 0.5rem; }
+.planner-print { display: none; }
+
+@media print {
+  @page { margin: 12mm; }
+  /* Only the sheet takes up space, so the long event list cannot add blank pages. */
+  html.printing-week body > *:not(.planner-print) { display: none !important; }
+  html.printing-week body { background: #fff; }
+  html.printing-week .planner-print {
+    display: block;
+    color: #000;
+    font-family: var(--font);
+    font-size: 11pt;
+    line-height: 1.35;
+  }
+  .print-head { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 2pt solid #000; padding-bottom: 4pt; margin-bottom: 6pt; }
+  .print-head h1 { font-size: 18pt; color: #000; }
+  .print-head p { font-size: 10pt; color: #000; }
+  .print-day { break-inside: avoid; padding: 5pt 0; border-bottom: 0.75pt solid #999; }
+  .print-day h2 { font-size: 12pt; color: #000; margin-bottom: 2pt; }
+  .print-day h2 span { font-weight: 400; font-size: 10pt; color: #333; }
+  .print-day ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2pt; }
+  .print-day li { display: grid; grid-template-columns: 5.5em 1.6em minmax(0, 1fr); align-items: baseline; gap: 4pt; }
+  .print-time { font-variant-numeric: tabular-nums; color: #000; }
+  /* Letter plus coloured ring: readable on black-and-white printers too. */
+  .print-who {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.35em;
+    height: 1.35em;
+    border: 1.5pt solid var(--person, #000);
+    border-radius: 50%;
+    font-size: 9pt;
+    font-weight: 700;
+    color: #000;
+  }
+  .print-title { font-weight: 600; color: #000; }
+  .print-note { display: block; font-weight: 400; font-style: italic; font-size: 10pt; color: #333; }
+  .print-empty { color: #555; font-size: 10pt; }
+  .print-key { margin-top: 6pt; font-size: 9pt; color: #333; }
+  /* Busy weeks: two columns at a smaller size so the sheet still fits one page. */
+  .planner-print.print-compact { font-size: 9pt; line-height: 1.25; }
+  .print-compact .print-days { column-count: 2; column-gap: 14pt; }
+  .print-compact .print-day { padding: 3pt 0; }
+  .print-compact .print-day h2 { font-size: 10.5pt; }
+  .print-compact .print-note { font-size: 8.5pt; }
+  /* Darker person rings for paper. */
+  .print-who[data-owner="grayson"] { --person: #1f5f99; }
+  .print-who[data-owner="naomi"] { --person: #2f7a1f; }
+  .print-who[data-owner="family"] { --person: #4b5967; }
+}
