@@ -55,7 +55,11 @@
       {
         "queue": "family-scheduling-jobs",
         "max_batch_size": 10,
-        "max_batch_timeout": 5
+        "max_batch_timeout": 5,
+        // Must allow the Worker's retry budget (5 attempts by default: JOB_RETRY_DELAYS_SECONDS has five
+        // delays) so the final attempt runs the failure handling. Cloudflare's default of 3 retries dropped
+        // messages first, leaving jobs queued and failed uploads pending.
+        "max_retries": 4
       }
     ]
   },

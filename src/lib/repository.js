@@ -708,6 +708,16 @@ export class D1Repository {
       if (!/duplicate column name|already exists/i.test(message)) throw error;
     }
     try {
+      await this.db.prepare(`ALTER TABLE source_snapshots ADD COLUMN content_fingerprint TEXT`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    // Latest-snapshot lookups run on every ingest; without this they scan every snapshot row.
+    await this.db.prepare(
+      `CREATE INDEX IF NOT EXISTS source_snapshots_source_fetched_idx ON source_snapshots(source_id, fetched_at)`
+    ).run();
+    try {
       await this.db.prepare(`ALTER TABLE sync_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`).run();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -833,16 +843,20 @@ export class D1Repository {
     return row ? { ...mapRow(row), target_key: row.slug } : null;
   }
 
-  async getLatestSnapshotForSource(sourceId) {
+  // The latest snapshot whose ingest finished writing (only those carry a content fingerprint).
+  // Conditional requests and unchanged-payload checks must start from it: trusting a snapshot whose
+  // writes failed would let a 304 or an identical payload skip events that were never stored.
+  async getLatestCompletedSnapshot(sourceId) {
     const row = await this.db.prepare(
-      `SELECT id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+      `SELECT id, fetched_at, etag, last_modified, payload_hash, content_fingerprint
        FROM source_snapshots
-       WHERE source_id = ?
+       WHERE source_id = ? AND content_fingerprint IS NOT NULL
        ORDER BY fetched_at DESC
        LIMIT 1`
     ).bind(sourceId).first();
     return row ? mapRow(row) : null;
   }
+
 
   async computeSourceStateFingerprint(sourceId) {
     const [eventsResult, instancesResult, rulesResult] = await Promise.all([
@@ -1200,7 +1214,7 @@ export class D1Repository {
   }
 
   async getLatestSourceUpload(sourceId, statuses = ['pending', 'active']) {
-    const allowedStatuses = Array.isArray(statuses) ? statuses.filter((status) => ['pending', 'active', 'superseded'].includes(status)) : [];
+    const allowedStatuses = Array.isArray(statuses) ? statuses.filter((status) => ['pending', 'active', 'superseded', 'failed'].includes(status)) : [];
     if (!allowedStatuses.length) return null;
     const placeholders = allowedStatuses.map(() => '?').join(', ');
     const row = await this.db.prepare(
@@ -1227,6 +1241,7 @@ export class D1Repository {
     if (Number(acquired?.meta?.changes || 0) !== 1) {
       const error = new Error(`Source ingestion is already running: ${sourceId}`);
       error.status = 503;
+      error.code = 'SOURCE_LOCKED';
       throw error;
     }
     try {
@@ -1236,6 +1251,29 @@ export class D1Repository {
         `DELETE FROM source_ingest_locks WHERE source_id = ? AND lock_token = ?`
       ).bind(sourceId, lockToken).run();
     }
+  }
+
+  // For short user actions (planner changes): wait for a running ingest to finish instead of failing.
+  async withSourceIngestLockWhenFree(sourceId, operation, { waitMs = 20000, pollMs = 500 } = {}) {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        return await this.withSourceIngestLock(sourceId, operation);
+      } catch (error) {
+        if (error?.code !== 'SOURCE_LOCKED') throw error;
+        if (Date.now() >= deadline) {
+          const busy = new Error('The calendar is updating right now. Try again in a moment.');
+          busy.status = 503;
+          throw busy;
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    }
+  }
+
+  async getSourceIdForEvent(canonicalEventId) {
+    const row = await this.db.prepare(`SELECT source_id FROM canonical_events WHERE id = ?`).bind(canonicalEventId).first();
+    return row?.source_id || null;
   }
 
   async stageSourceUpload(sourceId, upload) {
@@ -1391,6 +1429,15 @@ export class D1Repository {
     return { applied: changes > 0 || currentUpload?.status === 'active', upload: currentUpload };
   }
 
+  // A pending upload whose ingest failed for good stops being picked up, so a URL source goes back
+  // to polling its URL and an uploaded source keeps serving its last good file.
+  async markSourceUploadFailed(uploadId, error) {
+    const message = String(error || 'Upload processing failed').slice(0, 1000);
+    await this.db.prepare(
+      `UPDATE source_uploads SET status = 'failed', last_error = ? WHERE id = ? AND status = 'pending'`
+    ).bind(message, uploadId).run();
+  }
+
   async markSourceUploadError(uploadId, error) {
     const message = String(error || 'Upload processing failed').slice(0, 1000);
     await this.db.prepare(
@@ -1474,6 +1521,12 @@ export class D1Repository {
       poll_interval_minutes: Number(input.poll_interval_minutes ?? (convertingUploadToUrl ? null : existing.poll_interval_minutes) ?? 30),
       quality_profile: input.quality_profile ?? existing.quality_profile,
     };
+    // Settings changes rewrite or soft-delete stored rows outside ingest (deactivation, titles, targets,
+    // UID fallback). Forget the fingerprints before the first mutation, so even a change that fails
+    // part-way makes the next ingest re-check in full instead of skipping.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
+    ).bind(sourceId).run();
     await this.db.prepare(
       `UPDATE sources
        SET name = ?, display_name = ?, provider_type = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
@@ -1605,6 +1658,9 @@ export class D1Repository {
         `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ? AND is_deleted_upstream = 0`
       ).bind(timestamp, sourceId),
       this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
+      // Events are now soft-deleted outside ingest; without this, an unchanged fetch after re-enabling
+      // would match the old fingerprint and leave them deleted.
+      this.db.prepare(`UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`).bind(sourceId),
     ]);
     await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'cleanup' });
     return this.getSourceById(sourceId);
@@ -2463,7 +2519,24 @@ export class D1Repository {
     };
   }
 
-  async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
+  // Override changes are saved first and reconciled into output_rules after. If reconciliation fails, only a
+  // full ingest's reapply step repairs it, so forget the source's fingerprints before the first write.
+  async forgetFingerprintsForEvent(canonicalEventId) {
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = NULL
+       WHERE source_id = (SELECT source_id FROM canonical_events WHERE id = ?)`
+    ).bind(canonicalEventId).run();
+  }
+
+  // Override changes take the source's ingest lock so an ingest cannot interleave with the fingerprint
+  // reset, the override write and its reconciliation.
+  async createOverride(args) {
+    const sourceId = await this.getSourceIdForEvent(args.eventId);
+    if (!sourceId) return this.createOverrideUnlocked(args);
+    return this.withSourceIngestLockWhenFree(sourceId, () => this.createOverrideUnlocked(args));
+  }
+
+  async createOverrideUnlocked({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
     const timestamp = nowIso();
     const normalizedOverrideType = normalizeOverrideType(overrideType);
     const normalizedPayload = normalizeOverridePayload(payload);
@@ -2480,6 +2553,7 @@ export class D1Repository {
       throw new Error('That override is already active for this item.');
     }
     const overrideId = makeOpaqueId('ovr', `${eventId}:${overrideType}`);
+    await this.forgetFingerprintsForEvent(eventId);
     await this.db.prepare(
       `INSERT INTO event_overrides (
         id, scope_type, canonical_event_id, event_instance_id, override_type, payload_json,
@@ -2508,11 +2582,19 @@ export class D1Repository {
   }
 
   async clearOverride(overrideId) {
+    const row = await this.db.prepare(`SELECT canonical_event_id FROM event_overrides WHERE id = ?`).bind(overrideId).first();
+    const sourceId = row ? await this.getSourceIdForEvent(row.canonical_event_id) : null;
+    if (!sourceId) return this.clearOverrideUnlocked(overrideId);
+    return this.withSourceIngestLockWhenFree(sourceId, () => this.clearOverrideUnlocked(overrideId));
+  }
+
+  async clearOverrideUnlocked(overrideId) {
     const timestamp = nowIso();
     const override = await this.db.prepare(
       `SELECT canonical_event_id, event_instance_id FROM event_overrides WHERE id = ?`
     ).bind(overrideId).first();
     if (!override) return null;
+    await this.forgetFingerprintsForEvent(override.canonical_event_id);
     await this.db.prepare(
       `UPDATE event_overrides SET cleared_at = ?, updated_at = ? WHERE id = ?`
     ).bind(timestamp, timestamp, overrideId).run();
@@ -3358,15 +3440,20 @@ export class D1Repository {
         googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
       };
     }
+    if (sourceUpload?.status === 'pending' && options.context) options.context.uploadId = sourceUpload.id;
     const sourceUrl = sourceUpload ? null : ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
-    const previousSnapshot = await this.getLatestSnapshotForSource(sourceId);
+    const previousSnapshot = await this.getLatestCompletedSnapshot(sourceId);
+    // The 304 and identical-payload shortcuts skip parsing, so they cannot see time-based changes:
+    // recurring events entering the window or one-off events passing the retention cutoff. Allow them
+    // only after a completed check today; the first fetch each day parses and fingerprints in full.
+    const checkedToday = String(previousSnapshot?.fetched_at || '').slice(0, 10) === fetchedAt.slice(0, 10);
     const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
     const pastRetentionDays = parsePositiveInt(this.env.INGEST_PAST_RETENTION_DAYS, parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30));
     const pastCutoffIso = new Date(Date.now() - pastRetentionDays * 24 * 60 * 60 * 1000).toISOString();
-    const maxUploadInstances = parsePositiveInt(this.env.SNAPSHOTS_MAX_RECORDS, 5000);
+    const maxUploadInstances = parsePositiveInt(this.env.ICS_UPLOAD_MAX_INSTANCES, 5000);
 
     const stagedEvents = [];
     let totalEvents = 0;
@@ -3385,10 +3472,10 @@ export class D1Repository {
       response = { status: 200, ok: true, headers: new Headers() };
     } else {
       if (source.provider_type === 'ics_upload') throw new Error(`Uploaded ICS source has no active file: ${sourceId}`);
-      if (!forceRefresh && previousSnapshot?.etag) {
+      if (!forceRefresh && checkedToday && previousSnapshot?.etag) {
         requestHeaders['If-None-Match'] = previousSnapshot.etag;
       }
-      if (!forceRefresh && previousSnapshot?.last_modified) {
+      if (!forceRefresh && checkedToday && previousSnapshot?.last_modified) {
         requestHeaders['If-Modified-Since'] = previousSnapshot.last_modified;
       }
       try {
@@ -3467,7 +3554,7 @@ export class D1Repository {
       };
     }
 
-    if (!sourceUpload && !forceRefresh && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
+    if (!sourceUpload && !forceRefresh && checkedToday && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -3497,43 +3584,46 @@ export class D1Repository {
       };
     }
 
-    if (canStoreSnapshot) {
-      await this.env.SNAPSHOTS.put(blobRef, body, {
-        httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
-      });
-      storedBlobRef = blobRef;
-    }
+    const recordSnapshot = async () => {
+      if (canStoreSnapshot) {
+        await this.env.SNAPSHOTS.put(blobRef, body, {
+          httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
+        });
+        storedBlobRef = blobRef;
+      }
 
-    await this.db.prepare(
-      `INSERT INTO source_snapshots (
-        id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      snapshotId,
-      sourceId,
-      fetchedAt,
-      response.status,
-      response.headers.get('etag'),
-      response.headers.get('last-modified'),
-      storedBlobRef,
-      payloadHash,
-      sourceUpload ? 'upload_received' : response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
-      sourceUpload
-        ? null
-        : response.ok
-        ? storedBlobRef
+      await this.db.prepare(
+        `INSERT INTO source_snapshots (
+          id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        snapshotId,
+        sourceId,
+        fetchedAt,
+        response.status,
+        response.headers.get('etag'),
+        response.headers.get('last-modified'),
+        storedBlobRef,
+        payloadHash,
+        sourceUpload ? 'upload_received' : response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
+        sourceUpload
           ? null
-          : skipForSize
-          ? `Snapshot skipped: payload ${payloadBytes} bytes exceeds ${maxSnapshotBytes}`
-          : skipForCount
-          ? `Snapshot skipped: snapshot cap ${maxSnapshotRecords} reached`
-          : snapshotsEnabled
-          ? 'Snapshot skipped: storage unavailable'
-          : 'Snapshot skipped: disabled by SNAPSHOTS_ENABLED'
-        : `HTTP ${response.status}`
-    ).run();
+          : response.ok
+          ? storedBlobRef
+            ? null
+            : skipForSize
+            ? `Snapshot skipped: payload ${payloadBytes} bytes exceeds ${maxSnapshotBytes}`
+            : skipForCount
+            ? `Snapshot skipped: snapshot cap ${maxSnapshotRecords} reached`
+            : snapshotsEnabled
+            ? 'Snapshot skipped: storage unavailable'
+            : 'Snapshot skipped: disabled by SNAPSHOTS_ENABLED'
+          : `HTTP ${response.status}`
+      ).run();
+    };
 
     if (!response.ok) {
+      await recordSnapshot();
       throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
     }
 
@@ -3600,8 +3690,76 @@ export class D1Repository {
     }
 
     const targets = await this.resolveTargetsForSource(source);
+    // Fingerprint what this ingest would write, ignoring feed byte order, DTSTAMP and LAST-MODIFIED.
+    // Google reorders the Family feed on every fetch, so the raw payload hash never matches; this does.
+    const fingerprintInput = JSON.stringify({
+      targets,
+      // Sorted by identity: the feed's own event order must not change the fingerprint.
+      events: [...stagedEvents]
+        .sort((a, b) => `${a.canonicalEventId}:${a.sourceEventId}`.localeCompare(`${b.canonicalEventId}:${b.sourceEventId}`))
+        .map((staged) => ({
+        canonicalEventId: staged.canonicalEventId,
+        sourceEventId: staged.sourceEventId,
+        identityKey: staged.identityKey,
+        rawTitle: staged.rawTitle,
+        rewrittenTitle: staged.rewrittenTitle,
+        sourceIcon: staged.sourceIcon,
+        sourcePrefix: staged.sourcePrefix,
+        description: staged.event.description,
+        location: staged.event.location,
+        status: staged.event.status,
+        startAt: staged.event.startAt,
+        endAt: staged.event.endAt,
+        timezone: staged.event.timezone,
+        rrule: staged.event.rrule,
+        recurrenceId: staged.event.recurrenceId,
+        instances: staged.instances,
+      })),
+    });
+    const contentFingerprint = hashValue(fingerprintInput);
+    if (!sourceUpload && !forceRefresh && contentFingerprint === previousSnapshot?.content_fingerprint) {
+      await this.db.prepare(
+        `INSERT INTO source_snapshots (
+          id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        snapshotId,
+        sourceId,
+        fetchedAt,
+        response.status,
+        response.headers.get('etag'),
+        response.headers.get('last-modified'),
+        null,
+        payloadHash,
+        'unchanged_content',
+        null
+      ).run();
+      // Stored rows already match this fingerprint, so this check counts as completed: later fetches
+      // today may use its ETag and payload hash.
+      await this.db.prepare(
+        `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
+      ).bind(contentFingerprint, snapshotId).run();
+      return {
+        sourceId,
+        fetchedAt,
+        urlsFetched: 1,
+        eventsParsed: totalEvents,
+        instancesMaterialized: totalInstances,
+        fetchState: 'unchanged_content',
+        dataChanged: false,
+        googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
+        publishStrategy: typeof this.db.exec === 'function' ? 'transaction' : 'staged-before-mutate',
+      };
+    }
+    await recordSnapshot();
+
     const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const statements = [
+      // Forget completed fingerprints atomically with the first mutation: if a later chunk fails, the
+      // rows are half-written, and a feed that reverts to the old content must not match and skip.
+      this.db.prepare(
+        `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
+      ).bind(sourceId),
       this.db.prepare(
         `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`
       ).bind(fetchedAt, sourceId),
@@ -3617,6 +3775,7 @@ export class D1Repository {
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
       ).bind(sourceId),
     ];
+    const headerStatementCount = statements.length;
 
     for (const staged of stagedEvents) {
       const { event, rawTitle, rewrittenTitle, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
@@ -3748,23 +3907,35 @@ export class D1Repository {
     // Run soft-delete header statements first, then chunk upserts to avoid
     // D1 execution timeouts on large sources (many events × instances × targets).
     const INGEST_BATCH_SIZE = 100;
-    const headerStatements = statements.splice(0, 4);
+    const headerStatements = statements.splice(0, headerStatementCount);
     await this.db.batch(headerStatements);
     for (let i = 0; i < statements.length; i += INGEST_BATCH_SIZE) {
       await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));
     }
     await this.reapplyActiveOverridesForSource(sourceId);
+
+    // The stored rows now reflect this upload, so make it the active revision before anything else can
+    // fail: a later Google queue error must not leave a rejected upload's events live.
+    let promoted = null;
+    if (sourceUpload) {
+      promoted = await this.promoteSourceUpload(sourceId, sourceUpload.id);
+      await this.db.prepare(
+        `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
+      ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
+      // From here the upload is live; later failures (Google queueing) are not the upload's fault.
+      if (promoted.applied && options.context) options.context.uploadId = null;
+    }
+
     const currentStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const dataChanged = previousStateFingerprint !== currentStateFingerprint;
-    const googleSync = dataChanged || (sourceUpload && sourceUpload.status === 'pending')
+    // Google sync is also owed when this content never completed an ingest: a failed attempt may have
+    // written the rows (so the state looks unchanged now) without ever queueing the Google jobs.
+    const syncOwed = contentFingerprint !== previousSnapshot?.content_fingerprint;
+    const googleSync = dataChanged || syncOwed || (sourceUpload && sourceUpload.status === 'pending')
       ? await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'sync' })
       : { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 };
 
     if (sourceUpload) {
-      const promoted = await this.promoteSourceUpload(sourceId, sourceUpload.id);
-      await this.db.prepare(
-        `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
-      ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
       if (!promoted.applied) {
         return {
           sourceId,
@@ -3780,6 +3951,12 @@ export class D1Repository {
         };
       }
     }
+
+    // Saved last: only a fully completed ingest (writes, upload promotion, Google sync queued) may let
+    // later ingests skip. Any failure above leaves no fingerprint, so the retry does it all again.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
+    ).bind(contentFingerprint, snapshotId).run();
 
     return {
       sourceId,
@@ -3797,7 +3974,15 @@ export class D1Repository {
 
   async ingestSource(sourceId, options = {}) {
     if (!(await this.getSourceById(sourceId))) throw new Error(`Unknown source: ${sourceId}`);
-    return this.withSourceIngestLock(sourceId, () => this.processSourceIngest(sourceId, options));
+    // Errors raised while processing a pending upload carry its id, so only real upload failures
+    // (not lock contention or unrelated fetch errors) are recorded against the upload.
+    const context = { uploadId: null };
+    try {
+      return await this.withSourceIngestLock(sourceId, () => this.processSourceIngest(sourceId, { ...options, context }));
+    } catch (error) {
+      if (context.uploadId && error && typeof error === 'object') error.sourceUploadId = context.uploadId;
+      throw error;
+    }
   }
 }
 

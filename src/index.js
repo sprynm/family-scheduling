@@ -28,13 +28,15 @@ function getRetryDelaySchedule(env) {
     .filter((value) => Number.isFinite(value) && value > 0);
 }
 
+// Deliveries the queue allows per message: wrangler.jsonc queues.consumers[0].max_retries (4) + 1.
+// The Worker's budget is capped at this so its final attempt always runs the failure handling.
+const QUEUE_MAX_DELIVERIES = 5;
+
 function getMaxRetryAttempts(env) {
   const schedule = getRetryDelaySchedule(env);
   const configured = Number.parseInt(String(env.JOB_RETRY_MAX_ATTEMPTS || ''), 10);
-  if (Number.isFinite(configured) && configured > 0) {
-    return configured;
-  }
-  return schedule.length;
+  const budget = Number.isFinite(configured) && configured > 0 ? configured : schedule.length;
+  return Math.min(budget, QUEUE_MAX_DELIVERIES);
 }
 
 function getRetryJitterPct(env) {
@@ -276,8 +278,8 @@ async function parseIcsUploadRequest(request, env) {
     horizonDays: Number.parseInt(String(env.RECURRENCE_HORIZON_DAYS || '180'), 10) || 180,
     lookbackDays: Number.parseInt(String(env.DEFAULT_LOOKBACK_DAYS || '7'), 10) || 7,
     maxBytes: maxFileBytes,
-    maxEvents: Number.parseInt(String(env.SNAPSHOTS_MAX_RECORDS || '5000'), 10) || 5000,
-    maxInstances: Number.parseInt(String(env.SNAPSHOTS_MAX_RECORDS || '5000'), 10) || 5000,
+    maxEvents: parseOptionalPositiveInt(env.ICS_UPLOAD_MAX_EVENTS) || 5000,
+    maxInstances: parseOptionalPositiveInt(env.ICS_UPLOAD_MAX_INSTANCES) || 5000,
   });
   return { metadata, fileName, ...validated };
 }
@@ -656,29 +658,42 @@ export default {
         } else if (job.jobType === 'rebuild_system') {
           const sources = await repo.listActiveSources({ includeAll: true });
           const results = [];
+          const failures = [];
+          // One source failing (a lock held by its own ingest, an upstream outage) must not stop the rest.
           for (const source of sources) {
-            results.push(await repo.ingestSource(source.id, { forceRefresh: true }));
+            try {
+              results.push(await repo.ingestSource(source.id, { forceRefresh: true }));
+            } catch (error) {
+              const failureMessage = error instanceof Error ? error.message : String(error);
+              failures.push({ sourceId: source.id, message: failureMessage });
+              // Same rule as a source job: a pending upload that failed for good stops blocking its source.
+              if (error?.sourceUploadId) {
+                try {
+                  if (classifyQueueError(error).retryable) await repo.markSourceUploadError(error.sourceUploadId, failureMessage);
+                  else await repo.markSourceUploadFailed(error.sourceUploadId, failureMessage);
+                } catch {}
+              }
+            }
           }
-          summary = { sourcesProcessed: results.length, results };
+          summary = { sourcesProcessed: results.length, sourcesFailed: failures.length, results, failures };
         } else if (job.jobType === 'prune_stale_data') {
           summary = await repo.pruneStaleData();
         }
         await repo.markJobStatus(job.jobId, 'completed', { summary });
         message.ack();
       } catch (error) {
-        if (job.scopeType === 'source' && (job.jobType === 'rebuild_source' || job.jobType === 'ingest_source')) {
-          try {
-            const pendingUpload = job.uploadId
-              ? await repo.getSourceUploadById(job.uploadId)
-              : await repo.getLatestSourceUpload(job.scopeId, ['pending']);
-            if (pendingUpload?.status === 'pending') {
-              await repo.markSourceUploadError(pendingUpload.id, error instanceof Error ? error.message : String(error));
-            }
-          } catch {}
-        }
         const attemptCount = Math.max(1, Number(message.attempts || job.attemptCount || 1));
         const { retryable, errorKind, retryAfterSeconds } = classifyQueueError(error);
         const maxAttempts = getMaxRetryAttempts(env);
+        if (error?.sourceUploadId) {
+          // Retries still ahead: keep the upload pending with the latest error. Out of retries or not
+          // retryable: mark it failed so it stops blocking the source.
+          const uploadErrorMessage = error instanceof Error ? error.message : String(error);
+          try {
+            if (retryable && attemptCount < maxAttempts) await repo.markSourceUploadError(error.sourceUploadId, uploadErrorMessage);
+            else await repo.markSourceUploadFailed(error.sourceUploadId, uploadErrorMessage);
+          } catch {}
+        }
         const errorPayload = {
           message: error instanceof Error ? error.message : String(error),
           kind: errorKind,

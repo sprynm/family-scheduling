@@ -6,25 +6,6 @@ Prioritized work items. Completed work stays below as historical reference; only
 
 ## Active Tickets
 
-### Ticket: Skip ingest writes when in-window events are unchanged
-**Why:** Google returns the Family feed in a different order on every fetch, so the raw payload hash never matches. Every Family ingest rewrites its ~67 current events and stores a 746 KB R2 snapshot even when nothing changed. Naomi Reign never returns 304 either.
-
-**Work:**
-1. After parsing and the retention/window filter, compute a fingerprint of the staged events (sorted by identity; summary, description, location, status, start/end, rrule, recurrence-id, exdates; ignore DTSTAMP and order).
-2. Compare with the previous snapshot's fingerprint; when equal, record `unchanged_payload` and skip the R2 snapshot and all event writes.
-3. Keep `forceRefresh` (Rebuild) bypassing the check.
-4. Measure Family `parsed` vs `unchanged_payload` counts and `rows_written_24h` before and after.
-
-**Done when:** Unchanged Family fetches write only a snapshot row, with tests covering reordered and DTSTAMP-only changes.
-
-### Ticket: Harden uploaded ICS sources (review follow-ups)
-**Work:**
-1. A pending upload whose ingest keeps failing should not block the source; stop falling back to it after N failures or mark it `failed`.
-2. Only record upload errors for jobs that carry that `uploadId`; lock contention must not show as an upload error.
-3. Give upload limits their own settings instead of `SNAPSHOTS_MAX_RECORDS`.
-4. Make `rebuild_system` tolerate a per-source lock collision instead of restarting every source.
-
-**Done when:** Each case has a test and the admin shows accurate upload status.
 
 ### Ticket: Import missing legacy sources from `cals.txt`
 **Why:** The legacy system's source list in `cals.txt` may not be fully migrated to the new system. Any missing sources mean those calendars are not being ingested.
@@ -68,6 +49,12 @@ Prioritized work items. Completed work stays below as historical reference; only
 ---
 
 ## Completed Functional Work
+
+### Skip ingest writes when events are unchanged (2026-10-09)
+Completed. Ingest fingerprints the staged events (sorted by identity, ignoring feed order, DTSTAMP and LAST-MODIFIED) and records an `unchanged_content` snapshot instead of rewriting events or storing an R2 blob when they match the last completed ingest. Conditional requests and the unchanged-payload shortcut now start from the last completed snapshot, closing a hole where a failed write could be skipped forever. To measure after deploy: Family `parsed` vs `unchanged_content` counts and `rows_written_24h` / `rows_read_24h` from `wrangler d1 info`.
+
+### Harden uploaded ICS sources (2026-10-09)
+Completed. A pending upload whose ingest fails permanently is marked `failed` and no longer blocks the source; only errors raised while processing an upload are recorded against it (lock contention is not); uploads have their own `ICS_UPLOAD_MAX_EVENTS` / `ICS_UPLOAD_MAX_INSTANCES` limits; a full rebuild carries on past a failing source and lists failures in its summary.
 
 ### Migrate remaining `runInTransaction()` callers to `db.batch()`
 Completed. The remaining high-write source sync paths were converted to `db.batch()`.

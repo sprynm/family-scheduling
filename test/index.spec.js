@@ -107,8 +107,17 @@ class FakeDb {
     return new FakeStatement(this, sql);
   }
 
-  batch(statements) {
-    return Promise.all(statements.map((statement) => statement.run()));
+  // D1 runs a batch's statements in order and rolls the whole batch back if one fails.
+  async batch(statements) {
+    const saved = structuredClone(Object.fromEntries(Object.entries(this).filter(([, value]) => typeof value !== 'function')));
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      return results;
+    } catch (error) {
+      Object.assign(this, saved);
+      throw error;
+    }
   }
 
   run(sql, values) {
@@ -434,6 +443,32 @@ class FakeDb {
         parse_error_summary: parseErrorSummary,
       });
       return;
+    }
+
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = NULL') && sql.includes('SELECT source_id FROM canonical_events')) {
+      const event = this.canonicalEvents.find((row) => row.id === values[0]);
+      let changes = 0;
+      for (const row of this.sourceSnapshots) {
+        if (event && row.source_id === event.source_id && row.content_fingerprint) { row.content_fingerprint = null; changes += 1; }
+      }
+      return changes;
+    }
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = NULL')) {
+      let changes = 0;
+      for (const row of this.sourceSnapshots) {
+        if (row.source_id === values[0] && row.content_fingerprint) {
+          row.content_fingerprint = null;
+          changes += 1;
+        }
+      }
+      return changes;
+    }
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = ?')) {
+      const [fingerprint, snapshotId] = values;
+      const snapshot = this.sourceSnapshots.find((row) => row.id === snapshotId);
+      if (!snapshot) return 0;
+      snapshot.content_fingerprint = fingerprint;
+      return 1;
     }
 
     if (sql.includes('DELETE FROM source_snapshots WHERE fetched_at < ?')) {
@@ -985,6 +1020,15 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE sync_jobs') && sql.includes("last_error_kind = 'queue_send'")) {
+      // enqueueJob marks a job failed when its queue send throws.
+      const [finishedAt, errorJson, jobId] = values;
+      const job = this.syncJobs.find((row) => row.id === jobId && row.status === 'queued');
+      if (!job) return 0;
+      Object.assign(job, { status: 'failed', finished_at: finishedAt, error_json: errorJson, last_error_kind: 'queue_send' });
+      return 1;
+    }
+
     if (sql.includes('UPDATE sync_jobs')) {
       const hasRetryMetadata = values.length >= 7;
       const [status, finishedAt, summaryJson, errorJson] = values;
@@ -1164,6 +1208,13 @@ class FakeDb {
         changes += 1;
       }
       return changes;
+    }
+    if (sql.includes("SET status = 'failed', last_error = ?")) {
+      const [message, uploadId] = values;
+      const upload = this.sourceUploads.find((row) => row.id === uploadId && row.status === 'pending');
+      if (!upload) return 0;
+      Object.assign(upload, { status: 'failed', last_error: message });
+      return 1;
     }
     if (sql.includes('UPDATE source_uploads SET last_error = ?')) {
       const [message, uploadId] = values;
@@ -1648,6 +1699,14 @@ class FakeDb {
   }
 
   runFirst(sql, values) {
+    if (sql.includes('SELECT source_id FROM canonical_events WHERE id = ?')) {
+      const event = this.canonicalEvents.find((row) => row.id === values[0]);
+      return event ? { source_id: event.source_id } : null;
+    }
+    if (sql.includes('SELECT canonical_event_id FROM event_overrides WHERE id = ?') && !sql.includes('event_instance_id')) {
+      const override = this.eventOverrides.find((row) => row.id === values[0]);
+      return override ? { canonical_event_id: override.canonical_event_id } : null;
+    }
     if (sql.includes('SET upload_revision = upload_revision + 1')) {
       const [updatedAt, sourceId] = values;
       const source = this.sources.find((row) => row.id === sourceId);
@@ -1700,6 +1759,12 @@ class FakeDb {
     if (sql.includes("SELECT COUNT(*) AS count") && sql.includes("FROM source_snapshots") && sql.includes("fetched_at < ?")) {
       const [cutoff] = values;
       return { count: this.sourceSnapshots.filter((row) => String(row.fetched_at) < String(cutoff)).length };
+    }
+    if (sql.includes('FROM source_snapshots') && sql.includes('content_fingerprint IS NOT NULL')) {
+      // Mirrors getLatestCompletedSnapshot: newest snapshot whose ingest finished writing.
+      return this.sourceSnapshots
+        .filter((row) => row.source_id === values[0] && row.content_fingerprint)
+        .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)))[0] || null;
     }
     if (sql.includes('FROM source_snapshots') && sql.includes('ORDER BY fetched_at DESC')) {
       return this.sourceSnapshots
@@ -3553,6 +3618,140 @@ describe('family-scheduling worker', () => {
       expect(env.JOBS_QUEUE.sent).toHaveLength(0);
     });
 
+    it('marks a permanently failing upload failed so the URL source polls its URL again', async () => {
+      const urlIcs = buildUploadIcs(['url-game']);
+      vi.stubGlobal('fetch', vi.fn(async (url) => {
+        if (String(url) === 'https://example.com/naomi-soccer.ics') return new Response(urlIcs, { status: 200 });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }));
+      const created = await send(new Request('http://example.com/api/sources', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-user-role': 'admin' },
+        body: JSON.stringify({ ...metadata, url: 'https://example.com/naomi-soccer.ics' }),
+      }));
+      const sourceId = created.body.source.id;
+      const staged = await send(uploadRequest(`/api/sources/${sourceId}/upload`, metadata, buildUploadIcs(['upload-game'])));
+      expect(staged.status).toBe(202);
+      // The stored file goes bad before the job runs: a permanent, non-retryable processing error.
+      const blobKey = [...env.SNAPSHOTS.objects.keys()].find((key) => key.startsWith(`uploads/${sourceId}/`));
+      env.SNAPSHOTS.objects.set(blobKey, buildUploadIcs(['upload-game']).replace(/DTSTART:\d{8}T\d{6}Z/, 'DTSTART:not-a-date'));
+
+      await drainQueue(env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('failed');
+      expect(upload.last_error).toMatch(/invalid DTSTART/);
+      const repo = new D1Repository(env.APP_DB, env);
+      const next = await repo.ingestSource(sourceId);
+      expect(next.fetchState).toBe('changed');
+      expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer url-game']);
+    });
+
+    it('keeps a retryable upload failure pending until the final attempt, then marks it failed', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+      // The stored file disappears: a retryable (503) failure.
+      env.SNAPSHOTS.objects.clear();
+      const deliver = async (attempts) => {
+        const message = { body: jobMessage, attempts, ack: vi.fn(), retry: vi.fn() };
+        await worker.queue({ messages: [message] }, env);
+        return message;
+      };
+
+      const early = await deliver(1);
+      const uploadAfterEarly = { ...env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId) };
+      const final = await deliver(5);
+      const uploadAfterFinal = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+
+      expect(early.retry).toHaveBeenCalled();
+      expect(uploadAfterEarly.status).toBe('pending');
+      expect(uploadAfterEarly.last_error).toMatch(/Stored ICS upload is missing/);
+      expect(final.retry).not.toHaveBeenCalled();
+      expect(uploadAfterFinal.status).toBe('failed');
+    });
+
+    it('treats the fifth delivery as final even when the retry budget is configured higher', async () => {
+      env.JOB_RETRY_MAX_ATTEMPTS = '8';
+      try {
+        const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+        const sourceId = created.body.source.id;
+        const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+        env.SNAPSHOTS.objects.clear();
+        const message = { body: jobMessage, attempts: 5, ack: vi.fn(), retry: vi.fn() };
+
+        await worker.queue({ messages: [message] }, env);
+
+        expect(message.retry).not.toHaveBeenCalled();
+        expect(env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId).status).toBe('failed');
+      } finally {
+        delete env.JOB_RETRY_MAX_ATTEMPTS;
+      }
+    });
+
+    it('keeps an upload active when its events were written but Google queueing fails afterwards', async () => {
+      env.APP_DB.outputTargets.push({ id: 'outt_upload_google', target_type: 'google', slug: 'naomi_upload_clubs', display_name: 'Naomi Upload Clubs', calendar_id: 'naomi-upload@group.calendar.google.com', ownership_mode: 'managed_output', is_system: 0, is_active: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      const withGoogle = { ...metadata, include_in_child_google_output: true, target_links: [...metadata.target_links, { target_key: 'naomi_upload_clubs', icon: '⚽', prefix: 'N:' }] };
+      const created = await send(uploadRequest('/api/sources/upload', withGoogle, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+      const realSend = env.JOBS_QUEUE.send;
+      env.JOBS_QUEUE.send = vi.fn(async (body) => {
+        if (body.jobType === 'sync_google_target') throw new Error('Queue send failed');
+        return realSend(body);
+      });
+
+      await worker.queue({ messages: [{ body: jobMessage, attempts: 5, ack: vi.fn(), retry: vi.fn() }] }, env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('active');
+      expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer game-1']);
+    });
+
+    it('marks a permanently failing pending upload failed during a full rebuild', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      env.JOBS_QUEUE.sent.splice(0);
+      const blobKey = [...env.SNAPSHOTS.objects.keys()].find((key) => key.startsWith(`uploads/${sourceId}/`));
+      env.SNAPSHOTS.objects.set(blobKey, buildUploadIcs(['game-1']).replace(/DTSTART:\d{8}T\d{6}Z/, 'DTSTART:not-a-date'));
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('not used', { status: 404 })));
+
+      const rebuild = await send(new Request('http://example.com/api/rebuild/full', { method: 'POST', headers: { 'x-user-role': 'admin' } }));
+      expect(rebuild.status).toBeLessThan(300);
+      await drainQueue(env);
+
+      expect(env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId).status).toBe('failed');
+    });
+
+    it('does not record lock contention as an upload error', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      env.APP_DB.sourceIngestLocks.push({
+        source_id: sourceId,
+        lock_token: 'held-by-another-ingest',
+        expires_at: new Date(Date.now() + 60 * 1000).toISOString(),
+      });
+
+      await drainQueue(env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('pending');
+      expect(upload.last_error).toBeNull();
+    });
+
+    it('applies its own event limit to uploads instead of the snapshot cap', async () => {
+      env.ICS_UPLOAD_MAX_EVENTS = '1';
+      env.SNAPSHOTS_MAX_RECORDS = '5000';
+      try {
+        const rejected = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1', 'game-2'])));
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.message).toMatch(/more than 1 events/);
+      } finally {
+        delete env.ICS_UPLOAD_MAX_EVENTS;
+        delete env.SNAPSHOTS_MAX_RECORDS;
+      }
+    });
+
     it('returns 503 instead of editing a source while its ingest lock is held', async () => {
       const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
       const sourceId = created.body.source.id;
@@ -3820,6 +4019,312 @@ describe('family-scheduling worker', () => {
     expect(naomiFeed).toContain('SUMMARY:🏐 Volleyball Game');
   });
 
+  describe('skipping writes when a feed changes bytes but not events', () => {
+    const futureStamp = (days, hour) => {
+      const d = new Date(Date.now() + days * 86400000);
+      d.setUTCHours(hour, 0, 0, 0);
+      return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    };
+    const vevent = (uid, title, days, dtstamp) => [
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${dtstamp}`,
+      `SUMMARY:${title}`,
+      `DTSTART:${futureStamp(days, 17)}`,
+      `DTEND:${futureStamp(days, 18)}`,
+      'END:VEVENT',
+    ];
+    const calendar = (events) => ['BEGIN:VCALENDAR', ...events.flat(), 'END:VCALENDAR'].join('\r\n');
+
+    function setup() {
+      env.SEED_SAMPLE_DATA = 'false';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      db.sources.push({
+        id: 'src_reorder', name: 'family-reorder', display_name: 'Family Reorder', provider_type: 'ics', owner_type: 'family',
+        source_category: 'shared', url: 'https://example.com/family-reorder.ics', icon: '', prefix: '', fetch_url_secret_ref: null,
+        include_in_child_ics: 0, include_in_family_ics: 1, include_in_child_google_output: 0, is_active: 1, sort_order: 0,
+        poll_interval_minutes: 30, quality_profile: 'standard', created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z',
+      });
+      const puts = [];
+      env.SNAPSHOTS = {
+        put: vi.fn(async (key) => { puts.push(key); }),
+        get: vi.fn(async () => null),
+        delete: vi.fn(async () => {}),
+      };
+      let writes = 0;
+      const originalPrepare = db.prepare.bind(db);
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (sql.includes('INSERT INTO canonical_events') || sql.includes('INSERT INTO event_instances')) {
+          const run = statement.run.bind(statement);
+          statement.run = async () => { writes += 1; return run(); };
+        }
+        return statement;
+      };
+      return { db, puts, writeCount: () => writes };
+    }
+
+    function serve(bodies) {
+      let call = 0;
+      vi.stubGlobal('fetch', vi.fn(async (url) => {
+        if (String(url) !== 'https://example.com/family-reorder.ics') throw new Error(`Unexpected fetch: ${url}`);
+        return new Response(bodies[Math.min(call++, bodies.length - 1)], { status: 200 });
+      }));
+    }
+
+    afterEach(() => { delete env.SNAPSHOTS; });
+
+    it('skips event writes and the R2 snapshot when only order and DTSTAMP change', async () => {
+      const { db, puts, writeCount } = setup();
+      serve([
+        calendar([vevent('a', 'Dentist', 3, '20261008T010000Z'), vevent('b', 'Piano', 5, '20261008T010000Z')]),
+        calendar([vevent('b', 'Piano', 5, '20261008T090000Z'), vevent('a', 'Dentist', 3, '20261008T090000Z')]),
+      ]);
+      const repo = new D1Repository(db, env);
+
+      const first = await repo.ingestSource('src_reorder');
+      const writesAfterFirst = writeCount();
+      const second = await repo.ingestSource('src_reorder');
+
+      expect(first.fetchState).toBe('changed');
+      expect(writesAfterFirst).toBeGreaterThan(0);
+      expect(second.fetchState).toBe('unchanged_content');
+      expect(second.eventsParsed).toBe(2);
+      expect(writeCount()).toBe(writesAfterFirst);
+      expect(puts).toHaveLength(1);
+      expect(db.sourceSnapshots.map((row) => row.parse_status)).toEqual(['parsed', 'unchanged_content']);
+    });
+
+    it('still writes when an event actually changes', async () => {
+      const { db, writeCount } = setup();
+      serve([
+        calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]),
+        calendar([vevent('a', 'Dentist (moved)', 3, '20261008T010000Z')]),
+      ]);
+      const repo = new D1Repository(db, env);
+
+      await repo.ingestSource('src_reorder');
+      const writesAfterFirst = writeCount();
+      const second = await repo.ingestSource('src_reorder');
+
+      expect(second.fetchState).toBe('changed');
+      expect(writeCount()).toBeGreaterThan(writesAfterFirst);
+      expect(db.canonicalEvents.find((row) => !Number(row.source_deleted))?.title).toBe('Dentist (moved)');
+    });
+
+    it('re-checks a stable feed in full on the first fetch of a new day, then uses the cheap path', async () => {
+      const { db, writeCount } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Pretend the completed ingest happened yesterday.
+      for (const row of db.sourceSnapshots) row.fetched_at = new Date(Date.now() - 86400000).toISOString();
+      const writesBefore = writeCount();
+
+      const firstToday = await repo.ingestSource('src_reorder');
+      const secondToday = await repo.ingestSource('src_reorder');
+
+      expect(firstToday.fetchState).toBe('unchanged_content');
+      expect(secondToday.fetchState).toBe('unchanged_payload');
+      expect(writeCount()).toBe(writesBefore);
+    });
+
+    it('restores events when a disabled source is re-enabled and its feed is unchanged', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      await repo.disableSource('src_reorder');
+      expect(db.canonicalEvents.every((row) => Number(row.source_deleted) === 1)).toBe(true);
+      await repo.updateSource('src_reorder', { is_active: true });
+
+      const afterReenable = await repo.ingestSource('src_reorder');
+
+      expect(afterReenable.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
+    it('restores events after disabling and re-enabling through a settings update', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      await repo.updateSource('src_reorder', { is_active: false });
+      await repo.updateSource('src_reorder', { is_active: true });
+
+      const afterReenable = await repo.ingestSource('src_reorder');
+
+      expect(afterReenable.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
+    it('retries the whole ingest when queueing Google sync fails after the writes', async () => {
+      const { db } = setup();
+      db.outputTargets.push({ id: 'outt_google_retry', target_type: 'google', slug: 'family_clubs', display_name: 'Family Clubs', calendar_id: 'family-clubs@group.calendar.google.com', ownership_mode: 'managed_output', is_system: 0, is_active: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      db.sourceTargetLinks.push({ id: 'stl_google_retry', source_id: 'src_reorder', target_id: 'outt_google_retry', target_key: 'family_clubs', target_type: 'google', icon: '', prefix: '', sort_order: 0, is_enabled: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      const realSend = env.JOBS_QUEUE.send;
+      let failSync = true;
+      env.JOBS_QUEUE.send = vi.fn(async (message) => {
+        if (failSync && message.jobType === 'sync_google_target') { failSync = false; throw new Error('Queue send failed'); }
+        return realSend(message);
+      });
+
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('Queue send failed');
+      const retry = await repo.ingestSource('src_reorder');
+
+      expect(retry.fetchState).toBe('changed');
+      expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
+    });
+
+    it('waits for a running ingest instead of failing a planner change', async () => {
+      const { db } = setup();
+      serve([calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')])]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      const event = db.canonicalEvents.find((row) => !Number(row.source_deleted));
+      const instance = db.eventInstances.find((row) => row.canonical_event_id === event.id);
+      // Another ingest holds the source lock for the next ~600 ms.
+      db.sourceIngestLocks.push({ source_id: 'src_reorder', lock_token: 'other-ingest', expires_at: new Date(Date.now() + 600).toISOString() });
+      const started = Date.now();
+
+      await repo.createOverride({ eventId: event.id, eventInstanceId: instance.id, overrideType: 'skip', payload: {}, actorRole: 'editor' });
+
+      expect(Date.now() - started).toBeGreaterThanOrEqual(400);
+      expect(db.outputRules.filter((rule) => rule.event_instance_id === instance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
+      expect(db.sourceIngestLocks.some((row) => row.source_id === 'src_reorder' && row.lock_token !== 'other-ingest')).toBe(false);
+    });
+
+    it('repairs output rules on the next ingest when an override failed to reconcile', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      const event = db.canonicalEvents.find((row) => !Number(row.source_deleted));
+      const instance = db.eventInstances.find((row) => row.canonical_event_id === event.id);
+      repo.reconcileOverrideScope = async () => { throw new Error('reconcile failed'); };
+      await expect(repo.createOverride({ eventId: event.id, eventInstanceId: instance.id, overrideType: 'skip', payload: {}, actorRole: 'editor' })).rejects.toThrow('reconcile failed');
+      delete repo.reconcileOverrideScope;
+      expect(db.outputRules.some((rule) => rule.event_instance_id === instance.id && rule.include_state === 'excluded')).toBe(false);
+
+      const next = await repo.ingestSource('src_reorder');
+
+      expect(next.fetchState).toBe('changed');
+      expect(db.outputRules.filter((rule) => rule.event_instance_id === instance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
+    });
+
+    it('rewrites in full after a settings change that failed part-way through syncing rows', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Config sync soft-deletes the rows, then fails before finishing.
+      repo.syncSourceConfig = async () => {
+        await db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`).bind(new Date().toISOString(), 'src_reorder').run();
+        throw new Error('config sync failed');
+      };
+      await expect(repo.updateSource('src_reorder', { display_name: 'Family Reorder (renamed)' })).rejects.toThrow('config sync failed');
+      delete repo.syncSourceConfig;
+
+      const next = await repo.ingestSource('src_reorder');
+
+      expect(next.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
+    it('rewrites in full when a feed reverts after a half-finished ingest of different content', async () => {
+      const { db } = setup();
+      const contentA = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      const contentB = calendar([vevent('a', 'Dentist (moved)', 4, '20261008T010000Z')]);
+      serve([contentA, contentB, contentA]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Ingest B soft-deletes A's rows, then fails while writing B's occurrences.
+      const originalPrepare = db.prepare;
+      let failNext = true;
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (failNext && sql.includes('INSERT INTO event_instances')) {
+          statement.run = async () => { failNext = false; throw new Error('D1 write failed'); };
+        }
+        return statement;
+      };
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('D1 write failed');
+
+      const reverted = await repo.ingestSource('src_reorder');
+
+      expect(reverted.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
+    it('does not skip after a failed write, so a half-finished ingest is retried in full', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      // One event-instance insert fails partway through its batch; D1 (and the fake) roll that batch back.
+      const originalPrepare = db.prepare;
+      let failNext = true;
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (failNext && sql.includes('INSERT INTO event_instances')) {
+          statement.run = async () => { failNext = false; throw new Error('D1 write failed'); };
+        }
+        return statement;
+      };
+
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('D1 write failed');
+      const retry = await repo.ingestSource('src_reorder');
+
+      expect(retry.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted))).toHaveLength(1);
+    });
+  });
+
+  it('keeps rebuilding the other sources when one source fails during a full rebuild', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    const base = {
+      provider_type: 'ics', owner_type: 'family', source_category: 'shared', icon: '', prefix: '', fetch_url_secret_ref: null,
+      include_in_child_ics: 0, include_in_family_ics: 1, include_in_child_google_output: 0, is_active: 1, sort_order: 0,
+      poll_interval_minutes: 30, quality_profile: 'standard', created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z',
+    };
+    db.sources.push(
+      { ...base, id: 'src_broken', name: 'a-broken', display_name: 'Broken', url: 'https://example.com/broken.ics' },
+      { ...base, id: 'src_healthy', name: 'b-healthy', display_name: 'Healthy', url: 'https://example.com/healthy.ics' }
+    );
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url) === 'https://example.com/broken.ics') return new Response('upstream down', { status: 503 });
+      if (String(url) === 'https://example.com/healthy.ics') {
+        return new Response(['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:healthy-1', 'SUMMARY:Library day', 'DTSTART:20990310T170000Z', 'DTEND:20990310T180000Z', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n'), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }));
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(new Request('http://example.com/api/rebuild/full', { method: 'POST', headers: { 'x-user-role': 'admin' } }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBeLessThan(300);
+    await drainQueue(env);
+
+    const job = db.syncJobs.find((row) => row.job_type === 'rebuild_system');
+    expect(job.status).toBe('completed');
+    const summary = JSON.parse(job.summary_json);
+    expect(summary.sourcesProcessed).toBe(1);
+    expect(summary.sourcesFailed).toBe(1);
+    expect(summary.failures[0].sourceId).toBe('src_broken');
+    expect(db.canonicalEvents.some((row) => row.source_id === 'src_healthy' && row.title === 'Library day')).toBe(true);
+  });
+
   it('does not rewrite already-deleted events on every ingest', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     const db = new FakeDb();
@@ -3916,7 +4421,10 @@ describe('family-scheduling worker', () => {
       payload_hash: 'hash-prev',
       parse_status: 'parsed',
       parse_error_summary: null,
+      // A completed ingest checked today: only these may seed conditional requests.
+      content_fingerprint: 'fingerprint-prev',
     });
+    db.sourceSnapshots[db.sourceSnapshots.length - 1].fetched_at = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
     const fetchMock = vi.fn(async (_url, options = {}) => {
       expect(options.headers['If-None-Match']).toBe('"etag-prev"');
       expect(options.headers['If-Modified-Since']).toBe('Mon, 03 Mar 2026 00:00:00 GMT');
@@ -4159,7 +4667,8 @@ describe('family-scheduling worker', () => {
     variant = 2;
     const second = await repo.ingestSource('src_same_state');
 
-    expect(second.fetchState).toBe('changed');
+    // Reordered properties, same events: the content fingerprint matches, so nothing is rewritten.
+    expect(second.fetchState).toBe('unchanged_content');
     expect(second.dataChanged).toBe(false);
     expect(second.googleSync.queued_jobs).toBe(0);
     expect(env.JOBS_QUEUE.sent).toHaveLength(0);
@@ -4683,11 +5192,18 @@ describe('family-scheduling worker', () => {
     const second = await repo.ingestSource('src_uid_churn_test');
 
     expect(first.dataChanged).toBe(true);
-    expect(second.fetchState).toBe('changed');
+    // Same events under churned UIDs: nothing to write.
+    expect(second.fetchState).toBe('unchanged_content');
     expect(second.dataChanged).toBe(false);
     expect(db.canonicalEvents).toHaveLength(1);
     expect(db.sourceEvents).toHaveLength(1);
     expect(db.eventInstances).toHaveLength(1);
+
+    // A forced rebuild runs the full write path; identities must still hold under the churned UIDs.
+    const third = await repo.ingestSource('src_uid_churn_test', { forceRefresh: true });
+    expect(third.fetchState).toBe('changed');
+    expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted))).toHaveLength(1);
+    expect(db.sourceEvents).toHaveLength(1);
   });
 
   it('keeps UID fallback identities stable when standalone event order changes between fetches', async () => {
