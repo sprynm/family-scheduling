@@ -708,6 +708,16 @@ export class D1Repository {
       if (!/duplicate column name|already exists/i.test(message)) throw error;
     }
     try {
+      await this.db.prepare(`ALTER TABLE source_snapshots ADD COLUMN content_fingerprint TEXT`).run();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/duplicate column name|already exists/i.test(message)) throw error;
+    }
+    // Latest-snapshot lookups run on every ingest; without this they scan every snapshot row.
+    await this.db.prepare(
+      `CREATE INDEX IF NOT EXISTS source_snapshots_source_fetched_idx ON source_snapshots(source_id, fetched_at)`
+    ).run();
+    try {
       await this.db.prepare(`ALTER TABLE sync_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0`).run();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -833,16 +843,20 @@ export class D1Repository {
     return row ? { ...mapRow(row), target_key: row.slug } : null;
   }
 
-  async getLatestSnapshotForSource(sourceId) {
+  // The latest snapshot whose ingest finished writing (only those carry a content fingerprint).
+  // Conditional requests and unchanged-payload checks must start from it: trusting a snapshot whose
+  // writes failed would let a 304 or an identical payload skip events that were never stored.
+  async getLatestCompletedSnapshot(sourceId) {
     const row = await this.db.prepare(
-      `SELECT id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+      `SELECT id, etag, last_modified, payload_hash, content_fingerprint
        FROM source_snapshots
-       WHERE source_id = ?
+       WHERE source_id = ? AND content_fingerprint IS NOT NULL
        ORDER BY fetched_at DESC
        LIMIT 1`
     ).bind(sourceId).first();
     return row ? mapRow(row) : null;
   }
+
 
   async computeSourceStateFingerprint(sourceId) {
     const [eventsResult, instancesResult, rulesResult] = await Promise.all([
@@ -3360,7 +3374,7 @@ export class D1Repository {
     }
     const sourceUrl = sourceUpload ? null : ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
-    const previousSnapshot = await this.getLatestSnapshotForSource(sourceId);
+    const previousSnapshot = await this.getLatestCompletedSnapshot(sourceId);
     const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
@@ -3497,43 +3511,46 @@ export class D1Repository {
       };
     }
 
-    if (canStoreSnapshot) {
-      await this.env.SNAPSHOTS.put(blobRef, body, {
-        httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
-      });
-      storedBlobRef = blobRef;
-    }
+    const recordSnapshot = async () => {
+      if (canStoreSnapshot) {
+        await this.env.SNAPSHOTS.put(blobRef, body, {
+          httpMetadata: { contentType: 'text/calendar; charset=utf-8' },
+        });
+        storedBlobRef = blobRef;
+      }
 
-    await this.db.prepare(
-      `INSERT INTO source_snapshots (
-        id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      snapshotId,
-      sourceId,
-      fetchedAt,
-      response.status,
-      response.headers.get('etag'),
-      response.headers.get('last-modified'),
-      storedBlobRef,
-      payloadHash,
-      sourceUpload ? 'upload_received' : response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
-      sourceUpload
-        ? null
-        : response.ok
-        ? storedBlobRef
+      await this.db.prepare(
+        `INSERT INTO source_snapshots (
+          id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        snapshotId,
+        sourceId,
+        fetchedAt,
+        response.status,
+        response.headers.get('etag'),
+        response.headers.get('last-modified'),
+        storedBlobRef,
+        payloadHash,
+        sourceUpload ? 'upload_received' : response.ok ? (storedBlobRef ? 'parsed' : 'parsed_no_blob') : 'fetch_error',
+        sourceUpload
           ? null
-          : skipForSize
-          ? `Snapshot skipped: payload ${payloadBytes} bytes exceeds ${maxSnapshotBytes}`
-          : skipForCount
-          ? `Snapshot skipped: snapshot cap ${maxSnapshotRecords} reached`
-          : snapshotsEnabled
-          ? 'Snapshot skipped: storage unavailable'
-          : 'Snapshot skipped: disabled by SNAPSHOTS_ENABLED'
-        : `HTTP ${response.status}`
-    ).run();
+          : response.ok
+          ? storedBlobRef
+            ? null
+            : skipForSize
+            ? `Snapshot skipped: payload ${payloadBytes} bytes exceeds ${maxSnapshotBytes}`
+            : skipForCount
+            ? `Snapshot skipped: snapshot cap ${maxSnapshotRecords} reached`
+            : snapshotsEnabled
+            ? 'Snapshot skipped: storage unavailable'
+            : 'Snapshot skipped: disabled by SNAPSHOTS_ENABLED'
+          : `HTTP ${response.status}`
+      ).run();
+    };
 
     if (!response.ok) {
+      await recordSnapshot();
       throw new Error(`Source fetch failed for ${sourceUrl}: HTTP ${response.status}`);
     }
 
@@ -3600,6 +3617,64 @@ export class D1Repository {
     }
 
     const targets = await this.resolveTargetsForSource(source);
+    // Fingerprint what this ingest would write, ignoring feed byte order, DTSTAMP and LAST-MODIFIED.
+    // Google reorders the Family feed on every fetch, so the raw payload hash never matches; this does.
+    const fingerprintInput = JSON.stringify({
+      targets,
+      // Sorted by identity: the feed's own event order must not change the fingerprint.
+      events: [...stagedEvents]
+        .sort((a, b) => `${a.canonicalEventId}:${a.sourceEventId}`.localeCompare(`${b.canonicalEventId}:${b.sourceEventId}`))
+        .map((staged) => ({
+        canonicalEventId: staged.canonicalEventId,
+        sourceEventId: staged.sourceEventId,
+        identityKey: staged.identityKey,
+        rawTitle: staged.rawTitle,
+        rewrittenTitle: staged.rewrittenTitle,
+        sourceIcon: staged.sourceIcon,
+        sourcePrefix: staged.sourcePrefix,
+        description: staged.event.description,
+        location: staged.event.location,
+        status: staged.event.status,
+        startAt: staged.event.startAt,
+        endAt: staged.event.endAt,
+        timezone: staged.event.timezone,
+        rrule: staged.event.rrule,
+        recurrenceId: staged.event.recurrenceId,
+        instances: staged.instances,
+      })),
+    });
+    const contentFingerprint = hashValue(fingerprintInput);
+    if (!sourceUpload && !forceRefresh && contentFingerprint === previousSnapshot?.content_fingerprint) {
+      await this.db.prepare(
+        `INSERT INTO source_snapshots (
+          id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        snapshotId,
+        sourceId,
+        fetchedAt,
+        response.status,
+        response.headers.get('etag'),
+        response.headers.get('last-modified'),
+        null,
+        payloadHash,
+        'unchanged_content',
+        null
+      ).run();
+      return {
+        sourceId,
+        fetchedAt,
+        urlsFetched: 1,
+        eventsParsed: totalEvents,
+        instancesMaterialized: totalInstances,
+        fetchState: 'unchanged_content',
+        dataChanged: false,
+        googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
+        publishStrategy: typeof this.db.exec === 'function' ? 'transaction' : 'staged-before-mutate',
+      };
+    }
+    await recordSnapshot();
+
     const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const statements = [
       this.db.prepare(
@@ -3754,6 +3829,10 @@ export class D1Repository {
       await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));
     }
     await this.reapplyActiveOverridesForSource(sourceId);
+    // Only a completed write may let later ingests skip; a failed one leaves no fingerprint behind.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
+    ).bind(contentFingerprint, snapshotId).run();
     const currentStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const dataChanged = previousStateFingerprint !== currentStateFingerprint;
     const googleSync = dataChanged || (sourceUpload && sourceUpload.status === 'pending')

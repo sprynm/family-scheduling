@@ -436,6 +436,14 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = ?')) {
+      const [fingerprint, snapshotId] = values;
+      const snapshot = this.sourceSnapshots.find((row) => row.id === snapshotId);
+      if (!snapshot) return 0;
+      snapshot.content_fingerprint = fingerprint;
+      return 1;
+    }
+
     if (sql.includes('DELETE FROM source_snapshots WHERE fetched_at < ?')) {
       const [cutoff] = values;
       this.sourceSnapshots = this.sourceSnapshots.filter((row) => String(row.fetched_at) >= String(cutoff));
@@ -1700,6 +1708,12 @@ class FakeDb {
     if (sql.includes("SELECT COUNT(*) AS count") && sql.includes("FROM source_snapshots") && sql.includes("fetched_at < ?")) {
       const [cutoff] = values;
       return { count: this.sourceSnapshots.filter((row) => String(row.fetched_at) < String(cutoff)).length };
+    }
+    if (sql.includes('FROM source_snapshots') && sql.includes('content_fingerprint IS NOT NULL')) {
+      // Mirrors getLatestCompletedSnapshot: newest snapshot whose ingest finished writing.
+      return this.sourceSnapshots
+        .filter((row) => row.source_id === values[0] && row.content_fingerprint)
+        .sort((a, b) => String(b.fetched_at).localeCompare(String(a.fetched_at)))[0] || null;
     }
     if (sql.includes('FROM source_snapshots') && sql.includes('ORDER BY fetched_at DESC')) {
       return this.sourceSnapshots
@@ -3820,6 +3834,123 @@ describe('family-scheduling worker', () => {
     expect(naomiFeed).toContain('SUMMARY:🏐 Volleyball Game');
   });
 
+  describe('skipping writes when a feed changes bytes but not events', () => {
+    const futureStamp = (days, hour) => {
+      const d = new Date(Date.now() + days * 86400000);
+      d.setUTCHours(hour, 0, 0, 0);
+      return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    };
+    const vevent = (uid, title, days, dtstamp) => [
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${dtstamp}`,
+      `SUMMARY:${title}`,
+      `DTSTART:${futureStamp(days, 17)}`,
+      `DTEND:${futureStamp(days, 18)}`,
+      'END:VEVENT',
+    ];
+    const calendar = (events) => ['BEGIN:VCALENDAR', ...events.flat(), 'END:VCALENDAR'].join('\r\n');
+
+    function setup() {
+      env.SEED_SAMPLE_DATA = 'false';
+      const db = new FakeDb();
+      env.APP_DB = db;
+      db.sources.push({
+        id: 'src_reorder', name: 'family-reorder', display_name: 'Family Reorder', provider_type: 'ics', owner_type: 'family',
+        source_category: 'shared', url: 'https://example.com/family-reorder.ics', icon: '', prefix: '', fetch_url_secret_ref: null,
+        include_in_child_ics: 0, include_in_family_ics: 1, include_in_child_google_output: 0, is_active: 1, sort_order: 0,
+        poll_interval_minutes: 30, quality_profile: 'standard', created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z',
+      });
+      const puts = [];
+      env.SNAPSHOTS = {
+        put: vi.fn(async (key) => { puts.push(key); }),
+        get: vi.fn(async () => null),
+        delete: vi.fn(async () => {}),
+      };
+      let writes = 0;
+      const originalPrepare = db.prepare.bind(db);
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (sql.includes('INSERT INTO canonical_events') || sql.includes('INSERT INTO event_instances')) {
+          const run = statement.run.bind(statement);
+          statement.run = async () => { writes += 1; return run(); };
+        }
+        return statement;
+      };
+      return { db, puts, writeCount: () => writes };
+    }
+
+    function serve(bodies) {
+      let call = 0;
+      vi.stubGlobal('fetch', vi.fn(async (url) => {
+        if (String(url) !== 'https://example.com/family-reorder.ics') throw new Error(`Unexpected fetch: ${url}`);
+        return new Response(bodies[Math.min(call++, bodies.length - 1)], { status: 200 });
+      }));
+    }
+
+    afterEach(() => { delete env.SNAPSHOTS; });
+
+    it('skips event writes and the R2 snapshot when only order and DTSTAMP change', async () => {
+      const { db, puts, writeCount } = setup();
+      serve([
+        calendar([vevent('a', 'Dentist', 3, '20261008T010000Z'), vevent('b', 'Piano', 5, '20261008T010000Z')]),
+        calendar([vevent('b', 'Piano', 5, '20261008T090000Z'), vevent('a', 'Dentist', 3, '20261008T090000Z')]),
+      ]);
+      const repo = new D1Repository(db, env);
+
+      const first = await repo.ingestSource('src_reorder');
+      const writesAfterFirst = writeCount();
+      const second = await repo.ingestSource('src_reorder');
+
+      expect(first.fetchState).toBe('changed');
+      expect(writesAfterFirst).toBeGreaterThan(0);
+      expect(second.fetchState).toBe('unchanged_content');
+      expect(second.eventsParsed).toBe(2);
+      expect(writeCount()).toBe(writesAfterFirst);
+      expect(puts).toHaveLength(1);
+      expect(db.sourceSnapshots.map((row) => row.parse_status)).toEqual(['parsed', 'unchanged_content']);
+    });
+
+    it('still writes when an event actually changes', async () => {
+      const { db, writeCount } = setup();
+      serve([
+        calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]),
+        calendar([vevent('a', 'Dentist (moved)', 3, '20261008T010000Z')]),
+      ]);
+      const repo = new D1Repository(db, env);
+
+      await repo.ingestSource('src_reorder');
+      const writesAfterFirst = writeCount();
+      const second = await repo.ingestSource('src_reorder');
+
+      expect(second.fetchState).toBe('changed');
+      expect(writeCount()).toBeGreaterThan(writesAfterFirst);
+      expect(db.canonicalEvents.find((row) => !Number(row.source_deleted))?.title).toBe('Dentist (moved)');
+    });
+
+    it('does not skip after a failed write, so a half-finished ingest is retried in full', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      const originalBatch = db.batch.bind(db);
+      let failNext = true;
+      db.batch = async (statements) => {
+        if (failNext && statements.some((statement) => statement.sql.includes('INSERT INTO canonical_events'))) {
+          failNext = false;
+          throw new Error('D1 write failed');
+        }
+        return originalBatch(statements);
+      };
+
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('D1 write failed');
+      const retry = await repo.ingestSource('src_reorder');
+
+      expect(retry.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted))).toHaveLength(1);
+    });
+  });
+
   it('does not rewrite already-deleted events on every ingest', async () => {
     env.SEED_SAMPLE_DATA = 'false';
     const db = new FakeDb();
@@ -3916,6 +4047,8 @@ describe('family-scheduling worker', () => {
       payload_hash: 'hash-prev',
       parse_status: 'parsed',
       parse_error_summary: null,
+      // A completed ingest: only these may seed conditional requests.
+      content_fingerprint: 'fingerprint-prev',
     });
     const fetchMock = vi.fn(async (_url, options = {}) => {
       expect(options.headers['If-None-Match']).toBe('"etag-prev"');
@@ -4159,7 +4292,8 @@ describe('family-scheduling worker', () => {
     variant = 2;
     const second = await repo.ingestSource('src_same_state');
 
-    expect(second.fetchState).toBe('changed');
+    // Reordered properties, same events: the content fingerprint matches, so nothing is rewritten.
+    expect(second.fetchState).toBe('unchanged_content');
     expect(second.dataChanged).toBe(false);
     expect(second.googleSync.queued_jobs).toBe(0);
     expect(env.JOBS_QUEUE.sent).toHaveLength(0);
@@ -4683,11 +4817,18 @@ describe('family-scheduling worker', () => {
     const second = await repo.ingestSource('src_uid_churn_test');
 
     expect(first.dataChanged).toBe(true);
-    expect(second.fetchState).toBe('changed');
+    // Same events under churned UIDs: nothing to write.
+    expect(second.fetchState).toBe('unchanged_content');
     expect(second.dataChanged).toBe(false);
     expect(db.canonicalEvents).toHaveLength(1);
     expect(db.sourceEvents).toHaveLength(1);
     expect(db.eventInstances).toHaveLength(1);
+
+    // A forced rebuild runs the full write path; identities must still hold under the churned UIDs.
+    const third = await repo.ingestSource('src_uid_churn_test', { forceRefresh: true });
+    expect(third.fetchState).toBe('changed');
+    expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted))).toHaveLength(1);
+    expect(db.sourceEvents).toHaveLength(1);
   });
 
   it('keeps UID fallback identities stable when standalone event order changes between fetches', async () => {
