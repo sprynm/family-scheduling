@@ -445,6 +445,14 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = NULL') && sql.includes('SELECT source_id FROM canonical_events')) {
+      const event = this.canonicalEvents.find((row) => row.id === values[0]);
+      let changes = 0;
+      for (const row of this.sourceSnapshots) {
+        if (event && row.source_id === event.source_id && row.content_fingerprint) { row.content_fingerprint = null; changes += 1; }
+      }
+      return changes;
+    }
     if (sql.includes('UPDATE source_snapshots SET content_fingerprint = NULL')) {
       let changes = 0;
       for (const row of this.sourceSnapshots) {
@@ -4024,6 +4032,25 @@ describe('family-scheduling worker', () => {
 
       expect(retry.fetchState).toBe('changed');
       expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
+    });
+
+    it('repairs output rules on the next ingest when an override failed to reconcile', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      const event = db.canonicalEvents.find((row) => !Number(row.source_deleted));
+      const instance = db.eventInstances.find((row) => row.canonical_event_id === event.id);
+      repo.reconcileOverrideScope = async () => { throw new Error('reconcile failed'); };
+      await expect(repo.createOverride({ eventId: event.id, eventInstanceId: instance.id, overrideType: 'skip', payload: {}, actorRole: 'editor' })).rejects.toThrow('reconcile failed');
+      delete repo.reconcileOverrideScope;
+      expect(db.outputRules.some((rule) => rule.event_instance_id === instance.id && rule.include_state === 'excluded')).toBe(false);
+
+      const next = await repo.ingestSource('src_reorder');
+
+      expect(next.fetchState).toBe('changed');
+      expect(db.outputRules.filter((rule) => rule.event_instance_id === instance.id).every((rule) => rule.include_state === 'excluded')).toBe(true);
     });
 
     it('rewrites in full after a settings change that failed part-way through syncing rows', async () => {

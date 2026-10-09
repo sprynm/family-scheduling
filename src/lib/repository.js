@@ -2486,6 +2486,15 @@ export class D1Repository {
     };
   }
 
+  // Override changes are saved first and reconciled into output_rules after. If reconciliation fails, only a
+  // full ingest's reapply step repairs it, so forget the source's fingerprints before the first write.
+  async forgetFingerprintsForEvent(canonicalEventId) {
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = NULL
+       WHERE source_id = (SELECT source_id FROM canonical_events WHERE id = ?)`
+    ).bind(canonicalEventId).run();
+  }
+
   async createOverride({ eventId, eventInstanceId = null, overrideType, payload, actorRole }) {
     const timestamp = nowIso();
     const normalizedOverrideType = normalizeOverrideType(overrideType);
@@ -2503,6 +2512,7 @@ export class D1Repository {
       throw new Error('That override is already active for this item.');
     }
     const overrideId = makeOpaqueId('ovr', `${eventId}:${overrideType}`);
+    await this.forgetFingerprintsForEvent(eventId);
     await this.db.prepare(
       `INSERT INTO event_overrides (
         id, scope_type, canonical_event_id, event_instance_id, override_type, payload_json,
@@ -2536,6 +2546,7 @@ export class D1Repository {
       `SELECT canonical_event_id, event_instance_id FROM event_overrides WHERE id = ?`
     ).bind(overrideId).first();
     if (!override) return null;
+    await this.forgetFingerprintsForEvent(override.canonical_event_id);
     await this.db.prepare(
       `UPDATE event_overrides SET cleared_at = ?, updated_at = ? WHERE id = ?`
     ).bind(timestamp, timestamp, overrideId).run();
