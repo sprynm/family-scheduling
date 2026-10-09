@@ -131,44 +131,4 @@
     wrap.setAttribute('role', 'region');
     if (caption) wrap.setAttribute('aria-label', caption);
   });
-
-  // --- Keyboard access for event rows rendered by admin.js as clickable divs ---
-
-  const ROW_SELECTOR = '.inst-row, .modified-item';
-
-  function decorateRows(root) {
-    root.querySelectorAll(ROW_SELECTOR).forEach((row) => {
-      row.tabIndex = 0;
-      row.setAttribute('role', 'button');
-      row.setAttribute('aria-expanded', String(row.classList.contains('open')));
-    });
-    // Drawer form labels are plain spans; give each control an accessible name.
-    root.querySelectorAll('.override-form .field-group').forEach((group) => {
-      const label = group.querySelector('.field-label');
-      const control = group.querySelector('input, select');
-      const text = label?.textContent?.trim();
-      if (control && text && !control.hasAttribute('aria-label')) control.setAttribute('aria-label', text);
-    });
-  }
-
-  function rowKey(row) {
-    return row.getAttribute('data-inst-id') || row.getAttribute('data-override-id') || '';
-  }
-
-  for (const id of ['inst-results', 'modified-events-body']) {
-    const container = document.getElementById(id);
-    if (!container) continue;
-    new MutationObserver(() => decorateRows(container)).observe(container, { childList: true, subtree: true });
-    container.addEventListener('keydown', (event) => {
-      const row = event.target;
-      if (!(row instanceof HTMLElement) || !row.matches(ROW_SELECTOR)) return;
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      const key = rowKey(row);
-      row.click();
-      // admin.js re-renders the list on toggle; return focus to the same row.
-      const selector = row.matches('.inst-row') ? '.inst-row[data-inst-id="' + CSS.escape(key) + '"]' : '.modified-item[data-override-id="' + CSS.escape(key) + '"]';
-      container.querySelector(selector)?.focus();
-    });
-  }
 })();

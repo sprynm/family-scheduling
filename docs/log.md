@@ -11,6 +11,15 @@ At closeout of a unit of work, insights should be compacted into:
 - plan.md
 - external knowledge base if appropriate
 
+## 2026-10-09
+
+### Free-time work (review branches, not merged)
+
+- `perf/skip-unchanged-ingest-writes`: ingest fingerprints staged events (sorted by identity; feed order, DTSTAMP, LAST-MODIFIED ignored) and records `unchanged_content` instead of rewriting events, re-reading source state twice and storing an R2 blob. Also fixes an older hole: ETag/If-Modified-Since and the unchanged-payload shortcut now start from the last *completed* snapshot, so a failed write can no longer be skipped forever. Index on `source_snapshots(source_id, fetched_at)`; migration 0008. After deploy each source does one full write (old snapshots have no fingerprint), then skips when unchanged.
+- `fix/upload-hardening` (stacked on the perf branch): permanently failing uploads become `failed` and stop blocking the source; only upload-processing errors are recorded against an upload; `ICS_UPLOAD_MAX_EVENTS` / `ICS_UPLOAD_MAX_INSTANCES`; `rebuild_system` continues past a failing source.
+- `feat/print-week`: "Print this week" in the planner prints a one-page fridge sheet (next 7 days, person letters, ❓ maybe, notes; not-going events omitted).
+- `chore/remove-legacy-console-events`: removed admin.js's dead source-picker event code (243 lines), the hidden hooks in `admin.html`, the shell's row handling and dead CSS. Saves one `/api/overrides` read per console load.
+
 ## 2026-10-08
 
 ### Uploaded ICS sources (Codex `dc2042d`) reviewed, fixed and released
