@@ -3647,6 +3647,30 @@ describe('family-scheduling worker', () => {
       expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer url-game']);
     });
 
+    it('keeps a retryable upload failure pending until the final attempt, then marks it failed', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+      // The stored file disappears: a retryable (503) failure.
+      env.SNAPSHOTS.objects.clear();
+      const deliver = async (attempts) => {
+        const message = { body: jobMessage, attempts, ack: vi.fn(), retry: vi.fn() };
+        await worker.queue({ messages: [message] }, env);
+        return message;
+      };
+
+      const early = await deliver(1);
+      const uploadAfterEarly = { ...env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId) };
+      const final = await deliver(5);
+      const uploadAfterFinal = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+
+      expect(early.retry).toHaveBeenCalled();
+      expect(uploadAfterEarly.status).toBe('pending');
+      expect(uploadAfterEarly.last_error).toMatch(/Stored ICS upload is missing/);
+      expect(final.retry).not.toHaveBeenCalled();
+      expect(uploadAfterFinal.status).toBe('failed');
+    });
+
     it('does not record lock contention as an upload error', async () => {
       const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
       const sourceId = created.body.source.id;
