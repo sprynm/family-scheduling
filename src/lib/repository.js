@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { DEFAULT_FLOATING_TIMEZONE, TARGETS, TARGET_LABELS } from './constants.js';
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getGoogleAccessToken, isGoogleRateLimitError, updateGoogleCalendarEvent } from './google-calendar.js';
 import { buildICS, expandRecurringEvent, formatEventDateTimeValue, parseICS } from './ics.js';
-import { addNotesToDescription, decorateEventSummary } from './presentation.js';
+import { addNotesToDescription, applyMaybe, decorateEventSummary } from './presentation.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -398,6 +398,15 @@ const OCCURRENCE_NOTES_SQL = `(
     ORDER BY note_ov.created_at
   )
 ) AS occurrence_note`;
+
+// Whether one occurrence is marked maybe, by its own change or a series-wide one.
+const OCCURRENCE_MAYBE_SQL = `EXISTS (
+  SELECT 1 FROM event_overrides maybe_ov
+  WHERE maybe_ov.canonical_event_id = canonical_events.id
+    AND maybe_ov.override_type = 'maybe'
+    AND maybe_ov.cleared_at IS NULL
+    AND (maybe_ov.event_instance_id = event_instances.id OR maybe_ov.event_instance_id IS NULL)
+) AS occurrence_maybe`;
 
 // Only completed setup is cached per isolate. In-flight setup is never shared between requests:
 // Workers ties I/O to the request that started it, so if that request is cancelled the shared
@@ -2052,6 +2061,7 @@ export class D1Repository {
          -- Google prefixes are a per-link rule: a blank link prefix means none, not the source's family-feed prefix.
          COALESCE(source_target_links.prefix, '') AS source_prefix,
          ${OCCURRENCE_NOTES_SQL},
+         ${OCCURRENCE_MAYBE_SQL},
          event_instances.id AS event_instance_id,
          event_instances.occurrence_start_at,
          event_instances.occurrence_end_at
@@ -2121,16 +2131,20 @@ export class D1Repository {
       style: 'google',
       floatingTimeZoneFallback,
     });
-    return {
+    const { summary, status } = applyMaybe({
       summary: decorateEventSummary({
         target: row.target_key,
         title: row.title,
         sourceIcon: row.source_icon,
         sourcePrefix: row.source_prefix,
       }),
+      status: row.status === 'cancelled' ? 'cancelled' : 'confirmed',
+    }, Number(row.occurrence_maybe) === 1);
+    return {
+      summary,
       description: addNotesToDescription(row.description, row.occurrence_note),
       location: row.location || '',
-      status: row.status === 'cancelled' ? 'cancelled' : 'confirmed',
+      status,
       start: start?.type === 'date'
         ? { date: start.value }
         : {
@@ -2622,6 +2636,7 @@ export class D1Repository {
         COALESCE(NULLIF(source_target_links.prefix, ''), canonical_events.source_prefix, sources.prefix, '') AS source_prefix,
         canonical_events.description,
         ${OCCURRENCE_NOTES_SQL},
+        ${OCCURRENCE_MAYBE_SQL},
         canonical_events.location,
         canonical_events.status,
         event_instances.id AS event_instance_id,
@@ -2649,26 +2664,32 @@ export class D1Repository {
     ).bind(target, target, lookbackCutoff.toISOString()).all();
 
     const rows = result.results || [];
-    return rows.map((row) => ({
-      canonicalEventId: row.canonical_event_id,
-      eventInstanceId: row.event_instance_id,
-      uid: `${row.event_instance_id}@family-scheduling`,
-      startAt: row.occurrence_start_at,
-      endAt: row.occurrence_end_at,
-      timezone: row.timezone || 'UTC',
-      summary: decorateEventSummary({
-        target,
-        title: row.title,
+    return rows.map((row) => {
+      const { summary, status } = applyMaybe({
+        summary: decorateEventSummary({
+          target,
+          title: row.title,
+          sourceIcon: row.source_icon,
+          sourcePrefix: row.source_prefix,
+        }),
+        status: row.status,
+      }, Number(row.occurrence_maybe) === 1);
+      return {
+        canonicalEventId: row.canonical_event_id,
+        eventInstanceId: row.event_instance_id,
+        uid: `${row.event_instance_id}@family-scheduling`,
+        startAt: row.occurrence_start_at,
+        endAt: row.occurrence_end_at,
+        timezone: row.timezone || 'UTC',
+        summary,
+        sourceTitle: row.title,
+        description: addNotesToDescription(row.description, row.occurrence_note),
+        location: row.location,
+        status,
         sourceIcon: row.source_icon,
         sourcePrefix: row.source_prefix,
-      }),
-      sourceTitle: row.title,
-      description: addNotesToDescription(row.description, row.occurrence_note),
-      location: row.location,
-      status: row.status,
-      sourceIcon: row.source_icon,
-      sourcePrefix: row.source_prefix,
-    }));
+      };
+    });
   }
 
   async generateFeed({ target, calendarName, lookbackDays = 7 }) {
