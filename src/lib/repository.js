@@ -848,7 +848,7 @@ export class D1Repository {
   // writes failed would let a 304 or an identical payload skip events that were never stored.
   async getLatestCompletedSnapshot(sourceId) {
     const row = await this.db.prepare(
-      `SELECT id, etag, last_modified, payload_hash, content_fingerprint
+      `SELECT id, fetched_at, etag, last_modified, payload_hash, content_fingerprint
        FROM source_snapshots
        WHERE source_id = ? AND content_fingerprint IS NOT NULL
        ORDER BY fetched_at DESC
@@ -1619,6 +1619,9 @@ export class D1Repository {
         `UPDATE source_events SET is_deleted_upstream = 1, last_seen_at = ? WHERE source_id = ? AND is_deleted_upstream = 0`
       ).bind(timestamp, sourceId),
       this.db.prepare(`DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`).bind(sourceId),
+      // Events are now soft-deleted outside ingest; without this, an unchanged fetch after re-enabling
+      // would match the old fingerprint and leave them deleted.
+      this.db.prepare(`UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`).bind(sourceId),
     ]);
     await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'cleanup' });
     return this.getSourceById(sourceId);
@@ -3375,6 +3378,10 @@ export class D1Repository {
     const sourceUrl = sourceUpload ? null : ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
     const previousSnapshot = await this.getLatestCompletedSnapshot(sourceId);
+    // The 304 and identical-payload shortcuts skip parsing, so they cannot see time-based changes:
+    // recurring events entering the window or one-off events passing the retention cutoff. Allow them
+    // only after a completed check today; the first fetch each day parses and fingerprints in full.
+    const checkedToday = String(previousSnapshot?.fetched_at || '').slice(0, 10) === fetchedAt.slice(0, 10);
     const titleRewriteRules = normalizeTitleRewriteRules(source.title_rewrite_rules_json || source.title_rewrite_rules || []);
     const horizonDays = parseInt(this.env.RECURRENCE_HORIZON_DAYS || '180', 10);
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
@@ -3399,10 +3406,10 @@ export class D1Repository {
       response = { status: 200, ok: true, headers: new Headers() };
     } else {
       if (source.provider_type === 'ics_upload') throw new Error(`Uploaded ICS source has no active file: ${sourceId}`);
-      if (!forceRefresh && previousSnapshot?.etag) {
+      if (!forceRefresh && checkedToday && previousSnapshot?.etag) {
         requestHeaders['If-None-Match'] = previousSnapshot.etag;
       }
-      if (!forceRefresh && previousSnapshot?.last_modified) {
+      if (!forceRefresh && checkedToday && previousSnapshot?.last_modified) {
         requestHeaders['If-Modified-Since'] = previousSnapshot.last_modified;
       }
       try {
@@ -3481,7 +3488,7 @@ export class D1Repository {
       };
     }
 
-    if (!sourceUpload && !forceRefresh && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
+    if (!sourceUpload && !forceRefresh && checkedToday && response.ok && previousSnapshot?.payload_hash && previousSnapshot.payload_hash === payloadHash) {
       await this.db.prepare(
         `INSERT INTO source_snapshots (
           id, source_id, fetched_at, http_status, etag, last_modified, payload_blob_ref, payload_hash, parse_status, parse_error_summary
@@ -3661,6 +3668,11 @@ export class D1Repository {
         'unchanged_content',
         null
       ).run();
+      // Stored rows already match this fingerprint, so this check counts as completed: later fetches
+      // today may use its ETag and payload hash.
+      await this.db.prepare(
+        `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
+      ).bind(contentFingerprint, snapshotId).run();
       return {
         sourceId,
         fetchedAt,

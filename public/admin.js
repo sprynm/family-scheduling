@@ -344,7 +344,7 @@ const statusEl = document.getElementById('status');
     }
 
     function buildSourceStatus(source) {
-      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob', 'not_modified', 'unchanged_payload'].includes(source.last_parse_status);
+      const parseOk = ['ok', 'success', 'parsed', 'parsed_no_blob', 'not_modified', 'unchanged_payload', 'unchanged_content'].includes(source.last_parse_status);
       const latestJob = source.latest_job || null;
       const latestJobError = extractJobErrorMessage(latestJob);
       const googleFailure = extractGoogleSyncFailure(source);
@@ -405,6 +405,15 @@ const statusEl = document.getElementById('status');
             tone: 'ok',
             label: 'ok',
             detail: 'Upstream payload was unchanged.',
+            metrics,
+          };
+        }
+
+        if (source.last_parse_status === 'unchanged_content') {
+          return {
+            tone: 'ok',
+            label: 'ok',
+            detail: 'Upstream events were unchanged.',
             metrics,
           };
         }

@@ -107,8 +107,11 @@ class FakeDb {
     return new FakeStatement(this, sql);
   }
 
-  batch(statements) {
-    return Promise.all(statements.map((statement) => statement.run()));
+  // D1 runs a batch's statements in order (and rolls the batch back if one fails).
+  async batch(statements) {
+    const results = [];
+    for (const statement of statements) results.push(await statement.run());
+    return results;
   }
 
   run(sql, values) {
@@ -436,6 +439,16 @@ class FakeDb {
       return;
     }
 
+    if (sql.includes('UPDATE source_snapshots SET content_fingerprint = NULL')) {
+      let changes = 0;
+      for (const row of this.sourceSnapshots) {
+        if (row.source_id === values[0] && row.content_fingerprint) {
+          row.content_fingerprint = null;
+          changes += 1;
+        }
+      }
+      return changes;
+    }
     if (sql.includes('UPDATE source_snapshots SET content_fingerprint = ?')) {
       const [fingerprint, snapshotId] = values;
       const snapshot = this.sourceSnapshots.find((row) => row.id === snapshotId);
@@ -3928,6 +3941,40 @@ describe('family-scheduling worker', () => {
       expect(db.canonicalEvents.find((row) => !Number(row.source_deleted))?.title).toBe('Dentist (moved)');
     });
 
+    it('re-checks a stable feed in full on the first fetch of a new day, then uses the cheap path', async () => {
+      const { db, writeCount } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Pretend the completed ingest happened yesterday.
+      for (const row of db.sourceSnapshots) row.fetched_at = new Date(Date.now() - 86400000).toISOString();
+      const writesBefore = writeCount();
+
+      const firstToday = await repo.ingestSource('src_reorder');
+      const secondToday = await repo.ingestSource('src_reorder');
+
+      expect(firstToday.fetchState).toBe('unchanged_content');
+      expect(secondToday.fetchState).toBe('unchanged_payload');
+      expect(writeCount()).toBe(writesBefore);
+    });
+
+    it('restores events when a disabled source is re-enabled and its feed is unchanged', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      await repo.disableSource('src_reorder');
+      expect(db.canonicalEvents.every((row) => Number(row.source_deleted) === 1)).toBe(true);
+      await repo.updateSource('src_reorder', { is_active: true });
+
+      const afterReenable = await repo.ingestSource('src_reorder');
+
+      expect(afterReenable.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
     it('does not skip after a failed write, so a half-finished ingest is retried in full', async () => {
       const { db } = setup();
       const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
@@ -4047,9 +4094,10 @@ describe('family-scheduling worker', () => {
       payload_hash: 'hash-prev',
       parse_status: 'parsed',
       parse_error_summary: null,
-      // A completed ingest: only these may seed conditional requests.
+      // A completed ingest checked today: only these may seed conditional requests.
       content_fingerprint: 'fingerprint-prev',
     });
+    db.sourceSnapshots[db.sourceSnapshots.length - 1].fetched_at = new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z';
     const fetchMock = vi.fn(async (_url, options = {}) => {
       expect(options.headers['If-None-Match']).toBe('"etag-prev"');
       expect(options.headers['If-Modified-Since']).toBe('Mon, 03 Mar 2026 00:00:00 GMT');
