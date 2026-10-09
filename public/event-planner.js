@@ -18,6 +18,8 @@
   const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
   const dayFormatWithYear = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
   const utcDayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const weekdayFormat = new Intl.DateTimeFormat(undefined, { weekday: 'long' });
+  const monthDayFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -124,6 +126,7 @@
         '</div>' +
       '</div>' +
       '<div class="planner-list" id="' + root.id + '-list" role="tabpanel" aria-busy="true"></div>' +
+      '<div class="planner-footer"><button type="button" data-planner-print>Print this week</button></div>' +
       '<dialog class="planner-sheet" aria-labelledby="planner-sheet-title-' + root.id + '"></dialog>' +
       '<div class="planner-toast" role="status" aria-live="polite" hidden></div>';
 
@@ -132,6 +135,11 @@
     const listEl = root.querySelector('.planner-list');
     const sheetEl = root.querySelector('.planner-sheet');
     const toastEl = root.querySelector('.planner-toast');
+    // The print sheet lives directly under <body> so print CSS can drop everything else from the layout.
+    const printEl = document.createElement('section');
+    printEl.className = 'planner-print';
+    printEl.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(printEl);
     let toastTimer = null;
 
 
@@ -321,6 +329,63 @@
         return;
       }
       listEl.innerHTML = state.tab === 'changed' ? renderChanged() : renderUpcoming();
+    }
+
+    // --- print: one page for the fridge, the next seven days ---
+
+    const PERSON_INITIAL = { grayson: 'G', naomi: 'N', family: 'F' };
+
+    function printWeekHtml() {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const days = Array.from({ length: 7 }, (_, offset) => {
+        const date = new Date(today.getTime() + offset * DAY_MS);
+        return { key: dayKey(date, false), date, items: [] };
+      });
+      const byKey = new Map(days.map((day) => [day.key, day]));
+      for (const instance of state.instances) {
+        if (!showsPerson(instance.owner_type)) continue;
+        const changes = changesFor(instance);
+        // Not-going events are off the calendars, so they are off the fridge too.
+        if (changes.some((change) => change.override_type === 'skip')) continue;
+        const when = describeWhen(instance.occurrence_start_at, instance.occurrence_end_at);
+        const day = byKey.get(when.key);
+        if (!day) continue;
+        day.items.push({
+          instance,
+          time: when.startTime,
+          maybe: changes.some((change) => change.override_type === 'maybe'),
+          notes: changes.filter((change) => change.override_type === 'note').map(noteOf).filter(Boolean),
+        });
+      }
+      const range = monthDayFormat.format(days[0].date) + ' – ' + monthDayFormat.format(days[6].date);
+      const who = state.people.size ? listNames([...state.people]) : 'Everyone';
+      return '<header class="print-head"><h1>Family week</h1><p>' + escapeHtml(range) + ' · ' + escapeHtml(who) + '</p></header>' +
+        days.map((day, index) => '<section class="print-day">' +
+          '<h2>' + escapeHtml(index === 0 ? 'Today' : index === 1 ? 'Tomorrow' : weekdayFormat.format(day.date)) +
+            ' <span>' + escapeHtml((index < 2 ? weekdayFormat.format(day.date) + ' ' : '') + monthDayFormat.format(day.date)) + '</span></h2>' +
+          (day.items.length
+            ? '<ul>' + day.items.map((item) => '<li>' +
+                '<span class="print-time">' + escapeHtml(item.time) + '</span>' +
+                '<span class="print-who" data-owner="' + escapeHtml(item.instance.owner_type) + '">' + escapeHtml(PERSON_INITIAL[item.instance.owner_type] || '·') + '</span>' +
+                '<span class="print-title">' + (item.maybe ? '❓ ' : '') + escapeHtml(item.instance.title || 'Event') +
+                  item.notes.map((note) => '<span class="print-note">' + escapeHtml(note) + '</span>').join('') +
+                '</span>' +
+              '</li>').join('') + '</ul>'
+            : '<p class="print-empty">Nothing scheduled</p>') +
+        '</section>').join('') +
+        '<footer class="print-key">G Grayson · N Naomi · F Family · ❓ maybe</footer>';
+    }
+
+    function printWeek() {
+      printEl.innerHTML = printWeekHtml();
+      document.documentElement.classList.add('printing-week');
+      const done = () => {
+        document.documentElement.classList.remove('printing-week');
+        window.removeEventListener('afterprint', done);
+      };
+      window.addEventListener('afterprint', done);
+      window.print();
     }
 
     // --- sheet ---
@@ -532,6 +597,7 @@
 
     root.addEventListener('click', (event) => {
       if (event.target.closest('[data-planner-refresh]')) { loadAll(); return; }
+      if (event.target.closest('[data-planner-print]')) { printWeek(); return; }
       if (event.target.closest('[data-planner-clear-search]')) {
         searchEl.value = '';
         state.query = '';
