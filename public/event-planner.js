@@ -353,7 +353,7 @@
           (maybe ? '' :
             '<button type="button" class="sheet-action" data-apply="maybe"' + disabled + '>' +
               '<span class="sheet-action-label">Maybe</span>' +
-              '<span class="sheet-action-hint">Adds “Maybe:” to the title on the calendars. Only this date changes.</span>' +
+              '<span class="sheet-action-hint">Adds ❓ to the title on the calendars. Only this date changes.</span>' +
             '</button>') +
           '<form class="sheet-note" data-note-form>' +
             '<label for="planner-note-' + root.id + '">Add a note</label>' +
