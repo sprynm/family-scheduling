@@ -3694,6 +3694,11 @@ export class D1Repository {
 
     const previousStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const statements = [
+      // Forget completed fingerprints atomically with the first mutation: if a later chunk fails, the
+      // rows are half-written, and a feed that reverts to the old content must not match and skip.
+      this.db.prepare(
+        `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
+      ).bind(sourceId),
       this.db.prepare(
         `UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`
       ).bind(fetchedAt, sourceId),
@@ -3709,6 +3714,7 @@ export class D1Repository {
         `DELETE FROM output_rules WHERE canonical_event_id IN (SELECT id FROM canonical_events WHERE source_id = ?)`
       ).bind(sourceId),
     ];
+    const headerStatementCount = statements.length;
 
     for (const staged of stagedEvents) {
       const { event, rawTitle, rewrittenTitle, sourceIcon, sourcePrefix, sourceEventId, canonicalEventId, identityKey, instances } = staged;
@@ -3840,7 +3846,7 @@ export class D1Repository {
     // Run soft-delete header statements first, then chunk upserts to avoid
     // D1 execution timeouts on large sources (many events × instances × targets).
     const INGEST_BATCH_SIZE = 100;
-    const headerStatements = statements.splice(0, 4);
+    const headerStatements = statements.splice(0, headerStatementCount);
     await this.db.batch(headerStatements);
     for (let i = 0; i < statements.length; i += INGEST_BATCH_SIZE) {
       await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));

@@ -4026,6 +4026,31 @@ describe('family-scheduling worker', () => {
       expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
     });
 
+    it('rewrites in full when a feed reverts after a half-finished ingest of different content', async () => {
+      const { db } = setup();
+      const contentA = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      const contentB = calendar([vevent('a', 'Dentist (moved)', 4, '20261008T010000Z')]);
+      serve([contentA, contentB, contentA]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Ingest B soft-deletes A's rows, then fails while writing B's occurrences.
+      const originalPrepare = db.prepare;
+      let failNext = true;
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (failNext && sql.includes('INSERT INTO event_instances')) {
+          statement.run = async () => { failNext = false; throw new Error('D1 write failed'); };
+        }
+        return statement;
+      };
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('D1 write failed');
+
+      const reverted = await repo.ingestSource('src_reorder');
+
+      expect(reverted.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
     it('does not skip after a failed write, so a half-finished ingest is retried in full', async () => {
       const { db } = setup();
       const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
