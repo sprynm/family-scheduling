@@ -5362,7 +5362,7 @@ describe('family-scheduling worker', () => {
     expect(googleUpdates).toHaveLength(2);
     expect(googleUpdates[1].body.description).toBe('Bring skates');
 
-    // Maybe on the last occurrence: "Maybe:" leads that title and it becomes tentative, nowhere else.
+    // Maybe on the last occurrence: ❓ leads that title and it becomes tentative, nowhere else.
     const maybeTarget = instances[2];
     await repo.createOverride({
       eventId: maybeTarget.canonical_event_id,
@@ -5377,19 +5377,19 @@ describe('family-scheduling worker', () => {
     const tentative = maybeBlocks.filter((block) => block.includes('STATUS:TENTATIVE'));
     expect(tentative).toHaveLength(1);
     expect(tentative[0]).toContain(`UID:${maybeTarget.id}@family-scheduling`);
-    expect(tentative[0]).toContain('SUMMARY:Maybe: G: 🏒 Hockey Practice');
+    expect(tentative[0]).toContain('SUMMARY:❓ G: 🏒 Hockey Practice');
     expect(maybeBlocks.filter((block) => block.includes('SUMMARY:G: 🏒 Hockey Practice'))).toHaveLength(2);
 
     const maybeLink = db.googleEventLinks.find((link) => link.event_instance_id === maybeTarget.id);
     expect(googleUpdates).toHaveLength(3);
     expect(googleUpdates[2].id).toBe(maybeLink.google_event_id);
-    expect(googleUpdates[2].body.summary).toBe('Maybe: G: 🏒 Hockey Practice');
+    expect(googleUpdates[2].body.summary).toBe('❓ G: 🏒 Hockey Practice');
     expect(googleUpdates[2].body.status).toBe('tentative');
 
     // Undo puts the title and status back on that occurrence.
     await repo.clearOverride(db.eventOverrides.find((row) => row.override_type === 'maybe').id);
     await drainQueue(env);
-    expect(await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 })).not.toContain('Maybe:');
+    expect(await repo.generateFeed({ target: 'family', calendarName: 'Family Combined', lookbackDays: 30 })).not.toContain('❓');
     expect(googleUpdates).toHaveLength(4);
     expect(googleUpdates[3].body.summary).toBe('G: 🏒 Hockey Practice');
     expect(googleUpdates[3].body.status).toBe('confirmed');

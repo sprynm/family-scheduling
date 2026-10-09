@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Full-bleed background so the icon also works as a maskable icon; content stays inside the central 80% safe zone. -->
+  <rect width="512" height="512" fill="#10171e"/>
+  <g transform="translate(256 256) scale(1.15) translate(-256 -256)">
+  <!-- Calendar page -->
+  <rect x="132" y="146" width="248" height="232" rx="28" fill="#edf2f6"/>
+  <!-- Header band -->
+  <path d="M160 146h192a28 28 0 0 1 28 28v34H132v-34a28 28 0 0 1 28-28z" fill="#aaa6f2"/>
+  <!-- Binder rings -->
+  <rect x="186" y="122" width="22" height="52" rx="11" fill="#edf2f6" stroke="#10171e" stroke-width="8"/>
+  <rect x="304" y="122" width="22" height="52" rx="11" fill="#edf2f6" stroke="#10171e" stroke-width="8"/>
+  <!-- One dot per person: Grayson, Naomi, Family -->
+  <circle cx="196" cy="290" r="26" fill="#1f5f99"/>
+  <circle cx="256" cy="290" r="26" fill="#2f7a1f"/>
+  <circle cx="316" cy="290" r="26" fill="#4b5967"/>
+  </g>
+</svg>

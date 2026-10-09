@@ -46,12 +46,12 @@ export function addNotesToDescription(description, notes) {
   return description ? noteText + '\n\n' + description : noteText;
 }
 
-// A "maybe" change marks one occurrence on the calendars: "Maybe:" leads the title (visible in every
+// A "maybe" change marks one occurrence on the calendars: a ❓ leads the title (visible in every
 // app, even in narrow month cells) and the status becomes tentative for apps that style it.
 export function applyMaybe({ summary, status }, maybe) {
   if (!maybe) return { summary, status };
   return {
-    summary: 'Maybe: ' + summary,
+    summary: '❓ ' + summary,
     status: status === 'cancelled' ? 'cancelled' : 'tentative',
   };
 }
