@@ -28,13 +28,15 @@ function getRetryDelaySchedule(env) {
     .filter((value) => Number.isFinite(value) && value > 0);
 }
 
+// Deliveries the queue allows per message: wrangler.jsonc queues.consumers[0].max_retries (4) + 1.
+// The Worker's budget is capped at this so its final attempt always runs the failure handling.
+const QUEUE_MAX_DELIVERIES = 5;
+
 function getMaxRetryAttempts(env) {
   const schedule = getRetryDelaySchedule(env);
   const configured = Number.parseInt(String(env.JOB_RETRY_MAX_ATTEMPTS || ''), 10);
-  if (Number.isFinite(configured) && configured > 0) {
-    return configured;
-  }
-  return schedule.length;
+  const budget = Number.isFinite(configured) && configured > 0 ? configured : schedule.length;
+  return Math.min(budget, QUEUE_MAX_DELIVERIES);
 }
 
 function getRetryJitterPct(env) {
@@ -662,7 +664,15 @@ export default {
             try {
               results.push(await repo.ingestSource(source.id, { forceRefresh: true }));
             } catch (error) {
-              failures.push({ sourceId: source.id, message: error instanceof Error ? error.message : String(error) });
+              const failureMessage = error instanceof Error ? error.message : String(error);
+              failures.push({ sourceId: source.id, message: failureMessage });
+              // Same rule as a source job: a pending upload that failed for good stops blocking its source.
+              if (error?.sourceUploadId) {
+                try {
+                  if (classifyQueueError(error).retryable) await repo.markSourceUploadError(error.sourceUploadId, failureMessage);
+                  else await repo.markSourceUploadFailed(error.sourceUploadId, failureMessage);
+                } catch {}
+              }
             }
           }
           summary = { sourcesProcessed: results.length, sourcesFailed: failures.length, results, failures };

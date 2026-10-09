@@ -3922,6 +3922,8 @@ export class D1Repository {
       await this.db.prepare(
         `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
       ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
+      // From here the upload is live; later failures (Google queueing) are not the upload's fault.
+      if (promoted.applied && options.context) options.context.uploadId = null;
     }
 
     const currentStateFingerprint = await this.computeSourceStateFingerprint(sourceId);

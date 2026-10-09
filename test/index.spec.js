@@ -3671,6 +3671,58 @@ describe('family-scheduling worker', () => {
       expect(uploadAfterFinal.status).toBe('failed');
     });
 
+    it('treats the fifth delivery as final even when the retry budget is configured higher', async () => {
+      env.JOB_RETRY_MAX_ATTEMPTS = '8';
+      try {
+        const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+        const sourceId = created.body.source.id;
+        const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+        env.SNAPSHOTS.objects.clear();
+        const message = { body: jobMessage, attempts: 5, ack: vi.fn(), retry: vi.fn() };
+
+        await worker.queue({ messages: [message] }, env);
+
+        expect(message.retry).not.toHaveBeenCalled();
+        expect(env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId).status).toBe('failed');
+      } finally {
+        delete env.JOB_RETRY_MAX_ATTEMPTS;
+      }
+    });
+
+    it('keeps an upload active when its events were written but Google queueing fails afterwards', async () => {
+      env.APP_DB.outputTargets.push({ id: 'outt_upload_google', target_type: 'google', slug: 'naomi_upload_clubs', display_name: 'Naomi Upload Clubs', calendar_id: 'naomi-upload@group.calendar.google.com', ownership_mode: 'managed_output', is_system: 0, is_active: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      const withGoogle = { ...metadata, include_in_child_google_output: true, target_links: [...metadata.target_links, { target_key: 'naomi_upload_clubs', icon: '⚽', prefix: 'N:' }] };
+      const created = await send(uploadRequest('/api/sources/upload', withGoogle, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      const [jobMessage] = env.JOBS_QUEUE.sent.splice(0);
+      const realSend = env.JOBS_QUEUE.send;
+      env.JOBS_QUEUE.send = vi.fn(async (body) => {
+        if (body.jobType === 'sync_google_target') throw new Error('Queue send failed');
+        return realSend(body);
+      });
+
+      await worker.queue({ messages: [{ body: jobMessage, attempts: 5, ack: vi.fn(), retry: vi.fn() }] }, env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('active');
+      expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer game-1']);
+    });
+
+    it('marks a permanently failing pending upload failed during a full rebuild', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      env.JOBS_QUEUE.sent.splice(0);
+      const blobKey = [...env.SNAPSHOTS.objects.keys()].find((key) => key.startsWith(`uploads/${sourceId}/`));
+      env.SNAPSHOTS.objects.set(blobKey, buildUploadIcs(['game-1']).replace(/DTSTART:\d{8}T\d{6}Z/, 'DTSTART:not-a-date'));
+      vi.stubGlobal('fetch', vi.fn(async () => new Response('not used', { status: 404 })));
+
+      const rebuild = await send(new Request('http://example.com/api/rebuild/full', { method: 'POST', headers: { 'x-user-role': 'admin' } }));
+      expect(rebuild.status).toBeLessThan(300);
+      await drainQueue(env);
+
+      expect(env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId).status).toBe('failed');
+    });
+
     it('does not record lock contention as an upload error', async () => {
       const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
       const sourceId = created.body.source.id;
