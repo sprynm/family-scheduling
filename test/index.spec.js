@@ -107,11 +107,17 @@ class FakeDb {
     return new FakeStatement(this, sql);
   }
 
-  // D1 runs a batch's statements in order (and rolls the batch back if one fails).
+  // D1 runs a batch's statements in order and rolls the whole batch back if one fails.
   async batch(statements) {
-    const results = [];
-    for (const statement of statements) results.push(await statement.run());
-    return results;
+    const saved = structuredClone(Object.fromEntries(Object.entries(this).filter(([, value]) => typeof value !== 'function')));
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      return results;
+    } catch (error) {
+      Object.assign(this, saved);
+      throw error;
+    }
   }
 
   run(sql, values) {
@@ -1004,6 +1010,15 @@ class FakeDb {
         }
       }
       return;
+    }
+
+    if (sql.includes('UPDATE sync_jobs') && sql.includes("last_error_kind = 'queue_send'")) {
+      // enqueueJob marks a job failed when its queue send throws.
+      const [finishedAt, errorJson, jobId] = values;
+      const job = this.syncJobs.find((row) => row.id === jobId && row.status === 'queued');
+      if (!job) return 0;
+      Object.assign(job, { status: 'failed', finished_at: finishedAt, error_json: errorJson, last_error_kind: 'queue_send' });
+      return 1;
     }
 
     if (sql.includes('UPDATE sync_jobs')) {
@@ -3975,19 +3990,56 @@ describe('family-scheduling worker', () => {
       expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
     });
 
+    it('restores events after disabling and re-enabling through a settings update', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      await repo.updateSource('src_reorder', { is_active: false });
+      await repo.updateSource('src_reorder', { is_active: true });
+
+      const afterReenable = await repo.ingestSource('src_reorder');
+
+      expect(afterReenable.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
+    it('retries the whole ingest when queueing Google sync fails after the writes', async () => {
+      const { db } = setup();
+      db.outputTargets.push({ id: 'outt_google_retry', target_type: 'google', slug: 'family_clubs', display_name: 'Family Clubs', calendar_id: 'family-clubs@group.calendar.google.com', ownership_mode: 'managed_output', is_system: 0, is_active: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      db.sourceTargetLinks.push({ id: 'stl_google_retry', source_id: 'src_reorder', target_id: 'outt_google_retry', target_key: 'family_clubs', target_type: 'google', icon: '', prefix: '', sort_order: 0, is_enabled: 1, created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z' });
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      const realSend = env.JOBS_QUEUE.send;
+      let failSync = true;
+      env.JOBS_QUEUE.send = vi.fn(async (message) => {
+        if (failSync && message.jobType === 'sync_google_target') { failSync = false; throw new Error('Queue send failed'); }
+        return realSend(message);
+      });
+
+      await expect(repo.ingestSource('src_reorder')).rejects.toThrow('Queue send failed');
+      const retry = await repo.ingestSource('src_reorder');
+
+      expect(retry.fetchState).toBe('changed');
+      expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
+    });
+
     it('does not skip after a failed write, so a half-finished ingest is retried in full', async () => {
       const { db } = setup();
       const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
       serve([body, body]);
       const repo = new D1Repository(db, env);
-      const originalBatch = db.batch.bind(db);
+      // One event-instance insert fails partway through its batch; D1 (and the fake) roll that batch back.
+      const originalPrepare = db.prepare;
       let failNext = true;
-      db.batch = async (statements) => {
-        if (failNext && statements.some((statement) => statement.sql.includes('INSERT INTO canonical_events'))) {
-          failNext = false;
-          throw new Error('D1 write failed');
+      db.prepare = (sql) => {
+        const statement = originalPrepare(sql);
+        if (failNext && sql.includes('INSERT INTO event_instances')) {
+          statement.run = async () => { failNext = false; throw new Error('D1 write failed'); };
         }
-        return originalBatch(statements);
+        return statement;
       };
 
       await expect(repo.ingestSource('src_reorder')).rejects.toThrow('D1 write failed');

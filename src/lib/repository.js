@@ -1531,6 +1531,11 @@ export class D1Repository {
     }
     const source = await this.getSourceById(sourceId);
     await this.syncSourceConfig(source);
+    // Settings changes rewrite or soft-delete stored rows outside ingest (deactivation, titles, targets,
+    // UID fallback). Forget the fingerprints so the next ingest re-checks in full instead of skipping.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
+    ).bind(sourceId).run();
     return source;
   }
 
@@ -3841,21 +3846,27 @@ export class D1Repository {
       await this.db.batch(statements.slice(i, i + INGEST_BATCH_SIZE));
     }
     await this.reapplyActiveOverridesForSource(sourceId);
-    // Only a completed write may let later ingests skip; a failed one leaves no fingerprint behind.
-    await this.db.prepare(
-      `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
-    ).bind(contentFingerprint, snapshotId).run();
+
+    // The stored rows now reflect this upload, so make it the active revision before anything else can
+    // fail: a later Google queue error must not leave a rejected upload's events live.
+    let promoted = null;
+    if (sourceUpload) {
+      promoted = await this.promoteSourceUpload(sourceId, sourceUpload.id);
+      await this.db.prepare(
+        `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
+      ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
+    }
+
     const currentStateFingerprint = await this.computeSourceStateFingerprint(sourceId);
     const dataChanged = previousStateFingerprint !== currentStateFingerprint;
-    const googleSync = dataChanged || (sourceUpload && sourceUpload.status === 'pending')
+    // Google sync is also owed when this content never completed an ingest: a failed attempt may have
+    // written the rows (so the state looks unchanged now) without ever queueing the Google jobs.
+    const syncOwed = contentFingerprint !== previousSnapshot?.content_fingerprint;
+    const googleSync = dataChanged || syncOwed || (sourceUpload && sourceUpload.status === 'pending')
       ? await this.enqueueGoogleSyncJobsForSource(sourceId, { mode: 'sync' })
       : { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 };
 
     if (sourceUpload) {
-      const promoted = await this.promoteSourceUpload(sourceId, sourceUpload.id);
-      await this.db.prepare(
-        `UPDATE source_snapshots SET parse_status = ?, parse_error_summary = ? WHERE id = ?`
-      ).bind(promoted.applied ? 'parsed' : 'stale_upload', promoted.applied ? null : 'A newer upload was accepted before this revision finished processing', snapshotId).run();
       if (!promoted.applied) {
         return {
           sourceId,
@@ -3871,6 +3882,12 @@ export class D1Repository {
         };
       }
     }
+
+    // Saved last: only a fully completed ingest (writes, upload promotion, Google sync queued) may let
+    // later ingests skip. Any failure above leaves no fingerprint, so the retry does it all again.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = ? WHERE id = ?`
+    ).bind(contentFingerprint, snapshotId).run();
 
     return {
       sourceId,
