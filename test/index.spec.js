@@ -4026,6 +4026,26 @@ describe('family-scheduling worker', () => {
       expect(env.JOBS_QUEUE.sent.some((message) => message.jobType === 'sync_google_target')).toBe(true);
     });
 
+    it('rewrites in full after a settings change that failed part-way through syncing rows', async () => {
+      const { db } = setup();
+      const body = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);
+      serve([body, body]);
+      const repo = new D1Repository(db, env);
+      await repo.ingestSource('src_reorder');
+      // Config sync soft-deletes the rows, then fails before finishing.
+      repo.syncSourceConfig = async () => {
+        await db.prepare(`UPDATE canonical_events SET source_deleted = 1, updated_at = ? WHERE source_id = ? AND source_deleted = 0`).bind(new Date().toISOString(), 'src_reorder').run();
+        throw new Error('config sync failed');
+      };
+      await expect(repo.updateSource('src_reorder', { display_name: 'Family Reorder (renamed)' })).rejects.toThrow('config sync failed');
+      delete repo.syncSourceConfig;
+
+      const next = await repo.ingestSource('src_reorder');
+
+      expect(next.fetchState).toBe('changed');
+      expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted)).map((row) => row.title)).toEqual(['Dentist']);
+    });
+
     it('rewrites in full when a feed reverts after a half-finished ingest of different content', async () => {
       const { db } = setup();
       const contentA = calendar([vevent('a', 'Dentist', 3, '20261008T010000Z')]);

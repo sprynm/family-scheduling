@@ -1488,6 +1488,12 @@ export class D1Repository {
       poll_interval_minutes: Number(input.poll_interval_minutes ?? (convertingUploadToUrl ? null : existing.poll_interval_minutes) ?? 30),
       quality_profile: input.quality_profile ?? existing.quality_profile,
     };
+    // Settings changes rewrite or soft-delete stored rows outside ingest (deactivation, titles, targets,
+    // UID fallback). Forget the fingerprints before the first mutation, so even a change that fails
+    // part-way makes the next ingest re-check in full instead of skipping.
+    await this.db.prepare(
+      `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
+    ).bind(sourceId).run();
     await this.db.prepare(
       `UPDATE sources
        SET name = ?, display_name = ?, provider_type = ?, owner_type = ?, source_category = ?, url = ?, icon = ?, prefix = ?,
@@ -1531,11 +1537,6 @@ export class D1Repository {
     }
     const source = await this.getSourceById(sourceId);
     await this.syncSourceConfig(source);
-    // Settings changes rewrite or soft-delete stored rows outside ingest (deactivation, titles, targets,
-    // UID fallback). Forget the fingerprints so the next ingest re-checks in full instead of skipping.
-    await this.db.prepare(
-      `UPDATE source_snapshots SET content_fingerprint = NULL WHERE source_id = ?`
-    ).bind(sourceId).run();
     return source;
   }
 
