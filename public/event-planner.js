@@ -73,7 +73,9 @@
     const allDay = isAllDay(startIso, endIso);
     const key = dayKey(start, allDay);
     const today = dayKey(new Date(), false);
-    const tomorrow = dayKey(new Date(Date.now() + DAY_MS), false);
+    const now = new Date();
+    // Calendar-day arithmetic: around daylight saving changes a day is 23 or 25 hours long.
+    const tomorrow = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1), false);
     const sameYear = start.getFullYear() === new Date().getFullYear();
     const dateText = allDay ? utcDayFormat.format(start) : (sameYear ? dayFormat : dayFormatWithYear).format(start);
     const day = key === today ? 'Today' : key === tomorrow ? 'Tomorrow' : dateText;
@@ -319,6 +321,8 @@
       renderPeople();
       renderTabs();
       listEl.setAttribute('aria-busy', String(state.loading));
+      // The fridge sheet is built from loaded events; printing before they arrive would print an empty week.
+      root.querySelector('[data-planner-print]').disabled = state.loading || Boolean(state.error);
       listEl.setAttribute('aria-labelledby', root.id + '-tab-' + state.tab);
       if (state.loading && !state.instances.length) {
         listEl.innerHTML = '<p class="planner-loading">Loading events…</p>';
@@ -337,9 +341,9 @@
 
     function printWeekHtml() {
       const today = new Date();
-      today.setHours(0, 0, 0, 0);
       const days = Array.from({ length: 7 }, (_, offset) => {
-        const date = new Date(today.getTime() + offset * DAY_MS);
+        // Calendar-day steps, not 24-hour ones, so a 25-hour fall-back day cannot repeat a date.
+        const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
         return { key: dayKey(date, false), date, items: [] };
       });
       const byKey = new Map(days.map((day) => [day.key, day]));
@@ -358,10 +362,13 @@
           notes: changes.filter((change) => change.override_type === 'note').map(noteOf).filter(Boolean),
         });
       }
+      // Roughly what fits on one page at the normal size; busier weeks switch to two compact columns.
+      const lineCount = days.reduce((sum, day) => sum + 2 + day.items.reduce((n, item) => n + 1 + item.notes.length, 0), 0);
+      printEl.classList.toggle('print-compact', lineCount > 40);
       const range = monthDayFormat.format(days[0].date) + ' – ' + monthDayFormat.format(days[6].date);
       const who = state.people.size ? listNames([...state.people]) : 'Everyone';
       return '<header class="print-head"><h1>Family week</h1><p>' + escapeHtml(range) + ' · ' + escapeHtml(who) + '</p></header>' +
-        days.map((day, index) => '<section class="print-day">' +
+        '<div class="print-days">' + days.map((day, index) => '<section class="print-day">' +
           '<h2>' + escapeHtml(index === 0 ? 'Today' : index === 1 ? 'Tomorrow' : weekdayFormat.format(day.date)) +
             ' <span>' + escapeHtml((index < 2 ? weekdayFormat.format(day.date) + ' ' : '') + monthDayFormat.format(day.date)) + '</span></h2>' +
           (day.items.length
@@ -373,7 +380,7 @@
                 '</span>' +
               '</li>').join('') + '</ul>'
             : '<p class="print-empty">Nothing scheduled</p>') +
-        '</section>').join('') +
+        '</section>').join('') + '</div>' +
         '<footer class="print-key">G Grayson · N Naomi · F Family · ❓ maybe</footer>';
     }
 

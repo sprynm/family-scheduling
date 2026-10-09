@@ -1130,6 +1130,12 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .print-note { display: block; font-weight: 400; font-style: italic; font-size: 10pt; color: #333; }
   .print-empty { color: #555; font-size: 10pt; }
   .print-key { margin-top: 6pt; font-size: 9pt; color: #333; }
+  /* Busy weeks: two columns at a smaller size so the sheet still fits one page. */
+  .planner-print.print-compact { font-size: 9pt; line-height: 1.25; }
+  .print-compact .print-days { column-count: 2; column-gap: 14pt; }
+  .print-compact .print-day { padding: 3pt 0; }
+  .print-compact .print-day h2 { font-size: 10.5pt; }
+  .print-compact .print-note { font-size: 8.5pt; }
   /* Darker person rings for paper. */
   .print-who[data-owner="grayson"] { --person: #1f5f99; }
   .print-who[data-owner="naomi"] { --person: #2f7a1f; }
