@@ -50,13 +50,6 @@ const statusEl = document.getElementById('status');
     const sourceTargetRulesEl = document.getElementById('source-target-rules');
     const sourcesBody = document.getElementById('sources-body');
 
-    // events / overrides
-    const eventSearchInput = document.getElementById('event-search');
-    const eventSourceFilter = document.getElementById('event-source-filter');
-    const eventOutputFilter = document.getElementById('event-output-filter');
-    const instResultsEl = document.getElementById('inst-results');
-    const modifiedEventsBody = document.getElementById('modified-events-body');
-
     // metrics
     const metricSources = document.getElementById('metric-sources');
     const metricEvents = document.getElementById('metric-events');
@@ -67,10 +60,6 @@ const statusEl = document.getElementById('status');
 
     const sourceRuleState = new Map();
     let sourceTitleRulesDirty = false;
-    let openDrawerInstId = null;
-    let openModifiedOverrideId = null;
-    let allInstances = [];
-    let activeOverrides = [];
     let autoRefreshTimer = null;
     let dashboardGeneration = 0;
     let renderedJobsHtml = null;
@@ -108,18 +97,6 @@ const statusEl = document.getElementById('status');
       ].join('.');
       if (!includeTime) return stamp;
       return stamp + ' ' + padDatePart(date.getHours()) + ':' + padDatePart(date.getMinutes());
-    }
-
-    function normalizeNote(value) {
-      return String(value || '').trim();
-    }
-
-    function buildDrawerContext({ instanceId = '', canonicalId = '', title = '', date = '' } = {}) {
-      return { instanceId, canonicalId, title, date };
-    }
-
-    function getOverridesForContext(overrides, instanceId) {
-      return (overrides || []).filter((override) => (instanceId ? (!override.event_instance_id || override.event_instance_id === instanceId) : !override.event_instance_id));
     }
 
     function buildIconOptions(currentIcon) {
@@ -707,24 +684,6 @@ const statusEl = document.getElementById('status');
           sourceGoogleOutputsEl.innerHTML = '';
         }
 
-        // populate source filter (Modify Events)
-        const prevSource = eventSourceFilter.value;
-        eventSourceFilter.innerHTML = '<option value="">— pick a source —</option>' +
-          sources.map((s) => '<option value="' + (s.id || '') + '"' + (s.id === prevSource ? ' selected' : '') + '>' + (s.display_name || s.name || '') + ' (' + (s.owner_type || '') + ')</option>').join('');
-
-        // populate event output filter
-        const allOutputKeys = [...new Set(outputs.map((target) => target.slug || target.target_key || '').filter(Boolean))];
-        eventOutputFilter.innerHTML = '<option value="">All outputs</option>' +
-          allOutputKeys.map((slug) => {
-            const output = outputs.find((target) => (target.slug || target.target_key) === slug);
-            const label = output ? (output.display_name || slug) : slug;
-            return '<option value="' + slug + '">' + label + '</option>';
-          }).join('');
-
-        // load modified events table
-        await loadModifiedEvents();
-        if (generation !== dashboardGeneration) return;
-
         syncTargetRuleInputs();
 
         renderSources(sources);
@@ -821,231 +780,6 @@ const statusEl = document.getElementById('status');
       }
     }
 
-    // --- Instance list & overrides ---
-
-    async function loadInstances() {
-      const sourceId = eventSourceFilter.value;
-      const outputKey = eventOutputFilter.value;
-      if (!sourceId && !outputKey) {
-        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Pick a source to see its upcoming events.</p>';
-        allInstances = [];
-        return;
-      }
-      instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">Loading...</p>';
-      openDrawerInstId = null;
-      try {
-        let url = '/api/instances?future=1&limit=200';
-        if (sourceId) url += '&source=' + encodeURIComponent(sourceId);
-        if (outputKey) url += '&output=' + encodeURIComponent(outputKey);
-        const payload = await fetchJson(url);
-        allInstances = payload.instances || [];
-        renderInstances();
-      } catch (err) {
-        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0;color:#a00">Failed to load instances.</p>';
-      }
-    }
-
-    function renderInstances() {
-      const query = eventSearchInput.value.trim().toLowerCase();
-      let rows = allInstances;
-      if (query) rows = rows.filter((i) => (i.title || '').toLowerCase().includes(query));
-      if (!rows.length) {
-        instResultsEl.innerHTML = '<p class="hint" style="padding:8px 0">No upcoming events found.</p>';
-        return;
-      }
-      instResultsEl.innerHTML = rows.slice(0, 100).map((inst) => {
-        const dt = formatUiDate(inst.occurrence_start_at, { includeTime: true });
-        const meta = (inst.owner_type || '') + ' · ' + (inst.source_name || '');
-        return '<div class="inst-row' + (inst.id === openDrawerInstId ? ' open' : '') + '" data-inst-id="' + (inst.id || '') + '" data-canonical-id="' + (inst.canonical_event_id || '') + '" data-title="' + (inst.title || '').replace(/"/g, '&quot;') + '" data-date="' + dt.replace(/"/g, '&quot;') + '" data-meta="' + meta.replace(/"/g, '&quot;') + '">' +
-          '<span class="inst-row-date">' + dt + '</span>' +
-          '<span class="inst-row-title">' + (inst.title || '') + '</span>' +
-          '<span class="inst-row-meta">' + meta + '</span>' +
-          '</div>' +
-          (inst.id === openDrawerInstId ? '<div class="inst-drawer" id="drawer-' + inst.id + '"><p class="hint">Loading...</p></div>' : '');
-      }).join('');
-
-      instResultsEl.querySelectorAll('.inst-row').forEach((row) => {
-        row.addEventListener('click', () => {
-          const id = row.getAttribute('data-inst-id');
-          const canonicalId = row.getAttribute('data-canonical-id');
-          const title = row.getAttribute('data-title');
-          const date = row.getAttribute('data-date');
-          const meta = row.getAttribute('data-meta');
-          if (openDrawerInstId === id) {
-            openDrawerInstId = null;
-            renderInstances();
-          } else {
-            openDrawerInstId = id;
-            renderInstances(); // loads drawer content at the end
-          }
-        });
-      });
-
-      if (openDrawerInstId) {
-        const drawerEl = document.getElementById('drawer-' + openDrawerInstId);
-        const inst = allInstances.find((i) => i.id === openDrawerInstId);
-        if (drawerEl) {
-          loadDrawerContent(buildDrawerContext({
-            instanceId: openDrawerInstId,
-            canonicalId: inst?.canonical_event_id || '',
-            title: inst?.title || '',
-            date: formatUiDate(inst?.occurrence_start_at, { includeTime: true }),
-          }), drawerEl);
-        }
-      }
-    }
-
-    async function loadDrawerContent(context, drawerEl) {
-      const instanceId = context?.instanceId || '';
-      let canonicalId = context?.canonicalId || '';
-      let title = context?.title || '';
-      let date = context?.date || '';
-      if (!canonicalId && instanceId) {
-        const inst = allInstances.find((i) => i.id === instanceId);
-        if (inst) {
-          canonicalId = inst.canonical_event_id;
-          title = inst.title;
-          date = formatUiDate(inst.occurrence_start_at, { includeTime: true });
-        }
-      }
-      if (!canonicalId) {
-        drawerEl.innerHTML = '<p class="hint" style="color:#a00">Event detail is unavailable.</p>';
-        return;
-      }
-      try {
-        const eventPayload = await fetchJson('/api/events/' + encodeURIComponent(canonicalId));
-        const overrides = getOverridesForContext(eventPayload.overrides || [], instanceId)
-          .map((ov) => ({ ...ov, payload: typeof ov.payload_json === 'string' ? JSON.parse(ov.payload_json || '{}') : (ov.payload_json || {}) }));
-        drawerEl.innerHTML =
-          '<h4>' + (title || 'Event') + ' <span class="hint" style="font-weight:400">' + (date || '') + '</span></h4>' +
-          '<form class="override-form" data-canonical-id="' + (canonicalId || '') + '" data-instance-id="' + instanceId + '">' +
-          '<div class="field-group"><span class="field-label">Override type</span>' +
-          '<select name="override-type">' +
-          '<option value="skip">Skip — remove from all outputs</option>' +
-          '<option value="hidden">Hidden — suppress from a specific output</option>' +
-          '<option value="maybe">Maybe — flag as uncertain</option>' +
-          '<option value="note">Note — attach context only</option>' +
-          '</select></div>' +
-          '<div class="field-group"><span class="field-label">Note (optional)</span><input type="text" name="override-note" placeholder="e.g. Can&#39;t make it this week" /></div>' +
-          '<div class="field-group" style="justify-content:flex-end"><span class="field-label">&nbsp;</span><button class="primary" type="submit">Apply</button></div>' +
-          '</form>' +
-          (overrides.length ? '<div class="override-list">' + overrides.map((ov) =>
-            '<div class="override-item" data-override-id="' + (ov.id || '') + '">' +
-            '<div class="override-item-info"><strong>' + (ov.override_type || '') + '</strong>' +
-            (ov.payload?.note ? ' — ' + ov.payload.note : '') +
-            '<div class="override-item-meta">' + (ov.event_instance_id ? 'This instance' : 'All instances') + ' · by ' + (ov.created_by || '') + '</div></div>' +
-            '<button class="danger remove-override" data-override-id="' + (ov.id || '') + '">Remove</button>' +
-            '</div>'
-          ).join('') + '</div>' : '');
-
-        const form = drawerEl.querySelector('form');
-        form.addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const btn = form.querySelector('button[type="submit"]');
-          btn.disabled = true;
-          try {
-            await fetchJson('/api/events/' + encodeURIComponent(canonicalId) + '/overrides', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                overrideType: form.querySelector('[name="override-type"]').value,
-                eventInstanceId: instanceId || undefined,
-                payload: form.querySelector('[name="override-note"]').value ? { note: form.querySelector('[name="override-note"]').value } : {},
-              }),
-            });
-            setStatus('Override applied.', false);
-            await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
-            await loadModifiedEvents();
-            renderInstances();
-          } catch (err) {
-            setStatus('Override failed: ' + (err.message || String(err)), true);
-            btn.disabled = false;
-          }
-        });
-
-        drawerEl.querySelectorAll('.remove-override').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const id = btn.getAttribute('data-override-id');
-            if (!id) return;
-            btn.disabled = true;
-            try {
-              await fetchJson('/api/overrides/' + encodeURIComponent(id), { method: 'DELETE' });
-              setStatus('Override removed.', false);
-              await loadDrawerContent(buildDrawerContext({ instanceId, canonicalId, title, date }), drawerEl);
-              await loadModifiedEvents();
-              renderInstances();
-            } catch (err) {
-              setStatus('Remove failed: ' + (err.message || String(err)), true);
-              btn.disabled = false;
-            }
-          });
-        });
-      } catch (err) {
-        drawerEl.innerHTML = '<p class="hint" style="color:#a00">Failed to load event detail.</p>';
-      }
-    }
-
-    function renderModifiedEvents() {
-      if (!activeOverrides.length) {
-        modifiedEventsBody.innerHTML = '<p class="hint" style="padding:8px 0">No future events with modifications.</p>';
-        return;
-      }
-
-      // Toggling drawers stays client-side; only real override mutations refetch /api/overrides.
-      modifiedEventsBody.innerHTML = activeOverrides.map((ov) => {
-        const eventDt = formatUiDate(ov.event_date, { includeTime: true });
-        const meta = [ov.owner_type || '', ov.source_name || '', normalizeNote(ov.payload?.note)].filter(Boolean).join(' · ');
-        const isOpen = ov.id === openModifiedOverrideId;
-        return '<div class="modified-item' + (isOpen ? ' open' : '') + '" data-override-id="' + escapeHtml(ov.id || '') + '">' +
-          '<div class="modified-item-main">' +
-          '<div class="modified-item-date">' + escapeHtml(eventDt) + '</div>' +
-          '<div class="modified-item-title">' + escapeHtml(ov.title || '') + '</div>' +
-          '<span class="status-pill status-pill-' + escapeHtml(ov.override_type || '') + '">' + escapeHtml(ov.override_type || '') + '</span>' +
-          '</div>' +
-          '<div class="modified-item-meta">' + escapeHtml(meta) + '</div>' +
-          (isOpen
-            ? '<div class="modified-item-drawer"><div class="inst-drawer" id="modified-drawer-' + escapeHtml(ov.id || '') + '"><p class="hint">Loading...</p></div></div>'
-            : '') +
-          '</div>';
-      }).join('');
-
-      modifiedEventsBody.querySelectorAll('.modified-item').forEach((item) => {
-        item.addEventListener('click', () => {
-          const overrideId = item.getAttribute('data-override-id');
-          if (!overrideId) return;
-          openModifiedOverrideId = openModifiedOverrideId === overrideId ? null : overrideId;
-          renderModifiedEvents();
-        });
-      });
-
-      if (openModifiedOverrideId) {
-        const override = activeOverrides.find((ov) => ov.id === openModifiedOverrideId);
-        const drawerEl = document.getElementById('modified-drawer-' + openModifiedOverrideId);
-        if (override && drawerEl) {
-          drawerEl.addEventListener('click', (event) => event.stopPropagation());
-          loadDrawerContent(buildDrawerContext({
-            instanceId: override.event_instance_id || '',
-            canonicalId: override.canonical_event_id || '',
-            title: override.title || '',
-            date: formatUiDate(override.event_date, { includeTime: true }),
-          }), drawerEl);
-        }
-      }
-    }
-
-    async function loadModifiedEvents() {
-      try {
-        const payload = await fetchJson('/api/overrides');
-        activeOverrides = payload.overrides || [];
-        renderModifiedEvents();
-      } catch (err) {
-        // non-fatal, modified events table is secondary
-      }
-    }
-
-    eventSourceFilter.addEventListener('change', loadInstances);
-    eventOutputFilter.addEventListener('change', loadInstances);
-    eventSearchInput.addEventListener('input', renderInstances);
 
     // --- Source form ---
     sourceIcsOutputsEl.addEventListener('change', syncTargetRuleInputs);

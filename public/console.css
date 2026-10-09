@@ -551,95 +551,6 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 [style*="color:#4b5563"],
 [style*="color:#aaa"] { color: var(--muted) !important; }
 
-/* ---------- events (rendered by admin.js) ---------- */
-
-.inst-results { display: grid; gap: 0.35rem; }
-.inst-results > .hint,
-.modified-events-list > .hint { padding: 1rem 0; }
-
-.inst-row {
-  display: grid;
-  grid-template-columns: 10rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 1rem;
-  min-height: 3rem;
-  padding: 0.6rem 1rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  cursor: pointer;
-}
-.inst-row:hover { border-color: var(--line-strong); }
-.inst-row.open { border-color: var(--result); border-bottom-left-radius: 0; border-bottom-right-radius: 0; background: var(--raised); }
-.inst-row-date { font-family: var(--mono); font-size: 0.875rem; color: var(--muted); white-space: nowrap; }
-.inst-row-title { font-weight: 600; }
-.inst-row-meta { font-size: 0.875rem; color: var(--muted); white-space: nowrap; }
-
-.inst-drawer {
-  margin-top: -0.35rem;
-  margin-bottom: 0.5rem;
-  padding: 1rem 1.25rem 1.25rem;
-  border: 1px solid var(--result);
-  border-top: 0;
-  border-radius: 0 0 var(--radius) var(--radius);
-  background: var(--raised);
-  cursor: default;
-}
-.inst-drawer h4 { font-size: 1.0625rem; margin-bottom: 0.9rem; }
-.inst-drawer .override-form { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: flex-end; }
-.inst-drawer .override-form .field-group { flex: 1 1 14rem; }
-.inst-drawer .override-form .field-group:last-child { flex: 0 0 auto; }
-.inst-drawer .override-form .field-group:last-child .field-label { display: none; }
-.inst-drawer .override-list { display: grid; gap: 0.5rem; margin-top: 1rem; }
-.inst-drawer .override-item {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.6rem 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.inst-drawer .override-item-info { flex: 1; }
-.inst-drawer .override-item-meta { font-size: 0.875rem; color: var(--muted); }
-
-.modified-events-list { display: grid; gap: 0.5rem; margin-top: 0.75rem; }
-.modified-item {
-  display: grid;
-  gap: 0.25rem;
-  padding: 0.75rem 1rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  cursor: pointer;
-}
-.modified-item:hover { border-color: var(--line-strong); }
-.modified-item.open { border-color: var(--result); background: var(--raised); }
-.modified-item-main { display: grid; grid-template-columns: 10rem minmax(0, 1fr) auto; align-items: center; gap: 1rem; }
-.modified-item-date { font-family: var(--mono); font-size: 0.875rem; color: var(--muted); }
-.modified-item-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.modified-item-meta { font-size: 0.875rem; color: var(--muted); }
-.modified-item-drawer { margin-top: 0.5rem; cursor: default; }
-.modified-item-drawer .inst-drawer { margin: 0; border-top: 1px solid var(--result); border-radius: var(--radius); }
-
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.1rem 0.6rem;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 0.8125rem;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.status-pill-skip { color: var(--danger); }
-.status-pill-hidden { color: var(--warn); }
-.status-pill-maybe { color: var(--result); }
-.status-pill-note { color: var(--success); }
-
-.inst-row:focus-visible,
-.modified-item:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-
 .job-status { margin-bottom: 1rem; }
 .jobs-table td:last-child .hint { margin-top: 0.25rem; max-width: 40rem; white-space: normal; }
 
@@ -664,13 +575,10 @@ td .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .workspace-actions button { flex: 1; }
   .view { padding-top: 1.25rem; }
   .panel, .form-section { padding: 1rem; }
-  .inst-row, .modified-item-main { grid-template-columns: 1fr; gap: 0.25rem; }
-  .inst-row-meta { white-space: normal; }
-  .inst-drawer .override-item { flex-direction: column; align-items: flex-start; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .nav-link, .tab, button, .checkbox-wrap label, .inst-row, .modified-item {
+  .nav-link, .tab, button, .checkbox-wrap label {
     transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
   }
 }
