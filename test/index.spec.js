@@ -1209,6 +1209,13 @@ class FakeDb {
       }
       return changes;
     }
+    if (sql.includes("SET status = 'failed', last_error = ?")) {
+      const [message, uploadId] = values;
+      const upload = this.sourceUploads.find((row) => row.id === uploadId && row.status === 'pending');
+      if (!upload) return 0;
+      Object.assign(upload, { status: 'failed', last_error: message });
+      return 1;
+    }
     if (sql.includes('UPDATE source_uploads SET last_error = ?')) {
       const [message, uploadId] = values;
       const upload = this.sourceUploads.find((row) => row.id === uploadId && row.status === 'pending');
@@ -3611,6 +3618,64 @@ describe('family-scheduling worker', () => {
       expect(env.JOBS_QUEUE.sent).toHaveLength(0);
     });
 
+    it('marks a permanently failing upload failed so the URL source polls its URL again', async () => {
+      const urlIcs = buildUploadIcs(['url-game']);
+      vi.stubGlobal('fetch', vi.fn(async (url) => {
+        if (String(url) === 'https://example.com/naomi-soccer.ics') return new Response(urlIcs, { status: 200 });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }));
+      const created = await send(new Request('http://example.com/api/sources', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-user-role': 'admin' },
+        body: JSON.stringify({ ...metadata, url: 'https://example.com/naomi-soccer.ics' }),
+      }));
+      const sourceId = created.body.source.id;
+      const staged = await send(uploadRequest(`/api/sources/${sourceId}/upload`, metadata, buildUploadIcs(['upload-game'])));
+      expect(staged.status).toBe(202);
+      // The stored file goes bad before the job runs: a permanent, non-retryable processing error.
+      const blobKey = [...env.SNAPSHOTS.objects.keys()].find((key) => key.startsWith(`uploads/${sourceId}/`));
+      env.SNAPSHOTS.objects.set(blobKey, buildUploadIcs(['upload-game']).replace(/DTSTART:\d{8}T\d{6}Z/, 'DTSTART:not-a-date'));
+
+      await drainQueue(env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('failed');
+      expect(upload.last_error).toMatch(/invalid DTSTART/);
+      const repo = new D1Repository(env.APP_DB, env);
+      const next = await repo.ingestSource(sourceId);
+      expect(next.fetchState).toBe('changed');
+      expect(liveEvents(sourceId).map((row) => row.title)).toEqual(['Soccer url-game']);
+    });
+
+    it('does not record lock contention as an upload error', async () => {
+      const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
+      const sourceId = created.body.source.id;
+      env.APP_DB.sourceIngestLocks.push({
+        source_id: sourceId,
+        lock_token: 'held-by-another-ingest',
+        expires_at: new Date(Date.now() + 60 * 1000).toISOString(),
+      });
+
+      await drainQueue(env);
+
+      const upload = env.APP_DB.sourceUploads.find((row) => row.source_id === sourceId);
+      expect(upload.status).toBe('pending');
+      expect(upload.last_error).toBeNull();
+    });
+
+    it('applies its own event limit to uploads instead of the snapshot cap', async () => {
+      env.ICS_UPLOAD_MAX_EVENTS = '1';
+      env.SNAPSHOTS_MAX_RECORDS = '5000';
+      try {
+        const rejected = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1', 'game-2'])));
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.message).toMatch(/more than 1 events/);
+      } finally {
+        delete env.ICS_UPLOAD_MAX_EVENTS;
+        delete env.SNAPSHOTS_MAX_RECORDS;
+      }
+    });
+
     it('returns 503 instead of editing a source while its ingest lock is held', async () => {
       const created = await send(uploadRequest('/api/sources/upload', metadata, buildUploadIcs(['game-1'])));
       const sourceId = created.body.source.id;
@@ -4146,6 +4211,42 @@ describe('family-scheduling worker', () => {
       expect(retry.fetchState).toBe('changed');
       expect(db.canonicalEvents.filter((row) => !Number(row.source_deleted))).toHaveLength(1);
     });
+  });
+
+  it('keeps rebuilding the other sources when one source fails during a full rebuild', async () => {
+    env.SEED_SAMPLE_DATA = 'false';
+    const db = new FakeDb();
+    env.APP_DB = db;
+    const base = {
+      provider_type: 'ics', owner_type: 'family', source_category: 'shared', icon: '', prefix: '', fetch_url_secret_ref: null,
+      include_in_child_ics: 0, include_in_family_ics: 1, include_in_child_google_output: 0, is_active: 1, sort_order: 0,
+      poll_interval_minutes: 30, quality_profile: 'standard', created_at: '2026-03-03T00:00:00.000Z', updated_at: '2026-03-03T00:00:00.000Z',
+    };
+    db.sources.push(
+      { ...base, id: 'src_broken', name: 'a-broken', display_name: 'Broken', url: 'https://example.com/broken.ics' },
+      { ...base, id: 'src_healthy', name: 'b-healthy', display_name: 'Healthy', url: 'https://example.com/healthy.ics' }
+    );
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url) === 'https://example.com/broken.ics') return new Response('upstream down', { status: 503 });
+      if (String(url) === 'https://example.com/healthy.ics') {
+        return new Response(['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:healthy-1', 'SUMMARY:Library day', 'DTSTART:20990310T170000Z', 'DTEND:20990310T180000Z', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n'), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }));
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(new Request('http://example.com/api/rebuild/full', { method: 'POST', headers: { 'x-user-role': 'admin' } }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(response.status).toBeLessThan(300);
+    await drainQueue(env);
+
+    const job = db.syncJobs.find((row) => row.job_type === 'rebuild_system');
+    expect(job.status).toBe('completed');
+    const summary = JSON.parse(job.summary_json);
+    expect(summary.sourcesProcessed).toBe(1);
+    expect(summary.sourcesFailed).toBe(1);
+    expect(summary.failures[0].sourceId).toBe('src_broken');
+    expect(db.canonicalEvents.some((row) => row.source_id === 'src_healthy' && row.title === 'Library day')).toBe(true);
   });
 
   it('does not rewrite already-deleted events on every ingest', async () => {

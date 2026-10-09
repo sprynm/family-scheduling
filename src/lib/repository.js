@@ -1214,7 +1214,7 @@ export class D1Repository {
   }
 
   async getLatestSourceUpload(sourceId, statuses = ['pending', 'active']) {
-    const allowedStatuses = Array.isArray(statuses) ? statuses.filter((status) => ['pending', 'active', 'superseded'].includes(status)) : [];
+    const allowedStatuses = Array.isArray(statuses) ? statuses.filter((status) => ['pending', 'active', 'superseded', 'failed'].includes(status)) : [];
     if (!allowedStatuses.length) return null;
     const placeholders = allowedStatuses.map(() => '?').join(', ');
     const row = await this.db.prepare(
@@ -1427,6 +1427,15 @@ export class D1Repository {
     const changes = Number(results?.[0]?.meta?.changes || 0);
     const currentUpload = await this.getSourceUploadById(uploadId);
     return { applied: changes > 0 || currentUpload?.status === 'active', upload: currentUpload };
+  }
+
+  // A pending upload whose ingest failed for good stops being picked up, so a URL source goes back
+  // to polling its URL and an uploaded source keeps serving its last good file.
+  async markSourceUploadFailed(uploadId, error) {
+    const message = String(error || 'Upload processing failed').slice(0, 1000);
+    await this.db.prepare(
+      `UPDATE source_uploads SET status = 'failed', last_error = ? WHERE id = ? AND status = 'pending'`
+    ).bind(message, uploadId).run();
   }
 
   async markSourceUploadError(uploadId, error) {
@@ -3431,6 +3440,7 @@ export class D1Repository {
         googleSync: { mode: 'sync', queued_jobs: 0, queued_targets: 0, deduped_jobs: 0 },
       };
     }
+    if (sourceUpload?.status === 'pending' && options.context) options.context.uploadId = sourceUpload.id;
     const sourceUrl = sourceUpload ? null : ensureHttpsUrl(source.url);
     const fetchedAt = nowIso();
     const previousSnapshot = await this.getLatestCompletedSnapshot(sourceId);
@@ -3443,7 +3453,7 @@ export class D1Repository {
     const lookbackDays = parseInt(this.env.DEFAULT_LOOKBACK_DAYS || '7', 10);
     const pastRetentionDays = parsePositiveInt(this.env.INGEST_PAST_RETENTION_DAYS, parsePositiveInt(this.env.PRUNE_AFTER_DAYS, 30));
     const pastCutoffIso = new Date(Date.now() - pastRetentionDays * 24 * 60 * 60 * 1000).toISOString();
-    const maxUploadInstances = parsePositiveInt(this.env.SNAPSHOTS_MAX_RECORDS, 5000);
+    const maxUploadInstances = parsePositiveInt(this.env.ICS_UPLOAD_MAX_INSTANCES, 5000);
 
     const stagedEvents = [];
     let totalEvents = 0;
@@ -3962,7 +3972,15 @@ export class D1Repository {
 
   async ingestSource(sourceId, options = {}) {
     if (!(await this.getSourceById(sourceId))) throw new Error(`Unknown source: ${sourceId}`);
-    return this.withSourceIngestLock(sourceId, () => this.processSourceIngest(sourceId, options));
+    // Errors raised while processing a pending upload carry its id, so only real upload failures
+    // (not lock contention or unrelated fetch errors) are recorded against the upload.
+    const context = { uploadId: null };
+    try {
+      return await this.withSourceIngestLock(sourceId, () => this.processSourceIngest(sourceId, { ...options, context }));
+    } catch (error) {
+      if (context.uploadId && error && typeof error === 'object') error.sourceUploadId = context.uploadId;
+      throw error;
+    }
   }
 }
 
